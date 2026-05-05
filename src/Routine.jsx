@@ -2419,7 +2419,9 @@ const LogScreen = ({ allData, config }) => {
         let s = 0;
         const d = new Date();
         const todayK = todayKey(d);
-        if (!allData[todayK] || dayLevel(allData[todayK]) < 2) d.setDate(d.getDate() - 1);
+        // Count today immediately on first logged action; past days still require ≥2.
+        if (allData[todayK] && dayLevel(allData[todayK]) >= 1) s = 1;
+        d.setDate(d.getDate() - 1);
         // Walk back through history; cap is a sanity bound only (~13.7 years).
         let safety = 0;
         while (safety < 5000) {
@@ -3299,11 +3301,10 @@ export default function RoutineApp({ darkMode = false, onTabChange }) {
         };
         let s = 0;
         const d = new Date();
-        // If today has no record yet, start counting from yesterday so streak doesn't show 0
         const todayK = todayKey(d);
-        if (!allData[todayK] || dayLevel(allData[todayK]) < 2) {
-            d.setDate(d.getDate() - 1);
-        }
+        // Count today immediately on first logged action; past days still require ≥2.
+        if (allData[todayK] && dayLevel(allData[todayK]) >= 1) s = 1;
+        d.setDate(d.getDate() - 1);
         // Walk back through history; cap is a sanity bound only (~13.7 years).
         let safety = 0;
         while (safety < 5000) {
