@@ -1,7 +1,9 @@
 const QUEUE_KEY = "nomad-sync-queue-v1";
+const DEAD_LETTER_KEY = "nomad-sync-failed-v1";
 const REQUEST_TIMEOUT_MS = 15000;
 const FLUSH_BACKOFF_BASE_MS = 1000;
 const FLUSH_BACKOFF_MAX_MS = 60000;
+const MAX_ITEM_RETRIES = 3;
 
 const listeners = new Set();
 const dropListeners = new Set();
@@ -36,6 +38,31 @@ const safeSetItem = (key, value) => {
   }
 };
 
+// Merge two JSON bodies for upsert deduplication. New fields win; fields
+// present only in the earlier write are preserved so partial edits survive.
+const mergeUpsertBodies = (prevBody, nextBody) => {
+  if (!prevBody || !nextBody) return nextBody;
+  try {
+    const a = JSON.parse(prevBody);
+    const b = JSON.parse(nextBody);
+    if (Array.isArray(a) && Array.isArray(b)) {
+      const merged = a.map(row => ({ ...row }));
+      b.forEach(newRow => {
+        const idx = newRow.id != null ? merged.findIndex(r => r.id === newRow.id) : -1;
+        if (idx >= 0) merged[idx] = { ...merged[idx], ...newRow };
+        else merged.push(newRow);
+      });
+      return JSON.stringify(merged);
+    }
+    if (a && b && typeof a === "object" && typeof b === "object") {
+      return JSON.stringify({ ...a, ...b });
+    }
+    return nextBody;
+  } catch {
+    return nextBody;
+  }
+};
+
 const readQueue = () => {
   if (!canUseStorage()) return [];
   return safeJsonParse(localStorage.getItem(QUEUE_KEY) || "[]", []);
@@ -48,6 +75,17 @@ const writeQueue = (queue) => {
 };
 
 export const getPendingSyncCount = () => readQueue().length;
+
+const readDeadLetter = () => {
+  if (!canUseStorage()) return [];
+  return safeJsonParse(localStorage.getItem(DEAD_LETTER_KEY) || "[]", []);
+};
+
+export const getDeadLetterCount = () => readDeadLetter().length;
+
+export const clearDeadLetter = () => {
+  if (canUseStorage()) localStorage.removeItem(DEAD_LETTER_KEY);
+};
 
 export const subscribePendingSync = (listener) => {
   listeners.add(listener);
@@ -70,14 +108,19 @@ const buildQueueItem = ({ path, method = "GET", headers = {}, body = null, dedup
   body,
   dedupeKey,
   createdAt: new Date().toISOString(),
+  _retries: 0,
 });
 
 const enqueueRequest = (item) => {
   const queue = readQueue();
-  const next = item.dedupeKey
-    ? [...queue.filter((queued) => queued.dedupeKey !== item.dedupeKey), item]
-    : [...queue, item];
-  writeQueue(next);
+  if (item.dedupeKey) {
+    const existing = queue.find((q) => q.dedupeKey === item.dedupeKey);
+    const mergedBody = existing ? mergeUpsertBodies(existing.body, item.body) : item.body;
+    const merged = mergedBody !== item.body ? { ...item, body: mergedBody } : item;
+    writeQueue([...queue.filter((q) => q.dedupeKey !== item.dedupeKey), merged]);
+    return merged;
+  }
+  writeQueue([...queue, item]);
   return item;
 };
 
@@ -165,10 +208,18 @@ export const flushSyncQueue = async () => {
         continue;
       }
 
-      // Server-side problem: keep this and the rest, stop flushing.
+      // Server-side problem: track per-item retries; continue to subsequent items.
       if (response.status >= 500) {
-        remaining.push(item, ...queue.slice(index + 1));
-        break;
+        const retries = (item._retries || 0) + 1;
+        if (retries >= MAX_ITEM_RETRIES) {
+          const dead = readDeadLetter();
+          safeSetItem(DEAD_LETTER_KEY, JSON.stringify([...dead, { ...item, _retries: retries }]));
+          notifyDrops({ kind: "dead-letter", status: response.status, item });
+          progressedDuringFlush = true;
+        } else {
+          remaining.push({ ...item, _retries: retries });
+        }
+        continue;
       }
 
       // Definitive client-side reject (4xx) OR opaque/CORS (status: 0).

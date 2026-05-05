@@ -118,6 +118,23 @@ describe('queueSupabaseRequest', () => {
     queueSupabaseRequest(makeItem({ dedupeKey: 'key-b' }));
     expect(getPendingSyncCount()).toBe(2);
   });
+
+  it('merges bodies on dedup: fields from first write that second omits are preserved', async () => {
+    const { queueSupabaseRequest } = await import('../offlineSync.js');
+    // First write has amount + note; second edit only changes amount
+    queueSupabaseRequest(makeItem({
+      dedupeKey: 'expenses:upsert:1',
+      body: JSON.stringify([{ id: '1', amount: 100, note: 'coffee' }]),
+    }));
+    queueSupabaseRequest(makeItem({
+      dedupeKey: 'expenses:upsert:1',
+      body: JSON.stringify([{ id: '1', amount: 200 }]),
+    }));
+    const raw = JSON.parse(localStorage.getItem(QUEUE_KEY));
+    const row = JSON.parse(raw[0].body)[0];
+    expect(row.amount).toBe(200);  // new field wins
+    expect(row.note).toBe('coffee'); // old field preserved
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -242,19 +259,34 @@ describe('flushSyncQueue', () => {
     expect(getPendingSyncCount()).toBe(0);
   });
 
-  it('stops processing and retains remaining on 5xx error', async () => {
-    const { flushSyncQueue, queueSupabaseRequest, getPendingSyncCount } = await import('../offlineSync.js');
+  it('retains 5xx item in queue but continues processing subsequent items', async () => {
+    const { flushSyncQueue, queueSupabaseRequest } = await import('../offlineSync.js');
     queueSupabaseRequest(makeItem({ path: '/first' }));
     queueSupabaseRequest(makeItem({ path: '/second' }));
     queueSupabaseRequest(makeItem({ path: '/third' }));
 
-    global.fetch = vi.fn()
-      .mockResolvedValueOnce({ ok: true })          // first succeeds
-      .mockResolvedValueOnce({ ok: false, status: 503 }); // second fails with 5xx
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({ ok: true })               // first succeeds
+      .mockResolvedValueOnce({ ok: false, status: 503 }) // second: 5xx → stays (retry 1)
+      .mockResolvedValueOnce({ ok: true }));             // third succeeds (still attempted)
 
     const result = await flushSyncQueue();
-    expect(result.synced).toBe(1);
-    expect(result.pending).toBe(2); // second and third remain
+    expect(result.synced).toBe(2);   // first + third
+    expect(result.pending).toBe(1);  // second still in queue
+  });
+
+  it('moves 5xx item to dead-letter after MAX_ITEM_RETRIES failures', async () => {
+    const { flushSyncQueue, getDeadLetterCount } = await import('../offlineSync.js');
+    // Queue item already at MAX_ITEM_RETRIES - 1 retries
+    const item = makeItem({ path: '/poison' });
+    localStorage.setItem(QUEUE_KEY, JSON.stringify([{ ...item, id: 'x1', _retries: 2 }]));
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503 }));
+
+    const result = await flushSyncQueue();
+    expect(result.synced).toBe(0);
+    expect(result.pending).toBe(0);          // removed from main queue
+    expect(getDeadLetterCount()).toBe(1);    // moved to dead-letter
   });
 
   it('discards 4xx items and continues with rest', async () => {
