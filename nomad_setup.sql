@@ -140,6 +140,22 @@ BEGIN
   END LOOP;
 END $$;
 
+-- ── 1c. SOFT-DELETE COLUMN ──────────────────────────────────
+-- Adds deleted_at to core tables so single-item deletes become reversible.
+-- Items with deleted_at IS NOT NULL are hidden from normal reads but
+-- recoverable within 30 days. Idempotent — safe on re-run.
+
+DO $$
+DECLARE
+  t TEXT;
+BEGIN
+  FOR t IN SELECT unnest(ARRAY[
+    'expenses','incomes','transfers','recurring','events'
+  ]) LOOP
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ DEFAULT NULL', t);
+  END LOOP;
+END $$;
+
 -- ── 2. EMAIL REPORT TABLES ───────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS report_schedules (
