@@ -1,5 +1,5 @@
 import nodemailer from "nodemailer";
-import { subDays, subMonths, startOfMonth, endOfMonth, format } from "date-fns";
+import { subDays, format } from "date-fns";
 
 export interface UserEntry { supabase_url: string; anon_key: string; }
 export interface Schedule {
@@ -40,9 +40,18 @@ export async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<
 }
 
 export function getPeriod(s: Schedule, now: Date) {
+  // Use UTC-based arithmetic so results are timezone-independent
+  const y = now.getUTCFullYear(), m = now.getUTCMonth();
   if (s.frequency === "weekly")    return { start: subDays(now, 7), end: subDays(now, 1) };
-  if (s.frequency === "monthly")   { const p = subMonths(now, 1); return { start: startOfMonth(p), end: endOfMonth(p) }; }
-  if (s.frequency === "quarterly") return { start: startOfMonth(subMonths(now, 3)), end: endOfMonth(subMonths(now, 1)) };
+  if (s.frequency === "monthly") {
+    const pm = m === 0 ? 11 : m - 1, py = m === 0 ? y - 1 : y;
+    return { start: new Date(Date.UTC(py, pm, 1)), end: new Date(Date.UTC(py, pm + 1, 0)) };
+  }
+  if (s.frequency === "quarterly") {
+    const em = m === 0 ? 11 : m - 1, ey = m === 0 ? y - 1 : y;
+    const sm = ((m - 3) + 12) % 12, sy = m < 3 ? y - 1 : y;
+    return { start: new Date(Date.UTC(sy, sm, 1)), end: new Date(Date.UTC(ey, em + 1, 0)) };
+  }
   return { start: subDays(now, s.custom_days ?? 7), end: subDays(now, 1) };
 }
 export function getNextSendAt(s: Schedule, now: Date): Date {
