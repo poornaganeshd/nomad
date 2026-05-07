@@ -485,17 +485,19 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       }
       const isFX = fxCur.trim().toUpperCase() !== "INR" && fxRate > 0;
       const inrAmt = isFX ? roundMoney(a * fxRate) : a;
+      let txOk = true;
       if (type === "expense") {
         const txId = uid();
         if (isFX) saveCurrencyMeta(txId, fxCur, a, fxRate);
-        oE({ id: txId, amount: inrAmt, categoryId: catId, date, note, walletId: wid, ...(rUrl ? { receipt_url: rUrl } : {}) });
+        txOk = oE({ id: txId, amount: inrAmt, categoryId: catId, date, note, walletId: wid, ...(rUrl ? { receipt_url: rUrl } : {}) }) !== false;
       } else if (type === "income") {
         const txId = uid();
         if (isFX) saveCurrencyMeta(txId, fxCur, a, fxRate);
-        oI({ id: txId, amount: inrAmt, sourceId: srcId, date, note, walletId: iwid, ...(rUrl ? { receipt_url: rUrl } : {}) });
+        txOk = oI({ id: txId, amount: inrAmt, sourceId: srcId, date, note, walletId: iwid, ...(rUrl ? { receipt_url: rUrl } : {}) }) !== false;
       } else if (type === "transfer") {
         oT({ amount: a, fromWallet: tFrom, toWallet: tTo, date, note });
       }
+      if (!txOk) return; // validation failed — keep form state + picker so user can fix and retry
       receiptPickerRef.current?.clear();
       setSubmitKey(k => k + 1);
       sAmt("0");
