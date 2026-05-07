@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, memo } from "react";
 import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning } from "@phosphor-icons/react";
 import { ComposedChart, Bar, Line, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from "recharts";
 import RoutineApp from "./Routine";
@@ -546,7 +546,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       <label style={ls}>Start Date</label><input type="date" value={rStart} onChange={e => sRS(e.target.value)} style={{ ...is, marginBottom: 18 }} /><button onClick={submitRec} style={{ width: "100%", padding: "14px", border: "none", borderRadius: 12, background: "#A78BFA", color: "#fff", fontSize: 15, fontFamily: "var(--font-h)", fontWeight: 600, cursor: "pointer" }}>Add Recurring</button></>}</div>
 }
 
-function TxCard({ item: it, categories: cats, incomeSources: isrc, events: evs, onDelete: od, recurringCats: rCats }) {
+const TxCard = memo(function TxCard({ item: it, categories: cats, incomeSources: isrc, events: evs, onDelete: od, recurringCats: rCats }) {
   const isE = it.type === "expense", isI = it.type === "income", isTr = it.type === "transfer", isS = it.type === "settlement";
   const isRec = isE && isFix(it);
   let cat = isE ? cats.find(c => c.id === it.categoryId) : isI ? isrc.find(s => s.id === it.sourceId) : null;
@@ -563,7 +563,7 @@ function TxCard({ item: it, categories: cats, incomeSources: isrc, events: evs, 
   if (isS) { const sW = WALLETS.find(x => x.id === it.walletId); return <div style={{ ...cc, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}><div style={{ width: 44, height: 44, borderRadius: 12, background: it.direction === "owed" ? "#6BAA7514" : "#E07A5F14", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>{it.direction === "owed" ? "💰" : "💸"}</div><div style={{ flex: 1 }}><div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{it.direction === "owed" ? `${it.splitName} paid back` : `Paid ${it.splitName}`}</div><div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 2 }}>{sW?.name} · {dl(it.date)}</div></div><div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 15, color: it.direction === "owed" ? "#6BAA75" : "#E07A5F" }}>{it.direction === "owed" ? "+" : "−"}{fmt(it.amount)}</div><button onClick={() => od(it.id, it.type)} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 14, opacity: 0.35 }}>✕</button></div> }
   return <div style={{ ...cc, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}><div style={{ width: 44, height: 44, borderRadius: 12, background: (cat?.color || "#999") + "14", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{cat ? <DI2 id={cat.id} accent={cat.neon || cat.color} size={22} /> : <span style={{ fontSize: 22 }}>❓</span>}</div><div style={{ flex: 1, minWidth: 0 }}><div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}><span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{cat?.name || "Unknown"}</span>{isE && <span style={{ fontSize: 7, fontFamily: "var(--font-h)", fontWeight: 600, color: isFix(it) ? "#A78BFA" : "#FBBF24", background: isFix(it) ? "#A78BFA15" : "#FBBF2415", padding: "1px 5px", borderRadius: 3 }}>{isFix(it) ? "FIXED" : "FLEX"}</span>}{w && <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 600, color: w.color, background: w.color + "18", padding: "2px 6px", borderRadius: 4, display: "inline-flex", alignItems: "center", gap: 2 }}><DI2 id={w.id} accent={w.neon || w.color} size={10} /></span>}</div><div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{evT && <span style={{ fontWeight: 600, color: "var(--ts)" }}>{evT} · </span>}{it.note ? it.note + " · " : ""}{dl(it.date)}</div>{fxMeta && <div style={{ fontSize: 10, color: "#7B8CDE", fontFamily: "var(--font-h)", fontWeight: 600, marginTop: 3, letterSpacing: "0.3px" }}>{fxMeta.currency} {fxMeta.originalAmount} @ {Number(fxMeta.rateUsed).toFixed(2)}</div>}
     {(isE || isI) && it.receipt_url && (() => { let urls; try { urls = JSON.parse(it.receipt_url); if (!Array.isArray(urls)) urls = [it.receipt_url]; } catch { urls = [it.receipt_url]; } return <div style={{ marginTop: 3, display: "flex", gap: 8, flexWrap: "wrap" }}>{urls.map((u, i) => <a key={i} href={u} target="_blank" rel="noopener noreferrer" style={{ fontSize: 10, color: "#6BAA75", fontFamily: "var(--font-h)", fontWeight: 600, textDecoration: "none" }}>🧾 {urls.length > 1 ? `Receipt ${i + 1}` : "Receipt"}</a>)}</div>; })()}</div><div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 15, color: isE ? "#E07A5F" : "#6BAA75", flexShrink: 0 }}>{isE ? "−" : "+"}{fmt(it.amount)}</div><button onClick={() => od(it.id, it.type)} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 14, opacity: 0.35, flexShrink: 0 }}>✕</button></div>
-}
+});
 
 function CalM({ wallet: w, currentBal: cb, onSave: os, onClose: cl }) {
   const [v, sV] = useState(String(roundMoney(cb)));
@@ -1095,7 +1095,7 @@ export default function Nomad() {
     }, 5000);
   };
 
-  const delItem = (id, type) => {
+  const delItem = useCallback((id, type) => {
     if (type === "expense") {
       const exp = ex.find(e => e.id === id);
       if (!exp) return;
@@ -1124,7 +1124,8 @@ export default function Nomad() {
       if (stlRec.splitId) { sSp(p => p.map(x => x.id === stlRec.splitId ? { ...x, settled: false } : x)); sbUpsert("splits", [{ id: stlRec.splitId, settled: false }], `splits:${stlRec.splitId}`); }
       showUndoToast("Settlement deleted", { type: "settlement", exp: stlRec });
     }
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ex, sp, stl, inc, tr]);
   const addRec = r => { sRec(p => [...p, r]); sbUpsert("recurring", [toSB(r, ["id", "name", "amount", "categoryId", "categoryName", "walletId", "frequency", "dayOfMonth", "intervalDays", "yearMonth", "yearDay", "startDate", "active", "lastPaidDate", "lastSkippedDate"])]); showT(r.name + " added as recurring", "success"); };
   const addCust = () => { if (!nn.trim()) return; const id = nn.trim().toLowerCase().replace(/\s+/g, "_") + "_" + uid(), item = { id, name: nn.trim(), emoji: ne2, color: nc }; if (mt === "expense") sCats(p => [...p, item]); else sIsrc(p => [...p, item]); sNN(""); sNE2("📁"); sNC("#E07A5F") };
   const handleCal = (wId, desired) => {
