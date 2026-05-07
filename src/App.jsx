@@ -4,7 +4,7 @@ import { ComposedChart, Bar, Line, Area, XAxis, YAxis, Tooltip, ResponsiveContai
 import RoutineApp from "./Routine";
 import { flushSyncQueue, getPendingSyncCount, sendSupabaseRequest, subscribePendingSync, subscribeSyncDrops } from "./offlineSync";
 import { checkBillReminders } from "./billReminders";
-import { getINRRate, saveCurrencyMeta, getCurrencyMeta } from "./currencyConverter";
+import { getExchangeRate, saveCurrencyMeta, getCurrencyMeta } from "./currencyConverter";
 import ReceiptPicker from "./ReceiptPicker";
 import CredentialSetup from "./CredentialSetup";
 import { getCredentials } from "./credentials";
@@ -467,7 +467,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
   const flagBlobsRef = useRef({});
   const [flagSrcs, setFlagSrcs] = useState({});
   useEffect(() => { CURRENCIES.forEach(async c => { if (flagBlobsRef.current[c]) return; try { const r = await fetch(`https://flagcdn.com/32x24/${c.slice(0, 2).toLowerCase()}.png`); const blob = await r.blob(); const url = URL.createObjectURL(blob); flagBlobsRef.current[c] = url; setFlagSrcs(p => ({ ...p, [c]: url })); } catch { /* ignore flag fetch errors */ } }); }, []);
-  useEffect(() => { const c = fxCur.trim().toUpperCase(); if (c.length !== 3 || c === "INR") { setFxRate(null); return; } setFxFetching(true); getINRRate(c).then(r => { setFxRate(r); setFxFetching(false); }).catch(() => { setFxRate(null); setFxFetching(false); }); }, [fxCur]);
+  useEffect(() => { const c = fxCur.trim().toUpperCase(); if (c.length !== 3 || c === "INR") { setFxRate(null); return; } setFxFetching(true); getExchangeRate(c).then(r => { setFxRate(r); setFxFetching(false); }).catch(() => { setFxRate(null); setFxFetching(false); }); }, [fxCur]);
   useEffect(() => { try { sessionStorage.setItem("nomad-add-draft", JSON.stringify({ type, amt, catId, wid, date, note })); } catch { /* ignore storage errors */ } }, [type, amt, catId, wid, date, note]);
   const ts = useRef(null), tc = type === "expense" ? "#E07A5F" : type === "income" ? "#6BAA75" : type === "transfer" ? "#7B8CDE" : "#A78BFA";
   const submit = async () => {

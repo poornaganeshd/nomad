@@ -34,7 +34,7 @@ async function fetchRateFrom(baseUrl, lower) {
   return typeof rate === "number" ? rate : null;
 }
 
-export async function getINRRate(fromCurrency) {
+export async function getExchangeRate(fromCurrency) {
   const c = fromCurrency.trim().toUpperCase();
   if (!c || c === "INR") return 1;
   const cached = getCachedRate(c);

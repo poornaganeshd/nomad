@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { getINRRate, saveCurrencyMeta, getCurrencyMeta } from '../currencyConverter.js';
+import { getExchangeRate, saveCurrencyMeta, getCurrencyMeta } from '../currencyConverter.js';
 
 const RATE_CACHE_KEY = 'nomad-fx-rates';
 const META_KEY = 'nomad-currency-meta';
@@ -10,23 +10,23 @@ beforeEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// getINRRate
+// getExchangeRate
 // ---------------------------------------------------------------------------
-describe('getINRRate', () => {
+describe('getExchangeRate', () => {
   it('returns 1 for INR', async () => {
-    expect(await getINRRate('INR')).toBe(1);
-    expect(await getINRRate('inr')).toBe(1);
+    expect(await getExchangeRate('INR')).toBe(1);
+    expect(await getExchangeRate('inr')).toBe(1);
   });
 
   it('returns 1 for empty string', async () => {
-    expect(await getINRRate('')).toBe(1);
-    expect(await getINRRate('  ')).toBe(1);
+    expect(await getExchangeRate('')).toBe(1);
+    expect(await getExchangeRate('  ')).toBe(1);
   });
 
   it('returns cached rate when available and fresh', async () => {
     const cache = { USD: { rate: 83.5, fetchedAt: Date.now() } };
     localStorage.setItem(RATE_CACHE_KEY, JSON.stringify(cache));
-    const rate = await getINRRate('USD');
+    const rate = await getExchangeRate('USD');
     expect(rate).toBe(83.5);
   });
 
@@ -34,7 +34,7 @@ describe('getINRRate', () => {
     const cache = { USD: { rate: 83.5, fetchedAt: Date.now() - 25 * 60 * 60 * 1000 } };
     localStorage.setItem(RATE_CACHE_KEY, JSON.stringify(cache));
     global.fetch = vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ usd: { inr: 90 } }) });
-    const rate = await getINRRate('USD');
+    const rate = await getExchangeRate('USD');
     expect(rate).toBe(90);
   });
 
@@ -45,7 +45,7 @@ describe('getINRRate', () => {
       json: async () => ({ usd: { inr: mockRate } }),
     });
 
-    const rate = await getINRRate('USD');
+    const rate = await getExchangeRate('USD');
     expect(rate).toBe(mockRate);
     expect(global.fetch).toHaveBeenCalledOnce();
 
@@ -56,7 +56,7 @@ describe('getINRRate', () => {
 
   it('returns null when fetch response is not ok', async () => {
     global.fetch = vi.fn().mockResolvedValueOnce({ ok: false });
-    const rate = await getINRRate('XYZ');
+    const rate = await getExchangeRate('XYZ');
     expect(rate).toBeNull();
   });
 
@@ -65,13 +65,13 @@ describe('getINRRate', () => {
       ok: true,
       json: async () => ({ eur: {} }),
     });
-    const rate = await getINRRate('EUR');
+    const rate = await getExchangeRate('EUR');
     expect(rate).toBeNull();
   });
 
   it('returns null when both primary and fallback throw', async () => {
     global.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
-    const rate = await getINRRate('GBP');
+    const rate = await getExchangeRate('GBP');
     expect(rate).toBeNull();
   });
 
@@ -79,7 +79,7 @@ describe('getINRRate', () => {
     global.fetch = vi.fn()
       .mockResolvedValueOnce({ ok: false })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ gbp: { inr: 105 } }) });
-    const rate = await getINRRate('GBP');
+    const rate = await getExchangeRate('GBP');
     expect(rate).toBe(105);
     expect(global.fetch).toHaveBeenCalledTimes(2);
   });
@@ -87,8 +87,8 @@ describe('getINRRate', () => {
   it('normalises currency to uppercase before lookup', async () => {
     const cache = { USD: { rate: 83.5, fetchedAt: Date.now() } };
     localStorage.setItem(RATE_CACHE_KEY, JSON.stringify(cache));
-    expect(await getINRRate('usd')).toBe(83.5);
-    expect(await getINRRate(' USD ')).toBe(83.5);
+    expect(await getExchangeRate('usd')).toBe(83.5);
+    expect(await getExchangeRate(' USD ')).toBe(83.5);
   });
 
   it('does not hit the API on a second call for the same currency', async () => {
@@ -96,8 +96,8 @@ describe('getINRRate', () => {
       ok: true,
       json: async () => ({ usd: { inr: 83 } }),
     });
-    await getINRRate('USD');
-    await getINRRate('USD');
+    await getExchangeRate('USD');
+    await getExchangeRate('USD');
     expect(global.fetch).toHaveBeenCalledOnce();
   });
 });
