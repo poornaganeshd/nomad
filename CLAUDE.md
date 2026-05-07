@@ -422,6 +422,24 @@ Delete handler in Manage section shows `"⚠ N transactions now show as Unknown"
 **B.19.h Splits model explainer — `src/App.jsx`**
 Splits section header and expanded state now show brief text explaining personal-IOUs vs Events.
 
+**B.19.i Dead-letter queue surfaced in Sync Status — `src/App.jsx`, `src/offlineSync.js`**
+Imported `getDeadLetterCount`, `clearDeadLetter`. Added `deadLetterCount` state updated via `subscribeSyncDrops` `kind:"dead-letter"` events. Sync Status card now shows red banner with count + Dismiss button when dead-letter queue is non-empty. Toast shown on each dead-letter event pointing to Settings. Closes E.2 M (dead-letter visibility).
+
+**B.19.j Cross-tab stale-data banner — `src/App.jsx`**
+Added `storage` event listener for `nomad-v5` key. When another tab writes state, a purple banner appears with Reload and dismiss buttons. Closes E.2 M (cross-tab sync gap) with a lightweight notification approach. Closes E.2 M.
+
+**B.19.k Add-form: preserve state on validation failure — `src/App.jsx`**
+`oE`/`oI` return values now checked. If either returns `false` (balance check, UPI cap, etc.), submit handler returns early — form fields and receipt picker remain intact for retry. Fixes E.5 L (orphaned Cloudinary blobs when transaction fails).
+
+**B.19.l Backend `setup-user.ts` DDL completeness — `api/setup-user.ts`**
+Added `send_day_of_week` and `send_day_of_month` `ALTER TABLE IF NOT EXISTS` statements. New users who ran setup via the Settings button were missing these columns.
+
+**B.19.m Backend `send_day_of_month` actual-month clamp — `api/_shared.ts`, `api/__tests__/_shared.test.ts`**
+`getNextSendAt` previously used `Math.min(dom, 28)` for monthly/quarterly. Now computes last day of target month via `Date.UTC`. Test updated to verify correct behavior (May keeps 31, Feb 2024 leap clamps to 29).
+
+**B.19.n Heatmap aggregation memoized — `src/App.jsx`**
+Heatmap `dt` object now wrapped in `useMemo([ex, pfx])` so the O(n) scan only runs when the expense list or viewed month changes. Also guards against non-string dates. Partially addresses E.5 M heatmap perf.
+
 ### C. False Positives (audit was wrong — do NOT reopen)
 
 These were flagged by the original audit but are correct in the existing code. Recorded here so we don't waste a future session re-investigating.
@@ -476,7 +494,7 @@ Discovered while implementing reminder UTC anchoring: the original `addDays` par
 | Pri | Finding | Location | Notes |
 |---|---|---|---|
 | **H** | User can clear localStorage with pending queue (incognito close, "Clear site data") | Browser-level | Mitigated: Sync Status card (B.7.b) surfaces pending count. Cannot block browser-level clears; warn before in-app destructive ones |
-| **M** | Two tabs / two devices have no cross-tab sync | App-wide | No `BroadcastChannel` / `storage` event listener — tab B writes back stale state |
+| **M** | Two tabs / two devices have no cross-tab sync | App-wide | ✅ `storage` event listener shows "Another tab updated data" banner with Reload option (B.19.j). Full automatic merge not attempted — reload is the safe path. |
 
 #### E.3 Date / Timezone (3 open)
 
@@ -497,7 +515,7 @@ Discovered while implementing reminder UTC anchoring: the original `addDays` par
 | **H** | Gmail SMTP capped at 500/day | `send-reports.ts:30` | Past ~500 users on the same day, cron silently errors out. Move to Resend (`OWNER_SETUP.md` already mentions it). Needs ESP swap |
 | **M** | Per-user Supabase cold start can time out | Free-tier projects pause after 7 days idle | Mitigated by per-user 30s wall clock (B.6.b). Cap concurrent cold-starts; surface "your project is paused" warning |
 | **M** | Single-tenant DB → can't grep production at scale | Architectural | Plan opt-in anonymized telemetry channel |
-| **L** | `report_schedules.send_day_of_month` clamp at 28 in cron math | `_shared.ts:58, 61` | Mirrors E.3 schema cap |
+| **L** | `report_schedules.send_day_of_month` clamp at 28 in cron math | `_shared.ts:58, 61` | ✅ Fixed in B.19.m — now clamps to actual last day of target month |
 
 #### E.5 Architecture / Performance (8 open)
 
@@ -508,8 +526,8 @@ Discovered while implementing reminder UTC anchoring: the original `addDays` par
 | **H** | `wallet_balances` is a denormalized cache with no integrity invariant | `nomad_setup.sql:90-93` | Two tabs both read balance, both decrement, both write — last write wins, ledger drifts. "Verify & repair" tool postponed pending decision on whether balances are derived (already true in `wBal` memo) or stored authoritatively |
 | **H** | Settlements/recurring/splits issue multiple writes without rollback | `App.jsx` recurring & settlement flows | Crash mid-sequence → wallet balance, expense row, split row mutually inconsistent. Server-side `RPC` would close this |
 | **M** | `App.jsx` re-renders on every state change — no `useMemo`/`React.memo` on `TxCard`, no virtualization on history list | App-wide | Janky after 5+ years of data |
-| **M** | Heatmap renders all expenses, no windowing | `App.jsx:240` (`Heatmap`) | Janky after 5+ years |
-| **L** | Receipt upload + transaction insert not coupled | Add-expense flow | Crash between → orphan blob in Cloudinary; retry → second blob. Could nuke unreferenced blobs via a periodic job |
+| **M** | Heatmap renders all expenses, no windowing | `App.jsx:240` (`Heatmap`) | ✅ Aggregation memoized with `useMemo([ex, pfx])` (B.19.n) — O(n) scan now only runs on data/month change, not every render |
+| **L** | Receipt upload + transaction insert not coupled | Add-expense flow | ✅ Partially addressed (B.19.k): form no longer clears on validation failure, so user can retry without losing form state. Blobs already uploaded before a server 5xx are still orphaned — full fix requires a Cloudinary signing endpoint. |
 
 > E.5 #7 (SW manual cache version) closed in B.15 — Vite plugin auto-injects build timestamp.
 
@@ -615,7 +633,7 @@ Re-prioritized after the work in this branch.
 | `src/currencyConverter.js` | INR hardcoded (`:29-31`) — API name only |
 | `src/credentials.js` | anon key in localStorage (`:7`) — architectural |
 | `src/receiptUpload.js` | `apiSecret` stored in localStorage (same threat as anon key — architectural) |
-| `api/_shared.ts` | `send_day_of_month` backend clamp still at 28 (`:58, :61`) — relates to 9 pre-existing test failures |
+| `api/_shared.ts` | ✅ `send_day_of_month` backend clamp fixed (B.19.m); all tests pass |
 | `api/send-reports.ts` | within-chunk serial fan-out, Gmail 500/day, per-user cold start |
 | `api/setup-user.ts` | Management API token handling (audit only) |
 | `nomad_setup.sql` | RLS disabled everywhere (`:95-102, :160-161, :187-188`), `wallet_balances` no integrity invariant, schedule UNIQUE on user_id (`:117`), `daily_logs` JSONB blob model (`:175-179`) |
