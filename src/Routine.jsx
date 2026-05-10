@@ -2459,7 +2459,7 @@ const LogScreen = ({ allData, config }) => {
         const daysSoFar = now.getDate();
         let full = 0;
         for (let i = 1; i <= daysSoFar; i++) {
-            const d = new Date(now.getFullYear(), now.getMonth(), i);
+            const d = new Date(now.getFullYear(), now.getMonth(), i, 12);
             const key = todayKey(d);
             if (allData[key] && dayLevel(allData[key]) >= 4) full++;
         }
@@ -2470,7 +2470,7 @@ const LogScreen = ({ allData, config }) => {
         const now = new Date();
         let total = 0, count = 0;
         for (let i = 1; i <= now.getDate(); i++) {
-            const k = todayKey(new Date(now.getFullYear(), now.getMonth(), i));
+            const k = todayKey(new Date(now.getFullYear(), now.getMonth(), i, 12));
             const rec = allData[k];
             if (rec) {
                 const mwL = effectiveMorningWater(rec);
@@ -2484,7 +2484,7 @@ const LogScreen = ({ allData, config }) => {
     const cells = [];
     for (let i = 0; i < firstDayOfWeek; i++) cells.push({ empty: true, key: `e${i}` });
     for (let d = 1; d <= daysInMonth; d++) {
-        const date = new Date(year, month, d);
+        const date = new Date(year, month, d, 12);
         const key = todayKey(date);
         const rec = allData[key];
         const lvl = dayLevel(rec);

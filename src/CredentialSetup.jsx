@@ -214,6 +214,57 @@ const STYLES = `
   .ns-div {
     height: 1px; background: #EDE6DC; margin: 4px 0;
   }
+
+  /* ── Landing screen ── */
+  .ns-landing-hero {
+    text-align: center; padding: 24px 0 28px;
+  }
+  .ns-landing-logo {
+    font-size: 36px; font-weight: 800; letter-spacing: 10px;
+    color: #2C1F0E; text-transform: uppercase; margin-bottom: 10px;
+  }
+  .ns-landing-tagline {
+    font-size: 14px; color: #6B5744; line-height: 1.7; font-weight: 500;
+  }
+  .ns-features {
+    display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px;
+  }
+  .ns-feature-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 11px 14px;
+    background: #FAF7F4; border: 1px solid #EDE6DC; border-radius: 12px;
+    font-size: 13px; font-weight: 600; color: #2C1F0E;
+  }
+  .ns-feature-icon { font-size: 16px; flex-shrink: 0; }
+  .ns-btn-demo {
+    width: 100%; padding: 16px;
+    border-radius: 14px; border: none;
+    background: linear-gradient(135deg, #F59E0B 0%, #D97706 100%);
+    color: #1A1009;
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-size: 15px; font-weight: 800; letter-spacing: 0.2px;
+    cursor: pointer;
+    box-shadow: 0 4px 18px rgba(245,158,11,0.38);
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .ns-btn-demo:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 22px rgba(245,158,11,0.48);
+  }
+  .ns-btn-demo:active { transform: scale(0.98); }
+  .ns-btn-backend {
+    width: 100%; padding: 14px;
+    border-radius: 14px; border: 2px solid #C4A882;
+    background: transparent; color: #7C4A2A;
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-size: 14px; font-weight: 700; cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .ns-btn-backend:hover { background: #F5EDE2; border-color: #A07040; }
+  .ns-demo-note {
+    font-size: 11px; color: #B0A090; text-align: center;
+    line-height: 1.6; padding: 0 8px;
+  }
 `;
 
 /* ── SVG icons ── */
@@ -255,6 +306,7 @@ export default function CredentialSetup({ onDone, onCancel }) {
   const [apiSecret, setApiSecret]       = useState(existing.apiSecret || "");
   const [error, setError]               = useState("");
   const [showGuide, setShowGuide]       = useState(false);
+  const [step, setStep]                 = useState(onCancel ? "form" : "landing");
 
   const importConfig = (file) => {
     if (!file) return;
@@ -288,6 +340,34 @@ export default function CredentialSetup({ onDone, onCancel }) {
     saveCredentials({ sbUrl: sbUrl.trim(), sbKey: sbKey.trim(), cloudName: cloudName.trim(), uploadPreset: uploadPreset.trim(), apiKey: apiKey.trim(), apiSecret: apiSecret.trim() });
     onDone();
   };
+
+  if (step === "landing") return (
+    <div className="ns-root">
+      <style>{STYLES}</style>
+      <div className="ns-col">
+        <div className="ns-landing-hero">
+          <div className="ns-landing-logo">NOMAD</div>
+          <div className="ns-landing-tagline">Track every rupee.<br />Your data, your backend.</div>
+        </div>
+        <div className="ns-features">
+          <div className="ns-feature-row"><span className="ns-feature-icon">💸</span>Expenses, income &amp; transfers</div>
+          <div className="ns-feature-row"><span className="ns-feature-icon">🔄</span>Recurring bills &amp; split expenses</div>
+          <div className="ns-feature-row"><span className="ns-feature-icon">📊</span>Trends, heatmaps &amp; email reports</div>
+        </div>
+        <div className="ns-footer">
+          <button className="ns-btn-demo" onClick={() => { localStorage.setItem("nomad-demo-mode", "true"); onDone(); }}>
+            🎮 Try Demo — no signup needed
+          </button>
+          <button className="ns-btn-backend" onClick={() => setStep("form")}>
+            Connect My Backend →
+          </button>
+          <div className="ns-demo-note">
+            Demo data is not saved. Add Supabase to persist your transactions.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="ns-root">
