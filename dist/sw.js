@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nomad-app-mp0sgxf1';
+const CACHE_NAME = 'nomad-app-mp0t1k24';
 const APP_SHELL = ['/', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {

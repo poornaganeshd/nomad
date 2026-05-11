@@ -127,13 +127,15 @@ const getVersion = (table, id) => {
 };
 // ─────────────────────────────────────────────────────────────────────────────
 
+const SOFT_DELETE_TABLES = new Set(["expenses", "incomes", "transfers", "recurring", "events"]);
 const sbGet = async (table) => {
   if (isDemoMode) return [];
   if (!SB_ENABLED) return null;
   try {
-    const r = await fetchWithTimeout(`${SB_URL}/rest/v1/${table}?select=*&deleted_at=is.null`, { headers: sbH });
+    const filter = SOFT_DELETE_TABLES.has(table) ? "&deleted_at=is.null" : "";
+    const r = await fetchWithTimeout(`${SB_URL}/rest/v1/${table}?select=*${filter}`, { headers: sbH });
     if (r.ok) { const rows = await r.json(); saveVersions(table, rows); return rows; }
-    if (r.status === 400) {
+    if (r.status === 400 && filter) {
       // deleted_at column not yet migrated — fall back to unfiltered
       const r2 = await fetchWithTimeout(`${SB_URL}/rest/v1/${table}?select=*`, { headers: sbH });
       if (!r2.ok) { console.error("sbGet fail", table, r2.status); return null; }
