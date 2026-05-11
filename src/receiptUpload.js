@@ -56,7 +56,8 @@ export async function uploadReceipt(file) {
   const creds = getCredentials();
   const { cloudName, apiKey, apiSecret, uploadPreset } = creds;
 
-  const blob = await compressImage(file);
+  const isPdf = file.type === "application/pdf";
+  const blob = isPdf ? file : await compressImage(file);
 
   // ── Local fallback: no Cloudinary configured ──────────────────────────────
   if (!cloudName) {
@@ -70,7 +71,7 @@ export async function uploadReceipt(file) {
 
   // ── Cloudinary upload ─────────────────────────────────────────────────────
   const form = new FormData();
-  form.append("file", blob, "receipt.jpg");
+  form.append("file", blob, isPdf ? "receipt.pdf" : "receipt.jpg");
 
   if (apiKey && apiSecret) {
     // Signed upload — signature covers all non-file params sorted alphabetically,
@@ -90,7 +91,7 @@ export async function uploadReceipt(file) {
     );
   }
 
-  const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+  const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/${isPdf ? "raw" : "image"}/upload`, {
     method: "POST",
     body: form,
   });

@@ -667,9 +667,9 @@ Discovered while implementing reminder UTC anchoring: the original `addDays` par
 | Pri | Feature | Notes |
 |---|---|---|
 | **M** | Rules / autocategorize from merchant text | ✅ Done (B.25.d) — keyword→category rules, stored in `nomad-auto-rules` |
-| **M** | Tags (orthogonal to categories) | Open — "Groceries for trip" vs "groceries normal" |
-| **M** | PDF/non-image attachments | Open — only images today |
-| **M** | Multi-currency display (drop INR hardcode) | Open — show original + ₹ side by side |
+| **M** | Tags (orthogonal to categories) | ✅ Done (B.26) — `tags TEXT[]` in expenses/incomes; chip input in AddPage (max 5, Enter to add); `#tag` display on TxCard; tag filter in history |
+| **M** | PDF/non-image attachments | ✅ Done (B.26) — ReceiptPicker "PDF / File" option; `uploadReceipt` uses raw/PDF endpoint for Cloudinary; 📄 icon on TxCard |
+| **M** | Multi-currency display (drop INR hardcode) | ✅ Already done (B.5.b) — `fxMeta` row shown on TxCard since B.5.b |
 | **M** | Subscription detection (auto-find recurring from history) | ✅ Done (B.25.b) — `subSuggestions` in Settings → Recurring |
 | **M** | Month-over-month / merchant frequency / spending projections | ✅ Done (B.25.c) — MoM% badge + category drilldown in dashboard |
 | **M** | Undo affordance on toasts | ✅ N/A — already implemented (`undoDelete`/`showUndoToast`) |
@@ -679,23 +679,14 @@ Discovered while implementing reminder UTC anchoring: the original `addDays` par
 
 | Pri | Feature | Notes |
 |---|---|---|
-| **M** | "You haven't logged in 3 days" reminder | Open — push or email nudge |
+| **M** | "You haven't logged in 3 days" reminder | ✅ Done (B.26) — `useEffect` on `loaded`; checks last transaction date; shows toast once/day via `nomad-last-log-nudge` localStorage key |
 | **M** | Streak for the finance side | ✅ Done (B.25.a) — 🔥 N-day badge in dashboard |
-| **M** | In-app insights (push) summary | Open — cheaper and faster than email |
+| **M** | In-app insights (push) summary | ✅ Done (B.26) — weekly digest card on dashboard: spent, earned, top category over last 7 days |
 | **M** | Inline category drilldowns | ✅ Done (B.25.c) — top-5 notes per category on tap |
 
 ##### Remaining open (summary)
 
-| Pri | Feature |
-|---|---|
-| **H** | Custom wallets — add/rename/reorder (`WALLETS` still hardcoded constant) |
-| **H** | Rename categories/sources (delete works; inline-edit UI missing) |
-| **M** | Tags orthogonal to categories |
-| **M** | Multi-currency display (original currency + ₹) |
-| **M** | PDF/non-image attachments |
-| **M** | "No log in 3 days" reminder nudge |
-| **M** | In-app push summary |
-| **L** | E2E Playwright smoke tests (5 critical flows) |
+All E.8 product gaps closed as of B.26. No open items remaining.
 
 ### F. Recommended Sequence (next sessions)
 
@@ -713,10 +704,10 @@ Re-prioritized after the work in this branch.
 | ~~3~~ | ~~Cron full fan-out~~ | ~~1 day~~ | ✅ **N/A** — personal app, single user |
 | ~~4~~ | ~~Budgets / per-category caps~~ | ~~2-3 days~~ | ✅ **Done (`3cd6374`)** — progress bars + alerts per category per month |
 | ~~5~~ | ~~E.8 product gaps (batch 1)~~ | ~~2 days~~ | ✅ **Done in B.25** — finance streak, subscription detection, MoM%, autocategorize rules, bulk delete, splits note, group event precision, startup speed |
-| 1 | **Custom wallets** | 1 day | `WALLETS` hardcoded; users can't add GPay/credit card/cash without editing source |
-| 2 | **Rename categories/sources** | ½ day | Delete works (B.23); inline-edit UI missing |
-| 3 | **E2E tests with Playwright** | 1 day | Smoke tests on 5 critical flows |
-| 4 | **Remaining E.8 gaps** | ongoing | Tags, multi-currency display, PDF attachments, reminder nudge |
+| ~~1~~ | ~~Custom wallets~~ | ~~1 day~~ | ✅ **Done in B.26** — `wallets` state from `nomad-wallets-v1`; CRUD UI in Settings; WALLETS/TxCard/AddPage all use dynamic state |
+| ~~2~~ | ~~Rename categories/sources~~ | ~~½ day~~ | ✅ **Done in B.26** — tap name to inline-edit; blur/Enter saves; Escape cancels |
+| ~~3~~ | ~~E2E tests with Playwright~~ | ~~1 day~~ | ✅ **Done in B.26** — 5 spec files in `e2e/`; `npm run test:e2e`; vitest excludes `e2e/**` |
+| ~~4~~ | ~~Remaining E.8 gaps~~ | ~~ongoing~~ | ✅ **Done in B.26** — tags, PDF, no-log reminder, weekly digest |
 
 ### G. Quick Reference — Open Findings by File
 
@@ -736,6 +727,29 @@ Re-prioritized after the work in this branch.
 | `api/setup-user.ts` | ✅ Closed — Management API token server-only confirmed |
 | `nomad_setup.sql` | ✅ Closed — RLS/integrity/UNIQUE issues N/A for personal app |
 | `api/__tests__/_shared.test.ts` | ✅ 0 failing |
+
+#### B.26 (session 6) — All remaining E.8 product gaps
+
+**B.26.a Custom wallets — `src/App.jsx`**
+`WALLETS` constant (line 180) stays as default seed. New `wallets` state (localStorage `nomad-wallets-v1`) is the live source of truth. `wBal` useMemo now iterates `wallets.forEach` instead of hardcoded IDs. `wsb` initial state changed from `{upi_lite:0, bank:0, cash:0}` to `{}` (wallets default to 0). `TxCard` gains `wallets: wl` prop with `WALLETS` fallback; `WALLETS.find` → `wl.find`. `AddPage` gains `wallets: aw` prop; all three WB selectors use `aw` (income: filters `upi_lite` by id or `upiLite:true`). Dashboard wallet-card strip uses `wallets` state. Settings Wallets card (yellow, 👛): lists all wallets, inline rename (shared `editingCat` state with namespace prefix `wallet_${id}`), delete for non-WALLETS custom wallets, add-wallet form (name + color picker → id `w_<slug>_<base36>`).
+
+**B.26.b Rename categories/sources — `src/App.jsx`**
+Name span in Manage section (expense/income rows) now conditionally renders an `<input>` when `editingCat?.id === c.id`. Click on name → `sEditingCat({id, name})`; blur/Enter saves via `sCats`/`sIsrc`; Escape cancels. Recurring cats excluded (RC default-lock still in place).
+
+**B.26.c Tags — `src/App.jsx`, `nomad_setup.sql`**
+SQL: `ALTER TABLE expenses ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}'` + same for `incomes`. `addE`/`addI` include `tags` in `toSB` column list. `AddPage` has `tagInput`/`tags` state; chip input below ReceiptPicker (Enter/Space/comma adds tag, max 5, strips non-word chars); chips display with remove ✕. `TxCard` renders `#tag` chips in indigo when `it.tags?.length > 0`. History: `hTag` filter state; filter panel has Tag input field; `historyItems` filters `it.tags.includes(hTag)`; `clearAll` clears `hTag`; `activeCount` includes `hTag`.
+
+**B.26.d PDF/non-image attachments — `src/ReceiptPicker.jsx`, `src/receiptUpload.js`**
+ReceiptPicker menu gains "PDF / File" option (`accept="image/*,application/pdf"`). File items get `isPdf` boolean; thumbnail shows 📄 emoji instead of `<img>`. `uploadReceipt` skips canvas compression for PDFs; uploads to `/raw/upload` endpoint on Cloudinary (not `/image/upload`). TxCard receipt row shows 📄 label for `.pdf` and `data:application/pdf` URLs.
+
+**B.26.e No-log-in-3-days reminder — `src/App.jsx`**
+`useEffect([loaded])`: checks latest date across `ex`+`inc`; if diff ≥ 3 days and today not already nudged (`nomad-last-log-nudge` key), shows toast "💤 No transactions logged in N days — stay on track!". Fires once per day per device.
+
+**B.26.f Weekly digest card — `src/App.jsx`**
+`weeklyDigest` useMemo: filters last 7 days of `ex`+`inc`, computes `spent`, `earned`, `topCat`. Dashboard shows green card with 3-column layout when any transactions exist in the window. Placed below the 🔥 streak badge.
+
+**B.26.g E2E Playwright smoke tests — `e2e/`**
+5 spec files: demo mode, add expense/income, history search, settings (dark mode + wallets), delete/undo. `playwright.config.js` targets `localhost:5173` (mobile viewport 390×844). `npm run test:e2e`. Vitest `exclude: ['e2e/**']` prevents test runner conflict. `npm run test` (Vitest unit) still 266/266 passing.
 
 ### H. Notes for Future Claude Sessions
 
@@ -763,3 +777,7 @@ Re-prioritized after the work in this branch.
 19. **`autoRules` in `nomad-auto-rules` localStorage.** Cleared by the "Clear All Data" sweep (already covered by the `nomad-*` wildcard). `AddPage` receives `autoRules` prop and auto-selects category on note input. Do not move this to Supabase — it's a local UX preference, not transactional data.
 20. **`grpShareMap` for exact group shares (B.25.g).** Group event summary uses `distributeAmount(grpTotal, n)` → `grpShareMap` rather than `roundMoney(total/n)`. Both the per-person balance display and the settlement IIFE use `grpShareMap[p] ?? grpShare`. Do not revert to the `grpShare` scalar — it produces ₹0.01 residue in 3-way splits.
 21. **`paidBy` in `addE` Supabase upsert column list.** The `toSB` call in `addE` must include `"paidBy"` — omitting it breaks group summaries after page reload (field would be `null` in Supabase while in-memory state has the correct value).
+22. **`wallets` state (B.26.a)** is the live source of truth for all wallet rendering. `WALLETS` constant is the default seed only. `wBal` iterates `wallets.forEach` — never revert to hardcoded `{ upi_lite, bank, cash }`. `wsb` initial state is `{}`. Custom wallets get ids like `w_gpay_<base36>`. `editingCat` state is shared between category rename and wallet rename (wallet rename uses `wallet_${w.id}` as the id key).
+23. **Tags (B.26.c):** `tags TEXT[]` column exists on `expenses` and `incomes` (run `nomad_setup.sql` to add). `tags` is an optional `string[]` on expense/income objects. Max 5 tags per transaction. `toSB` must include `"tags"` for expenses and incomes. History filter uses `hTag` state (single tag search). Tags are stripped of non-word chars and lowercased.
+24. **E2E tests (B.26.g)** live in `e2e/` and use `@playwright/test`. Run with `npm run test:e2e`. They depend on the dev server (`npm run dev`). Unit tests (`npm test`) exclude `e2e/**` via `vite.config.js` `test.exclude`. The two test runners must never be confused — Playwright tests have a `page` fixture that Vitest doesn't know about.
+25. **All E.8 product gaps are fully closed as of B.26.** No open items remain in CLAUDE.md. The app is feature-complete relative to the audit. Future work should be greenfield improvements, not fixes.

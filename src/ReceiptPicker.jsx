@@ -33,6 +33,7 @@ const ReceiptPicker = forwardRef(function ReceiptPicker(_, ref) {
       id: Math.random().toString(36).slice(2),
       file,
       localUrl: URL.createObjectURL(file),
+      isPdf: file.type === "application/pdf",
     }));
     setItems(prev => [...prev, ...next]);
     setShowMenu(false);
@@ -55,8 +56,8 @@ const ReceiptPicker = forwardRef(function ReceiptPicker(_, ref) {
       {items.length > 0 && (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
           {items.map(it => (
-            <div key={it.id} style={{ position: "relative", width: 64, height: 64, borderRadius: 10, overflow: "hidden", border: "1.5px solid var(--border)", flexShrink: 0 }}>
-              <img src={it.localUrl} alt="receipt" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            <div key={it.id} style={{ position: "relative", width: 64, height: 64, borderRadius: 10, overflow: "hidden", border: "1.5px solid var(--border)", flexShrink: 0, background: it.isPdf ? "#7B8CDE18" : "transparent", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              {it.isPdf ? <span style={{ fontSize: 28 }}>📄</span> : <img src={it.localUrl} alt="receipt" style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
               <button
                 onClick={() => remove(it.id)}
                 style={{ position: "absolute", top: 3, right: 3, width: 18, height: 18, borderRadius: "50%", background: "rgba(0,0,0,0.6)", border: "none", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, padding: 0, lineHeight: 1 }}
@@ -134,6 +135,18 @@ const ReceiptPicker = forwardRef(function ReceiptPicker(_, ref) {
                 </svg>
                 Gallery
                 <input ref={galleryRef} type="file" accept="image/*" multiple
+                  onChange={e => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ""; }}
+                  style={{ display: "none" }}
+                />
+              </label>
+
+              <div style={{ height: 1, background: "var(--border)", margin: "0 12px" }} />
+
+              {/* PDF option */}
+              <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", cursor: "pointer", fontSize: 13, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--text)" }}>
+                <span style={{ fontSize: 15 }}>📄</span>
+                PDF / File
+                <input type="file" accept="image/*,application/pdf" multiple
                   onChange={e => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ""; }}
                   style={{ display: "none" }}
                 />

@@ -209,6 +209,10 @@ ALTER TABLE splits   ADD COLUMN IF NOT EXISTS note          TEXT;
 ALTER TABLE events   ADD COLUMN IF NOT EXISTS type          TEXT DEFAULT 'solo';
 ALTER TABLE events   ADD COLUMN IF NOT EXISTS participants  JSONB DEFAULT '[]';
 
+-- Tags (array of strings) on expenses and incomes
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}';
+ALTER TABLE incomes  ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}';
+
 ALTER TABLE report_schedules    DISABLE ROW LEVEL SECURITY;
 ALTER TABLE report_delivery_log DISABLE ROW LEVEL SECURITY;
 
