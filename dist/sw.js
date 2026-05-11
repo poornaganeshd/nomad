@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nomad-app-motosfsp';
+const CACHE_NAME = 'nomad-app-mp0sgxf1';
 const APP_SHELL = ['/', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {
@@ -18,7 +18,9 @@ self.addEventListener('activate', (event) => {
 });
 
 const cacheResponse = async (request, response) => {
-  if (!response || (!response.ok && response.type !== 'opaque')) return response;
+  // Only cache responses we can actually inspect. Opaque responses (cross-origin
+  // no-cors) may be huge or be cached errors — they evict the app shell silently.
+  if (!response || !response.ok || response.type === 'opaque') return response;
   const cache = await caches.open(CACHE_NAME);
   cache.put(request, response.clone());
   return response;

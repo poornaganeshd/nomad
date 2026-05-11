@@ -31,7 +31,9 @@
       "Bash(npx eslint *)",
       "Bash(findstr \"57\\\\|58\\\\|59\\\\|60\\\\|61\\\\|62\\\\|63\\\\|64\\\\|65\\\\|66\\\\|67\\\\|68\\\\|69\\\\|70\\\\|71\\\\|72\\\\|73\\\\|74\\\\|75\")",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "WebFetch(domain:api.github.com)"
+      "WebFetch(domain:api.github.com)",
+      "Bash(grep -v \"^$\")",
+      "Bash(node --input-type=module --experimental-vm-modules)"
     ]
   }
 }
