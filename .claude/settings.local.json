@@ -33,7 +33,8 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:api.github.com)",
       "Bash(grep -v \"^$\")",
-      "Bash(node --input-type=module --experimental-vm-modules)"
+      "Bash(node --input-type=module --experimental-vm-modules)",
+      "Bash(node -e ' *)"
     ]
   }
 }
