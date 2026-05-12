@@ -31,8 +31,7 @@ const SB_URL = _creds.sbUrl || import.meta.env.VITE_SUPABASE_URL || "";
 const SB_KEY = _creds.sbKey || import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 const SB_ENABLED = Boolean(_creds.sbUrl && _creds.sbKey);
 const sbH = SB_ENABLED ? { "Content-Type": "application/json", "apikey": SB_KEY, "Authorization": `Bearer ${SB_KEY}` } : {};
-const isDemoMode = !_creds.sbUrl && localStorage.getItem("nomad-demo-mode") === "true";
-const needsSetup = !_creds.sbUrl && !isDemoMode;
+const needsSetup = !_creds.sbUrl;
 const FETCH_TIMEOUT_MS = 8000;
 const isoDate = (date) => localDateKey(date);
 const dateOnly = (value) => new Date(`${value}T00:00:00`);
@@ -59,57 +58,7 @@ const loadLocalBackup = ({ sEx, sInc, sTr, sStl, sCats, sIsrc, sSp, sRec, sEvs, 
     if (d.recCats?.length) sRecCats(d.recCats);
   } catch { }
 };
-// ── Demo mode seed data ───────────────────────────────────────────────────────
-const DEMO_DATA = (() => {
-  const d = (y, m, day) => `${y}-${String(m).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-  const id = (n) => `demo_${n}`;
-  return {
-    expenses: [
-      { id: id("e01"), amount: 850,  categoryId: "food",          walletId: "bank",     note: "Groceries – Big Bazaar",          date: d(2026,3,2)  },
-      { id: id("e02"), amount: 120,  categoryId: "transport",     walletId: "upi_lite", note: "Metro card recharge",             date: d(2026,3,5)  },
-      { id: id("e03"), amount: 199,  categoryId: "entertainment", walletId: "upi_lite", note: "BookMyShow – Dune II",             date: d(2026,3,8)  },
-      { id: id("e04"), amount: 1200, categoryId: "health",        walletId: "bank",     note: "Pharmacy – antibiotics",          date: d(2026,3,10) },
-      { id: id("e05"), amount: 350,  categoryId: "food",          walletId: "upi_lite", note: "Zomato dinner",                   date: d(2026,3,12) },
-      { id: id("e06"), amount: 500,  categoryId: "personal",      walletId: "bank",     note: "Haircut + grooming",              date: d(2026,3,15) },
-      { id: id("e07"), amount: 180,  categoryId: "coffee",        walletId: "upi_lite", note: "Starbucks with team",             date: d(2026,3,18) },
-      { id: id("e08"), amount: 2500, categoryId: "entertainment", walletId: "bank",     note: "Amazon – earbuds",                date: d(2026,3,22) },
-      { id: id("e09"), amount: 90,   categoryId: "food",          walletId: "cash",     note: "Street food – chaat",             date: d(2026,3,25) },
-      { id: id("e10"), amount: 350,  categoryId: "transport",     walletId: "upi_lite", note: "Uber – office commute",           date: d(2026,3,28) },
-      { id: id("e11"), amount: 920,  categoryId: "food",          walletId: "bank",     note: "Supermart groceries",             date: d(2026,4,2)  },
-      { id: id("e12"), amount: 150,  categoryId: "transport",     walletId: "upi_lite", note: "Auto rides",                     date: d(2026,4,5)  },
-      { id: id("e13"), amount: 649,  categoryId: "entertainment", walletId: "upi_lite", note: "Netflix subscription",            date: d(2026,4,8)  },
-      { id: id("e14"), amount: 800,  categoryId: "health",        walletId: "bank",     note: "Doctor consultation",             date: d(2026,4,10) },
-      { id: id("e15"), amount: 280,  categoryId: "food",          walletId: "upi_lite", note: "Swiggy – team lunch",             date: d(2026,4,14) },
-      { id: id("e16"), amount: 200,  categoryId: "coffee",        walletId: "upi_lite", note: "Chai + snacks",                   date: d(2026,4,16) },
-      { id: id("e17"), amount: 1800, categoryId: "personal",      walletId: "bank",     note: "Summer wardrobe",                 date: d(2026,4,19) },
-      { id: id("e18"), amount: 400,  categoryId: "food",          walletId: "cash",     note: "Dinner with friends",             date: d(2026,4,22) },
-      { id: id("e19"), amount: 500,  categoryId: "transport",     walletId: "bank",     note: "Train tickets – Pune trip",       date: d(2026,4,25) },
-      { id: id("e20"), amount: 750,  categoryId: "health",        walletId: "upi_lite", note: "Gym protein supplements",         date: d(2026,4,28) },
-      { id: id("e21"), amount: 1050, categoryId: "food",          walletId: "bank",     note: "Monthly groceries",               date: d(2026,5,1)  },
-      { id: id("e22"), amount: 250,  categoryId: "transport",     walletId: "upi_lite", note: "Metro + auto",                    date: d(2026,5,3)  },
-      { id: id("e23"), amount: 399,  categoryId: "entertainment", walletId: "upi_lite", note: "Spotify Premium + Hotstar",       date: d(2026,5,5)  },
-      { id: id("e24"), amount: 180,  categoryId: "coffee",        walletId: "upi_lite", note: "Blue Tokai – work day",           date: d(2026,5,7)  },
-      { id: id("e25"), amount: 320,  categoryId: "food",          walletId: "cash",     note: "Lunch – Udupi restaurant",        date: d(2026,5,9)  },
-    ],
-    incomes: [
-      { id: id("i01"), amount: 55000, sourceId: "allowance",   walletId: "bank", note: "March salary",          date: d(2026,3,1)  },
-      { id: id("i02"), amount: 55000, sourceId: "allowance",   walletId: "bank", note: "April salary",          date: d(2026,4,1)  },
-      { id: id("i03"), amount: 8000,  sourceId: "gifts",       walletId: "bank", note: "Freelance – logo design",date: d(2026,4,15) },
-      { id: id("i04"), amount: 55000, sourceId: "allowance",   walletId: "bank", note: "May salary",            date: d(2026,5,1)  },
-      { id: id("i05"), amount: 1240,  sourceId: "investments", walletId: "bank", note: "Interest credited",     date: d(2026,5,5)  },
-    ],
-    transfers: [
-      { id: id("t01"), amount: 3000, fromWallet: "bank", toWallet: "upi_lite", note: "UPI Lite refill – March", date: d(2026,3,5) },
-      { id: id("t02"), amount: 3000, fromWallet: "bank", toWallet: "upi_lite", note: "UPI Lite refill – April", date: d(2026,4,5) },
-    ],
-    recurring: [
-      { id: id("r01"), name: "Apartment Rent",  amount: 18000, categoryId: "rent",   categoryName: "Rent & Bills",         walletId: "bank",     frequency: "monthly", dayOfMonth: 1,  startDate: d(2026,1,1),  active: true, lastPaidDate: d(2026,4,1),  lastSkippedDate: null },
-      { id: id("r02"), name: "Netflix",          amount: 649,   categoryId: "ott",    categoryName: "OTT / Subscriptions", walletId: "upi_lite", frequency: "monthly", dayOfMonth: 8,  startDate: d(2026,1,8),  active: true, lastPaidDate: d(2026,4,8),  lastSkippedDate: null },
-      { id: id("r03"), name: "Gym Membership",   amount: 1500,  categoryId: "health", categoryName: "Health",               walletId: "bank",     frequency: "monthly", dayOfMonth: 10, startDate: d(2026,1,10), active: true, lastPaidDate: d(2026,4,10), lastSkippedDate: null },
-    ],
-    walletStartBal: { bank: 15000, upi_lite: 2000, cash: 1500 },
-  };
-})();
+
 // ── Optimistic-concurrency version cache ─────────────────────────────────────
 // Stores the server-stamped updated_at for each row so edits can send
 // If-Unmodified-Since and get a 412 if another device wrote first.
@@ -131,7 +80,6 @@ const getVersion = (table, id) => {
 
 const SOFT_DELETE_TABLES = new Set(["expenses", "incomes", "transfers", "recurring", "events"]);
 const sbGet = async (table) => {
-  if (isDemoMode) return [];
   if (!SB_ENABLED) return null;
   try {
     const filter = SOFT_DELETE_TABLES.has(table) ? "&deleted_at=is.null" : "";
@@ -150,7 +98,6 @@ const sbGet = async (table) => {
   }
 };
 const sbWrite = async (path, { method = "POST", body, dedupeKey, extraHeaders = {} } = {}) => {
-  if (isDemoMode) return { ok: true, queued: false, offline: false, response: null };
   if (!SB_ENABLED) return { ok: false, queued: false, offline: false, response: null };
   const result = await sendSupabaseRequest({
     path,
@@ -1001,7 +948,6 @@ export default function Nomad() {
 
   useEffect(() => {
     const load = async () => {
-      if (isDemoMode) { sEx(DEMO_DATA.expenses); sInc(DEMO_DATA.incomes); sTr(DEMO_DATA.transfers); sRec(DEMO_DATA.recurring); sWsb(DEMO_DATA.walletStartBal); sL(true); return; }
       // Show local data instantly — zero startup delay
       loadLocalBackup({ sEx, sInc, sTr, sStl, sCats, sIsrc, sSp, sRec, sEvs, sDm, sWsb, sRecCats });
       sL(true);
@@ -1443,7 +1389,7 @@ export default function Nomad() {
   if (!loaded) return null;
   const theme = dm ? { "--bg": "#000000", "--card": "#0F0F0F", "--border": "#1F1F1F", "--text": "#E5E7EB", "--ts": "#9CA3AF", "--muted": "#6B7280", "--nav-bg": "rgba(0,0,0,0.95)" } : { "--bg": "#F2F0EB", "--card": "#FFF", "--border": "rgba(0,0,0,0.06)", "--text": "#1A1A2E", "--ts": "#4A4A5A", "--muted": "#8A8A9A", "--nav-bg": "rgba(242,240,235,0.92)" };
 
-  return <div style={{ ...theme, fontFamily: "var(--font-b)", background: "var(--bg)", color: "var(--text)", minHeight: "100vh", width: "100%", maxWidth: 430, margin: "0 auto", padding: "0 0 90px", overflowX: "hidden", boxSizing: "border-box" }}>{isDemoMode && <div style={{ position: "sticky", top: 0, zIndex: 200, background: "#F59E0B", color: "#1A1009", padding: "9px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 12, fontWeight: 600, fontFamily: "var(--font-h)", borderBottom: "2px solid rgba(0,0,0,0.12)" }}><span>🎮 Demo Mode — data not saved</span><div style={{ display: "flex", gap: 6 }}><button onClick={() => { localStorage.removeItem("nomad-demo-mode"); setShowSetup(true); }} style={{ padding: "5px 11px", border: "none", borderRadius: 7, background: "#1A1009", color: "#F59E0B", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--font-h)" }}>Connect Backend</button><button onClick={() => { localStorage.removeItem("nomad-demo-mode"); window.location.reload(); }} style={{ padding: "5px 10px", border: "1.5px solid rgba(0,0,0,0.25)", borderRadius: 7, background: "transparent", color: "#1A1009", fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "var(--font-h)" }}>Exit</button></div></div>}<style>{`
+  return <div style={{ ...theme, fontFamily: "var(--font-b)", background: "var(--bg)", color: "var(--text)", minHeight: "100vh", width: "100%", maxWidth: 430, margin: "0 auto", padding: "0 0 90px", overflowX: "hidden", boxSizing: "border-box" }}><style>{`
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Nunito:wght@400;500;600;700;800&family=Playfair+Display:wght@400;500&display=swap');
 :root{--font-h:'Plus Jakarta Sans',sans-serif;--font-b:'Nunito',sans-serif}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
