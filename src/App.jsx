@@ -873,6 +873,7 @@ export default function Nomad() {
   const [chatLoading, sChatLoading] = useState(false);
   const [walletsMgrOpen, sWalletsMgrOpen] = useState(false);
   const [newWalletName, sNewWalletName] = useState(""), [newWalletColor, sNewWalletColor] = useState("#A78BFA");
+  const [pushSub, sPushSub] = useState(null);
   const showT = (msg, type = "info") => {
     const id = Date.now() + Math.random();
     sToasts(prev => [...prev, { id, msg, type }]);
@@ -882,6 +883,44 @@ export default function Nomad() {
 
   // Persist custom wallets
   useEffect(() => { localStorage.setItem("nomad-wallets-v1", JSON.stringify(wallets)); }, [wallets]);
+
+  // Push notification permission + subscription (once per install)
+  useEffect(() => {
+    if (!loaded) return;
+    if (!("Notification" in window) || !("serviceWorker" in navigator)) return;
+    if (localStorage.getItem("nomad-notif-asked")) return;
+    localStorage.setItem("nomad-notif-asked", "1");
+    Notification.requestPermission().then(async (perm) => {
+      if (perm !== "granted") return;
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY;
+        if (!vapidKey) return;
+        const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidKey });
+        sPushSub(sub);
+        if (SB_ENABLED) {
+          const subJson = sub.toJSON();
+          await sbUpsert("push_subscriptions", [{ id: subJson.endpoint?.slice(-40) || uid(), subscription: subJson }]);
+        }
+      } catch { /* user denied or browser unsupported */ }
+    });
+  }, [loaded]);
+
+  // Push bill reminders to server when app opens (if push subscription exists)
+  useEffect(() => {
+    if (!loaded || !pushSub) return;
+    const todayStr = localDateKey();
+    const tomorrowStr = (() => { const d = new Date(); d.setDate(d.getDate() + 1); return localDateKey(d); })();
+    const dueBills = rec.filter(r => r.active).reduce((acc, r) => {
+      const dueToday = isRecurringDueToday(r, todayStr);
+      const dueTomorrow = !dueToday && getRecurringDueDate(r, tomorrowStr) === tomorrowStr;
+      if (dueToday) acc.push({ name: r.name, amount: r.amount, dueLabel: "today" });
+      else if (dueTomorrow) acc.push({ name: r.name, amount: r.amount, dueLabel: "tomorrow" });
+      return acc;
+    }, []);
+    if (dueBills.length === 0) return;
+    fetch("/api/push-notify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ subscription: pushSub.toJSON(), bills: dueBills }) }).catch(() => { });
+  }, [loaded, pushSub]);
 
   // No-log-in-3-days reminder (runs once after data loads)
   useEffect(() => {

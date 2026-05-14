@@ -255,3 +255,33 @@ CREATE TABLE IF NOT EXISTS routine_daily_logs (
 
 ALTER TABLE routine_daily_logs DISABLE ROW LEVEL SECURITY;
 ALTER TABLE routine_daily_logs REPLICA IDENTITY DEFAULT;
+
+-- ── 5. PUSH SUBSCRIPTIONS ─────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id           TEXT        PRIMARY KEY,
+  subscription JSONB       NOT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE push_subscriptions DISABLE ROW LEVEL SECURITY;
+
+-- ── 6. DRAFTS (CSV import + SMS auto-logging) ─────────────────
+
+CREATE TABLE IF NOT EXISTS drafts (
+  id                    TEXT        PRIMARY KEY,
+  source                TEXT        NOT NULL DEFAULT 'csv',
+  raw_text              TEXT,
+  date                  TEXT,
+  amount                NUMERIC(12,2),
+  type                  TEXT        NOT NULL DEFAULT 'expense',
+  merchant              TEXT,
+  vpa                   TEXT,
+  suggested_category_id TEXT,
+  suggested_wallet_id   TEXT,
+  is_person_payment     BOOLEAN     NOT NULL DEFAULT false,
+  status                TEXT        NOT NULL DEFAULT 'pending',
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE drafts DISABLE ROW LEVEL SECURITY;
