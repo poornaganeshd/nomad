@@ -206,6 +206,7 @@ END $$;
 -- Events feature overhaul (group events, split notes, paidBy)
 ALTER TABLE expenses ADD COLUMN IF NOT EXISTS "paidBy"      TEXT;
 ALTER TABLE splits   ADD COLUMN IF NOT EXISTS note          TEXT;
+ALTER TABLE splits   ADD COLUMN IF NOT EXISTS deleted_at    TIMESTAMPTZ DEFAULT NULL;
 ALTER TABLE events   ADD COLUMN IF NOT EXISTS type          TEXT DEFAULT 'solo';
 ALTER TABLE events   ADD COLUMN IF NOT EXISTS participants  JSONB DEFAULT '[]';
 
