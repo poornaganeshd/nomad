@@ -1,21 +1,66 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import nodemailer from "nodemailer";
 import { format } from "date-fns";
+import webPush from "web-push";
 import {
   makeHeaders, userGet, userPatch, userPost,
   withRetry, getPeriod, getNextSendAt, processSchedule,
 } from "./_shared.js";
 import type { UserEntry, Schedule } from "./_shared.js";
 
-const REGISTRY_URL = process.env.VITE_SUPABASE_URL!;
-const REGISTRY_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const CRON_SECRET  = process.env.CRON_SECRET!;
-const GMAIL_USER   = process.env.GMAIL_USER!;
-const GMAIL_PASS   = process.env.GMAIL_APP_PASSWORD!;
+const REGISTRY_URL  = process.env.VITE_SUPABASE_URL!;
+const REGISTRY_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const CRON_SECRET   = process.env.CRON_SECRET!;
+const GMAIL_USER    = process.env.GMAIL_USER!;
+const GMAIL_PASS    = process.env.GMAIL_APP_PASSWORD!;
+const VAPID_PUBLIC  = process.env.VAPID_PUBLIC_KEY  ?? "";
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY ?? "";
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT     ?? "mailto:admin@nomad.app";
+
+// Returns true if a monthly recurring bill is due on todayStr and not yet paid/skipped.
+function isMonthlyDueToday(r: Record<string, any>, todayStr: string): boolean {
+  if (!r.active) return false;
+  const dom = Number(r.dayOfMonth ?? 0);
+  if (!dom) return false;
+  const todayDay = Number(todayStr.slice(8, 10));
+  if (dom !== todayDay) return false;
+  const thisMonth = todayStr.slice(0, 7);
+  if ((r.lastPaidDate ?? "").slice(0, 7) === thisMonth) return false;
+  if ((r.lastSkippedDate ?? "").slice(0, 7) === thisMonth) return false;
+  return true;
+}
+
+async function sendPushForDueBills(user: UserEntry, todayStr: string): Promise<void> {
+  if (!VAPID_PUBLIC || !VAPID_PRIVATE) return;
+
+  const [subs, recurring] = await Promise.all([
+    userGet(user.supabase_url, user.anon_key, "/push_subscriptions?select=*").catch(() => [] as any[]),
+    userGet(user.supabase_url, user.anon_key, "/recurring?active=eq.true&select=*").catch(() => [] as any[]),
+  ]);
+
+  if (!subs.length) return;
+  const due = (recurring as any[]).filter(r => isMonthlyDueToday(r, todayStr));
+  if (!due.length) return;
+
+  webPush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC, VAPID_PRIVATE);
+
+  for (const sub of subs as any[]) {
+    const pushSub = { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } };
+    for (const rec of due) {
+      const payload = JSON.stringify({
+        title: "NOMAD — Bill Due Today",
+        body: `${rec.name} — ₹${rec.amount}`,
+        tag: `bill-${rec.id}-${todayStr}`,
+        requireInteraction: true,
+      });
+      await webPush.sendNotification(pushSub, payload).catch(() => {});
+    }
+  }
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  const authHeader  = req.headers.authorization ?? "";
-  const querySecret = (req.query?.secret as string) ?? "";
+  const authHeader   = req.headers.authorization ?? "";
+  const querySecret  = (req.query?.secret as string) ?? "";
   const isVercelCron = req.headers["x-vercel-cron"] === "1";
 
   if (!isVercelCron && authHeader !== `Bearer ${CRON_SECRET}` && querySecret !== CRON_SECRET) {
@@ -27,6 +72,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const now         = new Date();
   const nowIso      = now.toISOString();
+  const todayStr    = format(now, "yyyy-MM-dd");
   const transporter = nodemailer.createTransport({ service: "gmail", auth: { user: GMAIL_USER, pass: GMAIL_PASS } });
   const results: { user: string; scheduleId: string; status: string; error?: string }[] = [];
 
@@ -44,12 +90,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     ...registry.filter(u => u.supabase_url !== REGISTRY_URL),
   ];
 
-  // Per-user wall-clock cap: stops one slow Supabase project (cold start, throttled,
-  // paused free-tier) from blocking everyone behind it within the Vercel function's
-  // own timeout.
   const PER_USER_TIMEOUT_MS = 30_000;
-  // Bounded concurrency. Gmail SMTP is the real bottleneck; 5 in flight keeps us
-  // well under per-second sending limits while overlapping the Supabase fetches.
   const CONCURRENCY = 5;
 
   const withTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise<T> =>
@@ -59,6 +100,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     ]);
 
   const processUser = async (user: UserEntry) => {
+    // Send push notifications for bills due today (independent of email schedule).
+    sendPushForDueBills(user, todayStr).catch(() => {});
+
     let schedules: Schedule[] = [];
     try {
       schedules = await withTimeout(
@@ -103,8 +147,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
   };
 
-  // Process users in chunks of CONCURRENCY at a time. Promise.allSettled means
-  // one user's failure cannot break the chunk for everyone else.
   for (let i = 0; i < allUsers.length; i += CONCURRENCY) {
     const chunk = allUsers.slice(i, i + CONCURRENCY);
     await Promise.allSettled(chunk.map(processUser));

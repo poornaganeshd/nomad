@@ -65,3 +65,18 @@ self.addEventListener('notificationclick', (event) => {
     })
   );
 });
+
+self.addEventListener('push', (event) => {
+  let payload = { title: 'NOMAD', body: '', tag: 'nomad-push', requireInteraction: false };
+  try { if (event.data) payload = { ...payload, ...event.data.json() }; } catch {}
+  event.waitUntil(
+    self.registration.showNotification(payload.title, {
+      body: payload.body,
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
+      tag: payload.tag,
+      requireInteraction: payload.requireInteraction,
+      data: { url: '/' },
+    })
+  );
+});

@@ -32,8 +32,16 @@ export const getRecurringAnchorDate = (record) =>
 
 export const getRecurringDueDate = (record, todayString) => {
   const today = dateOnly(todayString);
-  const start = dateOnly(record.startDate);
-  if (Number.isNaN(start.getTime()) || start > today) return null;
+  let start = dateOnly(record.startDate);
+  if (Number.isNaN(start.getTime())) {
+    // null/invalid startDate — for monthly bills with dayOfMonth, compute directly
+    if (record.frequency === 'monthly' && record.dayOfMonth) {
+      const dom = Math.min(Number(record.dayOfMonth), lastDayOfMonth(today.getFullYear(), today.getMonth()));
+      return isoDate(new Date(today.getFullYear(), today.getMonth(), dom));
+    }
+    return null;
+  }
+  if (start > today) return null;
   if (record.frequency === 'monthly') {
     const dom = record.dayOfMonth || start.getDate();
     let months = Math.max(0, fullMonthsBetween(start, today));
