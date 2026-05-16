@@ -22,7 +22,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Reject the trivial open-relay abuse: caller's supabase_url must exist in the
   // owner's user_registry (or be the owner's own URL). This stops attackers who
   // spin up their own Supabase project just to relay spam through our Gmail.
-  if (REGISTRY_URL && REGISTRY_KEY && supabase_url !== REGISTRY_URL) {
+  if (!REGISTRY_URL || !REGISTRY_KEY) return res.status(500).json({ error: "Registry env vars not configured (VITE_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)" });
+  if (supabase_url !== REGISTRY_URL) {
     const lookupUrl = `${REGISTRY_URL}/rest/v1/user_registry?supabase_url=eq.${encodeURIComponent(supabase_url)}&select=supabase_url`;
     let lookupRes: Response;
     try {

@@ -83,6 +83,9 @@ const readDeadLetter = () => {
 
 export const getDeadLetterCount = () => readDeadLetter().length;
 
+export const isPendingDelete = (table, id) =>
+  readQueue().some(item => item.dedupeKey === `${table}:delete:${id}`);
+
 export const clearDeadLetter = () => {
   if (canUseStorage()) localStorage.removeItem(DEAD_LETTER_KEY);
 };
