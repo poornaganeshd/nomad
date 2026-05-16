@@ -408,6 +408,8 @@ const CSS = `
   color: #a09060;
   margin-top: 2px;
 }
+#nomad-routine .streak-on-fire { box-shadow: 0 0 0 2px rgba(239,159,39,0.35), 0 4px 16px rgba(239,159,39,0.18) !important; animation: streakPulse 3s ease-in-out infinite; }
+@keyframes streakPulse { 0%,100% { box-shadow: 0 0 0 2px rgba(239,159,39,0.35),0 4px 16px rgba(239,159,39,0.18); } 50% { box-shadow: 0 0 0 4px rgba(239,159,39,0.5),0 6px 22px rgba(239,159,39,0.3); } }
 
 /* ---- Panda bubble in sky ---- */
 #nomad-routine .sky-panda-row {
@@ -1800,6 +1802,9 @@ const Check = ({ on, onClick, teal }) => (
     </div>
 );
 
+/* ---------- Activity ring ---------- */
+const ActivityRing = ({ pct, size = 76, strokeWidth = 7, color, trackColor }) => { const r = (size - strokeWidth) / 2; const circ = 2 * Math.PI * r; const offset = circ * (1 - Math.min(pct, 100) / 100); const c = color || (pct >= 100 ? 'var(--green)' : 'var(--amber)'); return (<svg width={size} height={size} style={{ transform: 'rotate(-90deg)', display: 'block' }}><circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={trackColor || 'rgba(255,255,255,0.22)'} strokeWidth={strokeWidth} /><circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={c} strokeWidth={strokeWidth} strokeDasharray={`${circ}`} strokeDashoffset={offset} strokeLinecap="round" style={{ transition: 'stroke-dashoffset 0.7s cubic-bezier(0.4,0,0.2,1)' }} /></svg>); };
+
 /* ---------- Haptic ---------- */
 const prefersReducedMotion = () => {
     try { return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
@@ -2007,20 +2012,24 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                 <div className="sky-grass" />
                 <div className="sky-content">
                     <div className="sky-top-row">
-                        <div>
-                            <div className="sky-date-big">{pct}%</div>
-                            <div className="sky-date-sub">{dow} · {doneCount} of {totalCount} done</div>
-                            <div className="sky-progress-row">
-                                <div className="sky-prog-track">
-                                    <div className="sky-prog-fill" style={{ width: `${pct}%` }} />
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                            <div style={{ position: 'relative', width: 76, height: 76, flexShrink: 0 }}>
+                                <ActivityRing pct={pct} size={76} color={pct >= 100 ? 'var(--green)' : '#EF9F27'} trackColor="rgba(255,255,255,0.22)" />
+                                <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                                    <span style={{ fontSize: 17, fontWeight: 800, color: 'var(--tx)', lineHeight: 1 }}>{pct}%</span>
+                                    <span style={{ fontSize: 9, color: 'var(--txm)', fontWeight: 700, marginTop: 1 }}>{doneCount}/{totalCount}</span>
                                 </div>
-                                <div className="sky-prog-txt">{doneCount}/{totalCount}</div>
+                            </div>
+                            <div>
+                                <div className="sky-date-big">{dow}</div>
+                                <div className="sky-date-sub">{dateLabel}</div>
                             </div>
                         </div>
                         {streak > 0 && (
-                            <div className="streak-card">
+                            <div className={`streak-card${streak >= 7 ? ' streak-on-fire' : ''}`}>
+                                <div style={{ fontSize: 15, lineHeight: 1, marginBottom: 1 }}>🔥</div>
                                 <div className="s-num">{streak}</div>
-                                <div className="s-lbl">day streak</div>
+                                <div className="s-lbl">day{streak !== 1 ? 's' : ''}</div>
                             </div>
                         )}
                     </div>
@@ -2225,7 +2234,7 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                                     </span>
                                 </div>
                             ))}
-                            {dailyCals > 0 && <div style={{ marginTop: 8, fontSize: 11, color: 'var(--txm)', textAlign: 'right', fontWeight: 600 }}>~{dailyCals} cal logged today</div>}
+                            {dailyCals > 0 && (() => { const totalProt = foodLog.reduce((s, e) => s + (e.protein_g || 0), 0); const totalCarbs = foodLog.reduce((s, e) => s + (e.carbs_g || 0), 0); const totalFat = foodLog.reduce((s, e) => s + (e.fat_g || 0), 0); const calGoal = config.calGoal || 2000; const calPct = Math.min(100, Math.round(dailyCals / calGoal * 100)); const macroKcal = totalProt * 4 + totalCarbs * 4 + totalFat * 9; const hasMacros = macroKcal > 0; return (<div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 10, background: 'var(--sf)', border: '1px solid var(--bd)' }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}><span style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx)' }}>~{dailyCals} kcal</span><span style={{ fontSize: 11, color: 'var(--txm)' }}>of {calGoal} goal · {calPct}%</span></div><div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', background: 'var(--bg2)' }}><div style={{ width: `${calPct}%`, background: calPct >= 100 ? 'var(--amber)' : 'var(--green)', transition: 'width 0.5s ease', borderRadius: 3 }} /></div>{hasMacros && (<><div style={{ display: 'flex', height: 4, borderRadius: 2, overflow: 'hidden', background: 'var(--bg2)', marginTop: 5 }}><div style={{ flex: totalProt * 4, background: '#7B8CDE', transition: 'flex 0.4s' }} /><div style={{ flex: totalCarbs * 4, background: 'var(--amber)', transition: 'flex 0.4s' }} /><div style={{ flex: totalFat * 9, background: '#E07A5F', transition: 'flex 0.4s' }} /></div><div style={{ display: 'flex', gap: 10, marginTop: 5 }}><span style={{ fontSize: 10, color: '#7B8CDE', fontWeight: 700 }}>P {Math.round(totalProt)}g</span><span style={{ fontSize: 10, color: 'var(--amber-deep)', fontWeight: 700 }}>C {Math.round(totalCarbs)}g</span><span style={{ fontSize: 10, color: '#E07A5F', fontWeight: 700 }}>F {Math.round(totalFat)}g</span></div></>)}</div>); })()}
                         </div>
                     )}
                 </div>
@@ -2718,15 +2727,16 @@ const LogScreen = ({ allData, config }) => {
             </div>
             <div className="body-pad">
 
-                <div className="stats" style={{ gridTemplateColumns: '1fr 1fr' }}>
-                    <div className="stat green"><div className="v">{streak}</div><div className="l">Streak</div></div>
-                    <div className="stat teal"><div className="v">{daysTrackedThisMonth}</div><div className="l">This month</div></div>
-                    <div className="stat amber"><div className="v">{completionPct}%</div><div className="l">Completion</div></div>
-                    <div className="stat" style={{ '--v-color': 'var(--teal-deep)' }}>
-                        <div className="v" style={{ color: 'var(--teal-deep)' }}>{avgWater}{avgWater !== '—' ? 'L' : ''}</div>
-                        <div className="l">Avg water</div>
-                    </div>
+                <div style={{ display: 'flex', gap: 10, marginBottom: 14, overflowX: 'auto', paddingBottom: 4 }}>
+                    {[{ icon: '🔥', val: streak, label: `day${streak !== 1 ? 's' : ''}`, color: 'var(--amber)' }, { icon: '📅', val: daysTrackedThisMonth, label: 'this month', color: 'var(--teal)' }, { icon: '✓', val: `${completionPct}%`, label: 'completion', color: 'var(--green)' }, { icon: '💧', val: `${avgWater}${avgWater !== '—' ? 'L' : ''}`, label: 'avg water', color: 'var(--teal)' }].map(({ icon, val, label, color }) => (
+                        <div key={label} style={{ background: 'var(--sf)', borderRadius: 18, padding: '12px 16px', minWidth: 86, flexShrink: 0, textAlign: 'center', boxShadow: 'var(--card-shadow)' }}>
+                            <div style={{ fontSize: 18, lineHeight: 1, marginBottom: 4 }}>{icon}</div>
+                            <div style={{ fontSize: 22, fontWeight: 800, color, fontFamily: 'var(--mono)', letterSpacing: '-0.02em', lineHeight: 1.1 }}>{val}</div>
+                            <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--txm)', marginTop: 3, textTransform: 'uppercase', letterSpacing: '0.08em' }}>{label}</div>
+                        </div>
+                    ))}
                 </div>
+                {(() => { const days7 = Array.from({ length: 7 }, (_, i) => { const d = new Date(); d.setDate(d.getDate() - (6 - i)); d.setHours(12, 0, 0, 0); const k = todayKey(d); const rec = allData[k]; const lvl = dayLevel(rec); const names = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']; return { k, lvl, label: names[d.getDay()], isToday: k === todayKey() }; }); const maxH = 40; return (<div className="card" style={{ marginBottom: 14, padding: '14px 16px' }}><div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--txm)', marginBottom: 12 }}>Last 7 days</div><div style={{ display: 'flex', alignItems: 'flex-end', gap: 5, height: maxH + 22 }}>{days7.map(({ k, lvl, label, isToday }) => { const h = lvl === 0 ? 4 : Math.round((lvl / 4) * maxH); const bg = lvl === 0 ? 'var(--bd)' : lvl >= 4 ? 'var(--green)' : lvl >= 2 ? 'var(--amber)' : 'rgba(183,231,120,0.45)'; return (<div key={k} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5 }}><div style={{ width: '100%', borderRadius: 4, background: bg, height: h, alignSelf: 'flex-end', transition: 'height 0.4s ease', minHeight: 4 }} /><div style={{ fontSize: 9, fontWeight: isToday ? 800 : 600, color: isToday ? 'var(--tx)' : 'var(--txm)', letterSpacing: isToday ? '0.02em' : 0 }}>{label}</div></div>); })}</div></div>); })()}
 
                 <div className="card">
                     <div className="cal-hd">
