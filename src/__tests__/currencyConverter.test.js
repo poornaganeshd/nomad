@@ -100,6 +100,56 @@ describe('getExchangeRate', () => {
     await getExchangeRate('USD');
     expect(global.fetch).toHaveBeenCalledOnce();
   });
+
+  it('concurrent calls for the same currency share one fetch (in-flight dedup)', async () => {
+    let resolveFetch;
+    global.fetch = vi.fn().mockReturnValueOnce(
+      new Promise(res => {
+        resolveFetch = () => res({ ok: true, json: async () => ({ eur: { inr: 90 } }) });
+      })
+    );
+
+    // Fire two calls before the first fetch resolves
+    const p1 = getExchangeRate('EUR');
+    const p2 = getExchangeRate('EUR');
+
+    // Only one network request should have been initiated
+    expect(global.fetch).toHaveBeenCalledOnce();
+
+    resolveFetch();
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    expect(r1).toBe(90);
+    expect(r2).toBe(90);
+    expect(global.fetch).toHaveBeenCalledOnce(); // still one total
+  });
+
+  it('a call after in-flight resolves uses cache, not another fetch', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ jpy: { inr: 0.55 } }),
+    });
+
+    await getExchangeRate('JPY');         // fetches + caches
+    const r2 = await getExchangeRate('JPY'); // should hit cache
+
+    expect(r2).toBe(0.55);
+    expect(global.fetch).toHaveBeenCalledOnce();
+  });
+
+  it('in-flight dedup cleans up on failure so retry is possible', async () => {
+    global.fetch = vi.fn()
+      .mockRejectedValueOnce(new Error('network down')) // first call fails
+      .mockRejectedValueOnce(new Error('network down')) // fallback also fails
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ chf: { inr: 95 } }) }) // primary succeeds on retry
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ chf: { inr: 95 } }) }); // fallback (unused)
+
+    const r1 = await getExchangeRate('CHF');  // fails → null, map entry removed
+    expect(r1).toBeNull();
+
+    const r2 = await getExchangeRate('CHF');  // retries fresh
+    expect(r2).toBe(95);
+  });
 });
 
 // ---------------------------------------------------------------------------

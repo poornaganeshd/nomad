@@ -352,3 +352,61 @@ describe('flushSyncQueue', () => {
     expect(captured[0]).toHaveProperty('Content-Type');
   });
 });
+
+// ---------------------------------------------------------------------------
+// isPendingDelete
+// ---------------------------------------------------------------------------
+describe('isPendingDelete', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns false when the queue is empty', async () => {
+    const { isPendingDelete } = await import('../offlineSync.js');
+    expect(isPendingDelete('expenses', 'abc123')).toBe(false);
+  });
+
+  it('returns true when a matching soft-delete is queued', async () => {
+    const { isPendingDelete, queueSupabaseRequest } = await import('../offlineSync.js');
+    queueSupabaseRequest(makeItem({ dedupeKey: 'expenses:delete:abc123' }));
+    expect(isPendingDelete('expenses', 'abc123')).toBe(true);
+  });
+
+  it('returns false when queue has items but none match table+id', async () => {
+    const { isPendingDelete, queueSupabaseRequest } = await import('../offlineSync.js');
+    queueSupabaseRequest(makeItem({ dedupeKey: 'expenses:delete:other-id' }));
+    queueSupabaseRequest(makeItem({ dedupeKey: 'splits:delete:abc123' }));
+    expect(isPendingDelete('expenses', 'abc123')).toBe(false);
+  });
+
+  it('matches table and id independently', async () => {
+    const { isPendingDelete, queueSupabaseRequest } = await import('../offlineSync.js');
+    queueSupabaseRequest(makeItem({ dedupeKey: 'splits:delete:abc123' }));
+    expect(isPendingDelete('splits', 'abc123')).toBe(true);
+    expect(isPendingDelete('expenses', 'abc123')).toBe(false);
+    expect(isPendingDelete('splits', 'other-id')).toBe(false);
+  });
+
+  it('returns false after flush successfully processes the delete', async () => {
+    const { isPendingDelete, queueSupabaseRequest, flushSyncQueue } = await import('../offlineSync.js');
+    queueSupabaseRequest(makeItem({ dedupeKey: 'expenses:delete:abc123' }));
+    expect(isPendingDelete('expenses', 'abc123')).toBe(true);
+
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: true });
+    await flushSyncQueue();
+
+    expect(isPendingDelete('expenses', 'abc123')).toBe(false);
+  });
+
+  it('works with invalid queue JSON (returns false, does not throw)', async () => {
+    const { isPendingDelete } = await import('../offlineSync.js');
+    localStorage.setItem(QUEUE_KEY, 'not-valid-json');
+    expect(() => isPendingDelete('expenses', 'abc')).not.toThrow();
+    expect(isPendingDelete('expenses', 'abc')).toBe(false);
+  });
+});
