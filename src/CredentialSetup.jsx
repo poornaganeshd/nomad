@@ -291,6 +291,7 @@ export default function CredentialSetup({ onDone, onCancel }) {
   const importConfig = (file) => {
     if (!file) return;
     const r = new FileReader();
+    r.onerror = () => setError("Failed to read file.");
     r.onload = (e) => {
       try {
         const d = JSON.parse(e.target.result);

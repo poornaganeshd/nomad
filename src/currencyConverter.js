@@ -34,20 +34,27 @@ async function fetchRateFrom(baseUrl, lower) {
   return typeof rate === "number" ? rate : null;
 }
 
+const inFlight = new Map();
+
 export async function getExchangeRate(fromCurrency) {
   const c = fromCurrency.trim().toUpperCase();
   if (!c || c === "INR") return 1;
   const cached = getCachedRate(c);
   if (cached !== null) return cached;
+  if (inFlight.has(c)) return inFlight.get(c);
   const lower = c.toLowerCase();
-  let rate = null;
-  try { rate = await fetchRateFrom(PRIMARY_CDN, lower); } catch { rate = null; }
-  if (rate === null) {
-    try { rate = await fetchRateFrom(FALLBACK_CDN, lower); } catch { rate = null; }
-  }
-  if (rate === null) return null;
-  saveRateCache(c, rate);
-  return rate;
+  const promise = (async () => {
+    let rate = null;
+    try { rate = await fetchRateFrom(PRIMARY_CDN, lower); } catch { rate = null; }
+    if (rate === null) {
+      try { rate = await fetchRateFrom(FALLBACK_CDN, lower); } catch { rate = null; }
+    }
+    inFlight.delete(c);
+    if (rate !== null) saveRateCache(c, rate);
+    return rate;
+  })();
+  inFlight.set(c, promise);
+  return promise;
 }
 
 export function saveCurrencyMeta(txId, currency, originalAmount, rateUsed) {
