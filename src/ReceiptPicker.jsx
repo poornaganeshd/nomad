@@ -3,7 +3,7 @@ import { uploadReceipt } from "./receiptUpload";
 
 const MAX = 5;
 
-const ReceiptPicker = forwardRef(function ReceiptPicker(_, ref) {
+const ReceiptPicker = forwardRef(function ReceiptPicker({ cloudinaryEnabled = true }, ref) {
   const [items, setItems]       = useState([]); // { id, file, localUrl }
   const [showMenu, setShowMenu] = useState(false);
   const [hovered, setHovered]   = useState(false);
@@ -75,7 +75,10 @@ const ReceiptPicker = forwardRef(function ReceiptPicker(_, ref) {
       )}
 
       {/* Add button + source menu */}
-      {canAdd && (
+      {!cloudinaryEnabled && items.length === 0 && (
+        <div style={{ fontSize: 11, color: "var(--muted)", fontStyle: "italic" }}>Add Cloudinary in Settings to attach receipts</div>
+      )}
+      {cloudinaryEnabled && canAdd && (
         <div style={{ position: "relative", display: "inline-block" }}>
           {/* Backdrop to close menu */}
           {showMenu && (

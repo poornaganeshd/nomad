@@ -59,14 +59,8 @@ export async function uploadReceipt(file) {
   const isPdf = file.type === "application/pdf";
   const blob = isPdf ? file : await compressImage(file);
 
-  // ── Local fallback: no Cloudinary configured ──────────────────────────────
   if (!cloudName) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(new Error("Failed to read image"));
-      reader.readAsDataURL(blob);
-    });
+    throw new Error("Cloudinary not configured — add your Cloud Name in Settings → Credentials to attach receipts.");
   }
 
   // ── Cloudinary upload ─────────────────────────────────────────────────────
