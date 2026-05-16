@@ -3,6 +3,7 @@ import { sendSupabaseRequest } from './offlineSync';
 import { getCredentials as _getCreds } from './credentials';
 import { analyzeFood, foodResultToText, foodResultToMacroString } from './foodVision';
 import { IconFlameFilled, IconDropletFilled, IconCalendarMonth, IconCircleCheckFilled, IconEggFilled, IconMoodHappyFilled, IconMoodNeutralFilled, IconMoodSadFilled, IconMoodAngryFilled, IconBedFilled, IconMoonFilled, IconCameraFilled, IconCalendarWeek, IconPhotoPlus } from '@tabler/icons-react';
+import { Camera, Leaf, Robot } from "@phosphor-icons/react";
 
 /* ============================================================
    FORM — Daily food & skincare ritual tracker  v6
@@ -2294,13 +2295,13 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                             style={{ width: 38, height: 38, marginTop: 0, borderRadius: 10, border: '1.5px solid var(--bd)', background: analyzing ? 'var(--sf)' : 'var(--bg)', cursor: analyzing ? 'default' : 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
                             onClick={() => { if (!analyzing) cameraInputRef.current?.click(); }}
                             title="Analyse food photo"
-                        >{analyzing ? '⏳' : '📷'}</button>
+                        >{analyzing ? '⏳' : <Camera size={18} />}</button>
                         <button className="btn green" style={{ width: 'auto', marginTop: 0, padding: '0 16px', fontSize: 13 }} onClick={addEntry}>Add</button>
                     </div>
                     {/* AI macro preview — shown after photo analysis, before user taps Add */}
                     {aiMacros && (
                         <div style={{ marginTop: 8, padding: '7px 10px', borderRadius: 8, background: 'var(--green-sf)', border: '1px solid var(--green)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                            <span style={{ fontSize: 11, color: 'var(--green-deep)', fontWeight: 600 }}>🤖 {foodResultToMacroString(aiMacros)}</span>
+                            <span style={{ fontSize: 11, color: 'var(--green-deep)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}><Robot size={12} />{foodResultToMacroString(aiMacros)}</span>
                             <span style={{ fontSize: 10, color: aiMacros.confidence === 'low' ? '#e07800' : 'var(--green-deep)', background: aiMacros.confidence === 'low' ? '#fff3e0' : 'rgba(255,255,255,0.55)', borderRadius: 6, padding: '2px 6px', fontWeight: 700 }}>{aiMacros.confidence}</span>
                         </div>
                     )}
@@ -2981,7 +2982,7 @@ const LogScreen = ({ allData, config }) => {
                     </div>
                     {Object.keys(allData).length === 0 ? (
                         <div style={{ textAlign: 'center', padding: '32px 16px', color: 'var(--txm)' }}>
-                            <div style={{ fontSize: 32, marginBottom: 10 }}>🌱</div>
+                            <div style={{ marginBottom: 10 }}><Leaf size={32} color="var(--txm)" /></div>
                             <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>No data yet</div>
                             <div style={{ fontSize: 12 }}>Start logging on the Food and Skin tabs — your history will appear here.</div>
                         </div>
