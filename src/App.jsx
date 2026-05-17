@@ -111,7 +111,7 @@ const sbWrite = async (path, { method = "POST", body, dedupeKey, extraHeaders = 
   return result;
 };
 const sbUpsert = async (table, rows, dedupeKey = null, extraHeaders = {}) => sbWrite(`${SB_URL}/rest/v1/${table}`, { method: "POST", body: rows, dedupeKey, extraHeaders });
-const sbDelete = async (table, id) => sbWrite(`${SB_URL}/rest/v1/${table}?id=eq.${id}`, { method: "PATCH", body: { deleted_at: new Date().toISOString() }, dedupeKey: `${table}:delete:${id}` });
+const sbDelete = async (table, id) => { const r = await sbWrite(`${SB_URL}/rest/v1/${table}?id=eq.${id}`, { method: "PATCH", body: { deleted_at: new Date().toISOString() }, dedupeKey: `${table}:delete:${id}` }); if (!r.ok && !r.queued && r.response?.status === 400) return sbDeleteWhere(table, `id=eq.${id}`); return r; };
 const sbGetDeleted = async (table) => {
   if (!SB_ENABLED) return null;
   try {
