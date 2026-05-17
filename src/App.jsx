@@ -447,7 +447,7 @@ function Splits({ splits: sp, settlements: stl, onAdd, onSettle: os, onDelete: o
   if(!exp) return <div onClick={ot} style={{...cc,borderRadius:16,padding:"16px 18px",marginBottom:14,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",position:"relative",overflow:"hidden"}}><div style={{position:"absolute",bottom:0,right:0,width:60,height:3,borderRadius:"3px 0 0 0",background:"#D4726A"}}/><div><div style={{fontFamily:"var(--font-h)",fontSize:12,color:"#D4726A",letterSpacing:"0.5px",fontWeight:700}}>Split Expenses</div><div style={{fontSize:11,color:"var(--muted)",fontFamily:"var(--font-b)",marginBottom:4}}>Personal IOUs · tap to manage</div><div style={{fontSize:13,fontFamily:"var(--font-b)",color:"var(--ts)",marginTop:2}}>{activePeople.length===0?"No pending splits":<><span style={{color:"#E07A5F"}}>You owe {fmt(tO)}</span> · <span style={{color:"#6BAA75"}}>Owed {fmt(tI)}</span></>}</div></div><IconChevronRight size={18} color="var(--muted)"/></div>;
   if(exp&&drill){
     const pm=personMap[drill]||{splits:[],net:0}; const net=pm.net; const pStls=stlByPerson[drill]||[]; const pendingSplits=pm.splits.filter(s=>!s.settled); const aColor=avatarColor(drill);
-    const events=[...pm.splits.map(s=>({...s,_k:"split"})),...pStls.map(s=>({...s,_k:"stl"}))].sort((a,b)=>{const ta=a._k==="split"?(a.createdAt||""):(a.createdAt||a.date||"");const tb=b._k==="split"?(b.createdAt||""):(b.createdAt||b.date||"");if(!ta&&!tb)return 0;if(!ta)return 1;if(!tb)return -1;return new Date(tb)-new Date(ta);});
+    const events=[...pm.splits.map(s=>({...s,_k:"split"})),...pStls.map(s=>({...s,_k:"stl"}))].sort((a,b)=>{const ta=a._k==="split"?(a.created_at||a.createdAt||a.updated_at||""):(a.created_at||a.createdAt||a.updated_at||a.date||"");const tb=b._k==="split"?(b.created_at||b.createdAt||b.updated_at||""):(b.created_at||b.createdAt||b.updated_at||b.date||"");if(!ta&&!tb)return 0;if(!ta)return 1;if(!tb)return -1;return new Date(tb)-new Date(ta);});
     return <div style={{...cc,borderRadius:16,padding:18,marginBottom:14,position:"relative",overflow:"hidden"}}><div style={{position:"absolute",bottom:0,right:0,width:60,height:3,borderRadius:"3px 0 0 0",background:"#D4726A"}}/><div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}><button onClick={()=>{sDrill(null);sDelConfirm(null);}} style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",padding:2,display:"flex",alignItems:"center"}}><IconChevronLeft size={18}/></button><div style={{width:36,height:36,borderRadius:"50%",background:aColor,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><span style={{fontFamily:"var(--font-h)",fontSize:13,fontWeight:700,color:"#fff"}}>{initials(drill)}</span></div><div style={{flex:1}}><div style={{fontFamily:"var(--font-h)",fontSize:15,fontWeight:700,color:"var(--text)"}}>{drill}</div><div style={{fontSize:11,fontFamily:"var(--font-h)",fontWeight:700,color:Math.abs(net)<0.01?"var(--muted)":net>0?"#6BAA75":"#E07A5F"}}>{Math.abs(net)<0.01?"Fully settled ✓":net>0?`Owes you ${fmt(net)}`:`You owe ${fmt(-net)}`}</div></div>{pendingSplits.length>1&&settleAllWid===null&&<button onClick={()=>sSAW("bank")} style={{padding:"6px 10px",border:"1.5px solid #6BAA75",borderRadius:8,background:"#6BAA7512",color:"#6BAA75",fontFamily:"var(--font-h)",fontSize:11,fontWeight:700,cursor:"pointer",flexShrink:0}}>Settle all</button>}</div>
     {settleAllWid!==null&&<div style={{background:"var(--bg)",borderRadius:12,padding:14,marginBottom:12,border:"1.5px solid #6BAA75"}}><div style={{fontFamily:"var(--font-h)",fontSize:12,fontWeight:700,color:"var(--text)",marginBottom:8}}>Settle all IOUs with {drill} · {fmt(pendingSplits.reduce((t,s)=>t+remainForSplit(s),0))}</div><div style={{display:"flex",gap:6,marginBottom:10}}>{(pendingSplits[0]?.direction==="owed"?wl.filter(w=>w.id!=="upi_lite"):wl).map(w=><button key={w.id} onClick={()=>sSAW(w.id)} style={{flex:1,padding:"8px 4px",borderRadius:8,display:"flex",flexDirection:"column",alignItems:"center",gap:3,border:`2px solid ${settleAllWid===w.id?w.color:"var(--border)"}`,background:settleAllWid===w.id?w.color+"15":"var(--card)",cursor:"pointer"}}><DI2 id={w.id} accent={w.neon||w.color} size={16}/><span style={{fontSize:8,fontFamily:"var(--font-h)",fontWeight:settleAllWid===w.id?700:500,color:settleAllWid===w.id?w.color:"var(--muted)"}}>{w.name}</span></button>)}</div><div style={{display:"flex",gap:8}}><button onClick={()=>sSAW(null)} style={{flex:1,padding:"9px",border:"1.5px solid var(--border)",borderRadius:9,background:"transparent",color:"var(--muted)",fontFamily:"var(--font-h)",fontSize:12,cursor:"pointer"}}>Cancel</button><button onClick={()=>{pendingSplits.forEach(s=>os(s.id,settleAllWid,remainForSplit(s)));sSAW(null);}} style={{flex:2,padding:"9px",border:"none",borderRadius:9,background:"#6BAA75",color:"#fff",fontFamily:"var(--font-h)",fontSize:12,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:5}}><IconCheck size={14}/>Confirm all settled</button></div></div>}
     {events.length===0&&<div style={{textAlign:"center",padding:"16px 0",color:"var(--muted)",fontSize:13,fontFamily:"var(--font-h)"}}>No history yet</div>}
@@ -456,7 +456,7 @@ function Splits({ splits: sp, settlements: stl, onAdd, onSettle: os, onDelete: o
     {st&&<SettleM split={st} remaining={remainForSplit(st)} wallets={wl} onConfirm={(wid,amount)=>{os(st.id,wid,amount);sT(null);}} onClose={()=>sT(null)}/>}</div>;
   }
   if(exp&&showFeed){
-    const feed=[...sp.filter(s=>!s.eventId&&!s.deleted_at).map(s=>({...s,_k:"split"})),...(stl||[]).filter(s=>!s.eventId).map(s=>({...s,_k:"stl"}))].sort((a,b)=>{const ta=a._k==="split"?(a.createdAt||""):(a.createdAt||a.date||"");const tb=b._k==="split"?(b.createdAt||""):(b.createdAt||b.date||"");if(!ta&&!tb)return 0;if(!ta)return 1;if(!tb)return -1;return new Date(tb)-new Date(ta);});
+    const feed=[...sp.filter(s=>!s.eventId&&!s.deleted_at).map(s=>({...s,_k:"split"})),...(stl||[]).filter(s=>!s.eventId).map(s=>({...s,_k:"stl"}))].sort((a,b)=>{const ta=a._k==="split"?(a.created_at||a.createdAt||a.updated_at||""):(a.created_at||a.createdAt||a.updated_at||a.date||"");const tb=b._k==="split"?(b.created_at||b.createdAt||b.updated_at||""):(b.created_at||b.createdAt||b.updated_at||b.date||"");if(!ta&&!tb)return 0;if(!ta)return 1;if(!tb)return -1;return new Date(tb)-new Date(ta);});
     return <div style={{...cc,borderRadius:16,padding:18,marginBottom:14,position:"relative",overflow:"hidden"}}><div style={{position:"absolute",bottom:0,right:0,width:60,height:3,borderRadius:"3px 0 0 0",background:"#D4726A"}}/><div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}><button onClick={()=>sSF(false)} style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",padding:2,display:"flex",alignItems:"center"}}><IconChevronLeft size={18}/></button><div style={{fontFamily:"var(--font-h)",fontSize:13,fontWeight:700,color:"#D4726A",flex:1}}>Split History</div></div>
     {feed.length===0&&<div style={{textAlign:"center",padding:"20px 0",color:"var(--muted)",fontSize:13,fontFamily:"var(--font-h)"}}>No split history yet</div>}
     {feed.map(ev=>ev._k==="split"?<div key={ev.id} onClick={()=>{sDrill(ev.name);sSF(false);}} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 14px",background:"var(--bg)",borderRadius:12,marginBottom:8,border:`1px solid ${ev.settled?"var(--border)":ev.direction==="owe"?"#E07A5F30":"#6BAA7530"}`,cursor:"pointer",opacity:ev.settled?0.6:1}}><div style={{width:32,height:32,borderRadius:"50%",background:avatarColor(ev.name),display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><span style={{fontFamily:"var(--font-h)",fontSize:11,fontWeight:700,color:"#fff"}}>{initials(ev.name)}</span></div><div style={{flex:1}}><div style={{fontSize:13,fontWeight:600,fontFamily:"var(--font-h)",color:"var(--text)"}}>{ev.name}</div><div style={{fontSize:10,color:"var(--muted)",fontFamily:"var(--font-b)",display:"flex",alignItems:"center",gap:4}}>{ev.skipped?<IconPlayerSkipForward size={9} color="#F4A261"/>:ev.settled?<IconCheck size={9} color="#6BAA75"/>:ev.direction==="owe"?<IconArrowDown size={9} color="#E07A5F"/>:<IconArrowUp size={9} color="#6BAA75"/>}{ev.skipped?"Skipped":ev.direction==="owe"?"You owe":"Owes you"}{ev.note&&` · ${ev.note}`}{ev.createdAt&&` · ${fmtDate(ev.createdAt)}`}</div></div><span style={{fontFamily:"var(--font-h)",fontWeight:700,fontSize:14,color:ev.direction==="owe"?"#E07A5F":"#6BAA75"}}>{fmt(ev.amount)}</span></div>:<div key={ev.id} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",background:"var(--bg)",borderRadius:12,marginBottom:8,border:"1px solid var(--border)",opacity:0.65}}><div style={{width:32,height:32,borderRadius:"50%",background:avatarColor(ev.splitName||""),display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><span style={{fontFamily:"var(--font-h)",fontSize:11,fontWeight:700,color:"#fff"}}>{initials(ev.splitName||"")}</span></div><div style={{flex:1}}><div style={{fontSize:13,fontWeight:600,fontFamily:"var(--font-h)",color:"var(--text)"}}>{ev.splitName}</div><div style={{fontSize:10,color:"var(--muted)",fontFamily:"var(--font-b)",display:"flex",alignItems:"center",gap:4}}><IconSend size={9} color="var(--muted)"/>{ev.direction==="owed"?"Received":"Paid"}{ev.createdAt?` · ${fmtDate(ev.createdAt)}`:ev.date?` · ${ev.date}`:""}</div></div><span style={{fontFamily:"var(--font-h)",fontWeight:700,fontSize:14,color:ev.direction==="owed"?"#6BAA75":"#E07A5F"}}>{ev.direction==="owed"?"+":"-"}{fmt(ev.amount)}</span></div>)}
@@ -1042,8 +1042,8 @@ export default function Nomad() {
               if (hasLocal) {
                 const exL = ld.expenses || [], incL = ld.incomes || [], trL = ld.transfers || [];
                 const stlL = ld.settlements || [], spL = ld.splits || [], recL = ld.recurring || [], evsL = ld.events || [];
-                if (exL.length) sbUpsert("expenses", exL.map(e => toSB(e, ["id", "amount", "categoryId", "walletId", "note", "date", "eventId", "groupId", "paidBy", "balBefore"])));
-                if (incL.length) sbUpsert("incomes", incL.map(i => toSB(i, ["id", "amount", "sourceId", "walletId", "note", "date", "balBefore"])));
+                if (exL.length) sbUpsert("expenses", exL.map(e => toSB(e, ["id", "amount", "categoryId", "walletId", "note", "date", "eventId", "groupId", "receipt_url", "paidBy", "balBefore"])));
+                if (incL.length) sbUpsert("incomes", incL.map(i => toSB(i, ["id", "amount", "sourceId", "walletId", "note", "date", "receipt_url", "balBefore"])));
                 if (trL.length) sbUpsert("transfers", trL.map(t => toSB(t, ["id", "amount", "fromWallet", "toWallet", "note", "date", "fromBalBefore", "toBalBefore"])));
                 if (stlL.length) sbUpsert("settlements", stlL.map(s => toSB(s, ["id", "amount", "splitName", "splitId", "direction", "walletId", "date", "groupId", "eventId"])));
                 if (spL.length) sbUpsert("splits", spL.map(s => toSB(s, ["id", "name", "amount", "direction", "settled", "eventId", "groupId", "note"])));
@@ -1097,7 +1097,7 @@ export default function Nomad() {
   const tI = flt.incomes.reduce((s, i) => s + i.amount, 0), tE = Math.max(0, flt.expenses.reduce((s, e) => s + e.amount, 0) + flt.settlements.filter(s => s.direction === "owe").reduce((s, x) => s + x.amount, 0) - flt.settlements.filter(s => s.direction === "owed").reduce((s, x) => s + x.amount, 0));
   const historyItems = useMemo(() => {
     const searching = hSearch.trim() !== "";
-    const spWithDate = sp.map(s => ({ ...s, type: "split", date: (s.createdAt || "").slice(0, 10) }));
+    const spWithDate = sp.map(s => ({ ...s, type: "split", date: (s.created_at || s.createdAt || s.updated_at || "").slice(0, 10) }));
     let items = searching
       ? [...ex.map(e => ({ ...e, type: "expense" })), ...inc.map(i => ({ ...i, type: "income" })), ...tr.map(t => ({ ...t, type: "transfer" })), ...stl.map(s => ({ ...s, type: "settlement" })), ...spWithDate]
       : [...flt.expenses.map(e => ({ ...e, type: "expense" })), ...flt.incomes.map(i => ({ ...i, type: "income" })), ...(fm === "all" ? tr : tr.filter(t => mk(t.date) === fm)).map(t => ({ ...t, type: "transfer" })), ...(fm === "all" ? stl : stl.filter(s => mk(s.date) === fm)).map(s => ({ ...s, type: "settlement" })), ...(fm === "all" ? spWithDate : spWithDate.filter(s => mk(s.date) === fm))];
@@ -1108,45 +1108,36 @@ export default function Nomad() {
     if (hDateTo) items = items.filter(it => it.date <= hDateTo);
     if (hType === "recurring") items = items.filter(it => it.type === "expense" && isFix(it));
     else if (hType !== "all") items = items.filter(it => it.type === hType);
-    return items.sort((a, b) => { const dd = new Date(b.date) - new Date(a.date); if (dd !== 0) return dd; return new Date(b.created_at || b.createdAt || 0) - new Date(a.created_at || a.createdAt || 0); });
+    return items.sort((a, b) => { const dd = new Date(b.date) - new Date(a.date); if (dd !== 0) return dd; return new Date(b.created_at || b.createdAt || b.updated_at || 0) - new Date(a.created_at || a.createdAt || a.updated_at || 0); });
   }, [flt, ex, inc, tr, stl, sp, fm, hSearch, hMinAmt, hMaxAmt, hDateFrom, hDateTo, hType, cats, isrc, evs]);
   const timelineData = useMemo(() => {
-    const allSnaps = (() => { try { return JSON.parse(localStorage.getItem("nomad-cal-snaps-v1") || "[]"); } catch { return []; } })();
-    const all = [...ex.map(e => ({ ...e, type: "expense" })), ...inc.map(i => ({ ...i, type: "income" })), ...tr.map(t => ({ ...t, type: "transfer" })), ...stl.map(s => ({ ...s, type: "settlement" }))].sort((a, b) => { const dd = new Date(a.date) - new Date(b.date); if (dd !== 0) return dd; return new Date(a.created_at || 0) - new Date(b.created_at || 0); });
-    const map = {};
+    const all = [...ex.map(e => ({ ...e, type: "expense" })), ...inc.map(i => ({ ...i, type: "income" })), ...tr.map(t => ({ ...t, type: "transfer" })), ...stl.map(s => ({ ...s, type: "settlement" }))].sort((a, b) => { const dd = new Date(a.date) - new Date(b.date); if (dd !== 0) return dd; return new Date(a.created_at || a.createdAt || a.updated_at || 0) - new Date(b.created_at || b.createdAt || b.updated_at || 0); });
     const wDelta = (tx, wId) => { if (tx.type === "expense") return (tx.walletId || "upi_lite") === wId ? -tx.amount : 0; if (tx.type === "income") return (tx.walletId || "bank") === wId ? tx.amount : 0; if (tx.type === "transfer") { if (tx.fromWallet === wId) return -tx.amount; if (tx.toWallet === wId) return tx.amount; return 0; } if (tx.type === "settlement") return tx.walletId === wId ? (tx.direction === "owed" ? tx.amount : -tx.amount) : 0; return 0; };
-    const snapsByWallet = {};
-    allSnaps.forEach(s => { if (!snapsByWallet[s.walletId]) snapsByWallet[s.walletId] = []; snapsByWallet[s.walletId].push(s); });
-    Object.values(snapsByWallet).forEach(snaps => snaps.sort((a, b) => a.ts - b.ts));
-    if (allSnaps.length === 0) {
-      const bal = {}; wallets.forEach(w => { bal[w.id] = wsb[w.id] || 0; });
-      all.forEach(it => { const before = { ...bal }; if (it.type === "expense") { const w = it.walletId || "upi_lite"; if (bal[w] !== undefined) bal[w] -= it.amount; } else if (it.type === "income") { const w = it.walletId || "bank"; if (bal[w] !== undefined) bal[w] += it.amount; } else if (it.type === "transfer") { if (bal[it.fromWallet] !== undefined) bal[it.fromWallet] -= it.amount; if (bal[it.toWallet] !== undefined) bal[it.toWallet] += it.amount; } else if (it.type === "settlement") { const w = it.walletId; if (bal[w] !== undefined) { if (it.direction === "owed") bal[w] += it.amount; else bal[w] -= it.amount; } } map[it.id] = { before, after: { ...bal } }; });
-      return map;
-    }
+    // Calibrations shift wsb by `gap` at a specific point in time. For each
+    // transaction, transactions PRIOR to a calibration's ts must use the
+    // pre-calibration wsb (current wsb minus all gaps from calibrations
+    // recorded after the transaction). Otherwise a fresh calibration would
+    // retroactively rewrite the entire past timeline.
+    const calsByWallet = {};
+    calLog.forEach(c => { if (!calsByWallet[c.wId]) calsByWallet[c.wId] = []; calsByWallet[c.wId].push(c); });
+    const txTs = (tx) => { const t = tx.created_at || tx.createdAt || tx.updated_at; return t ? new Date(t).getTime() : new Date(tx.date + "T23:59:59").getTime(); };
+    const map = {};
     all.forEach((tx, i) => {
       const after = {}, before = {};
+      const tts = txTs(tx);
+      const slice = all.slice(0, i + 1);
       wallets.forEach(w => {
-        const snaps = snapsByWallet[w.id] || [];
-        const txDate = tx.date;
-        let aft;
-        if (snaps.length === 0) {
-          aft = (wsb[w.id] || 0) + all.slice(0, i + 1).reduce((s, t) => s + wDelta(t, w.id), 0);
-        } else if (txDate < snaps[0].date) {
-          const sumBetween = all.slice(i + 1).filter(t => t.date <= snaps[0].date).reduce((s, t) => s + wDelta(t, w.id), 0);
-          aft = snaps[0].balance - sumBetween;
-        } else {
-          let anchorSnap = snaps[0];
-          for (const s of snaps) { if (s.date <= txDate) anchorSnap = s; else break; }
-          const sumAfterSnap = all.slice(0, i + 1).filter(t => t.date > anchorSnap.date).reduce((s, t) => s + wDelta(t, w.id), 0);
-          aft = anchorSnap.balance + sumAfterSnap;
-        }
+        const cals = calsByWallet[w.id] || [];
+        const futureGapSum = cals.filter(c => c.ts > tts).reduce((s, c) => s + (c.gap || 0), 0);
+        const histStartBal = (wsb[w.id] || 0) - futureGapSum;
+        const aft = histStartBal + slice.reduce((s, t) => s + wDelta(t, w.id), 0);
         after[w.id] = aft;
         before[w.id] = aft - wDelta(tx, w.id);
       });
       map[tx.id] = { before, after };
     });
     return map;
-  }, [ex, inc, tr, stl, wsb, wallets]);
+  }, [ex, inc, tr, stl, wsb, wallets, calLog]);
 
   const budgetStatus = useMemo(() => { const cm = localDateKey().slice(0, 7); const mEx = ex.filter(e => mk(e.date) === cm); return Object.entries(budgets).filter(entry => entry[1] > 0).map(([cid, lim]) => { const spent = mEx.filter(e => e.categoryId === cid).reduce((s, e) => s + e.amount, 0); const cat = cats.find(c => c.id === cid) || { id: cid, name: cid, color: "#999", neon: "#999" }; const pct = Math.min(100, Math.round(spent / lim * 100)); return { cid, cat, spent, lim, pct }; }); }, [budgets, ex, cats]);
 
@@ -1183,7 +1174,7 @@ export default function Nomad() {
     if (data.paidBy && data.paidBy !== "me") {
       const rec = { id: uid(), type: "expense", ...data, amount: amt, walletId: "__tracked__", created_at: new Date().toISOString() };
       sEx(p => [rec, ...p]);
-      sbUpsert("expenses", [toSB(rec, ["id", "amount", "categoryId", "walletId", "note", "date", "eventId", "groupId", "paidBy"])]);
+      sbUpsert("expenses", [toSB(rec, ["id", "amount", "categoryId", "walletId", "note", "date", "eventId", "groupId", "receipt_url", "paidBy"])]);
       showT(online ? "Expense tracked" : "Expense saved offline", "success");
       return true;
     }
@@ -1245,10 +1236,10 @@ export default function Nomad() {
     if (!buf) return;
     if (buf.type === "expense") {
       sEx(p => [buf.exp, ...p]);
-      sbUpsert("expenses", [{ ...toSB(buf.exp, ["id", "amount", "categoryId", "walletId", "note", "date", "eventId", "groupId", "balBefore"]), deleted_at: null }]);
+      sbUpsert("expenses", [{ ...toSB(buf.exp, ["id", "amount", "categoryId", "walletId", "note", "date", "eventId", "groupId", "receipt_url", "paidBy", "balBefore"]), deleted_at: null }]);
       if (buf.splits?.length) { sSp(p => [...p, ...buf.splits]); sbUpsert("splits", buf.splits.map(s => toSB(s, ["id", "name", "amount", "direction", "settled", "eventId", "groupId"]))); }
       if (buf.settlements?.length) { sStl(p => [...p, ...buf.settlements]); sbUpsert("settlements", buf.settlements.map(s => toSB(s, ["id", "amount", "splitName", "splitId", "direction", "walletId", "date", "groupId", "eventId"]))); }
-    } else if (buf.type === "income") { sInc(p => [buf.exp, ...p]); sbUpsert("incomes", [{ ...toSB(buf.exp, ["id", "amount", "sourceId", "walletId", "note", "date", "balBefore"]), deleted_at: null }]); }
+    } else if (buf.type === "income") { sInc(p => [buf.exp, ...p]); sbUpsert("incomes", [{ ...toSB(buf.exp, ["id", "amount", "sourceId", "walletId", "note", "date", "receipt_url", "balBefore"]), deleted_at: null }]); }
     else if (buf.type === "transfer") { sTr(p => [buf.exp, ...p]); sbUpsert("transfers", [{ ...toSB(buf.exp, ["id", "amount", "fromWallet", "toWallet", "note", "date", "fromBalBefore", "toBalBefore"]), deleted_at: null }]); }
     else if (buf.type === "settlement") { sStl(p => [...p, buf.exp]); sbUpsert("settlements", [toSB(buf.exp, ["id", "amount", "splitName", "splitId", "direction", "walletId", "date", "groupId", "eventId"])]); if (buf.exp.splitId) { sSp(p => p.map(x => x.id === buf.exp.splitId ? { ...x, settled: true } : x)); sbUpsert("splits", [{ id: buf.exp.splitId, settled: true }], `splits:${buf.exp.splitId}`); } }
     else if (buf.type === "recurring") { sRec(p => [buf.exp, ...p]); sbUpsert("recurring", [{ ...toSB(buf.exp, ["id", "name", "amount", "categoryId", "categoryName", "walletId", "frequency", "dayOfMonth", "intervalDays", "yearMonth", "yearDay", "startDate", "active", "lastPaidDate", "lastSkippedDate"]), deleted_at: null }]); }
