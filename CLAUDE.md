@@ -749,7 +749,7 @@ ReceiptPicker menu gains "PDF / File" option (`accept="image/*,application/pdf"`
 Weekly digest card and `Report` component removed from dashboard at user request. `<Report>` component definition still exists in source but is no longer rendered.
 
 **B.26.g E2E Playwright smoke tests — `e2e/`**
-5 spec files: demo mode, add expense/income, history search, settings (dark mode + wallets), delete/undo. `playwright.config.js` targets `localhost:5173` (mobile viewport 390×844). `npm run test:e2e`. Vitest `exclude: ['e2e/**']` prevents test runner conflict. `npm run test` (Vitest unit) still 266/266 passing.
+5 spec files: demo mode, add expense/income, history search, settings (dark mode + wallets), delete/undo. `playwright.config.js` targets `localhost:5173` (mobile viewport 390×844). `npm run test:e2e`. Vitest `exclude: ['e2e/**']` prevents test runner conflict. `npm run test` (Vitest unit) still 259/259 passing. 6 E2E spec files: 5 original + `06-persistence.spec.js` (reload-based delete/receipt/split persistence tests using Playwright request interception).
 
 #### B.28 (session 8) — AI module bug fixes
 
@@ -803,9 +803,9 @@ Added "Recurring" button to history type-filter row. Filters to `type === "expen
 ### H. Notes for Future Claude Sessions
 
 1. **Do not re-investigate the items in section C (false positives).** They are correct in the existing code. C.9 = TxCard memo already done. C.10 = quickPatterns already done.
-2. **Always run `npm run lint` and `npm test` before and after edits.** Current baselines (verified May 2026, session 8 — B.28):
-   - **Lint:** 126 problems (109 errors, 17 warnings). New edits must not increase this count.
-   - **Tests:** **266 pass / 0 fail (266 total).**
+2. **Always run `npm run lint` and `npm test` before and after edits.** Current baselines (verified May 2026, session 9):
+   - **Lint:** 82 problems (73 errors, 9 warnings). New edits must not increase this count.
+   - **Tests:** **259 pass / 0 fail (259 total).**
    - Do not be alarmed by the lint count difference from prior sessions — it reflects a different codebase state.
 3. **`App.jsx` and `Routine.jsx` are written one-line-per-JSX-block.** When editing, use a unique substring as `old_string` — do **not** attempt to reformat. The build will break.
 4. **`dist/` is gitignored but historically tracked.** Don't commit rebuilt `dist/` unless explicitly asked; Vercel rebuilds on push. After running `npm run build`, run `git checkout HEAD -- dist/` before staging.
@@ -838,3 +838,5 @@ Added "Recurring" button to history type-filter row. Filters to `type === "expen
 31. **`callVisionWithProvider` (B.28.e)** is the correct import for `food-vision.ts` — returns `{content, provider}`. Plain `callVision` still exists for callers that don't need the provider name (`ai-insights`, `ai-categorize`, `ai-chat` all use `callText` anyway).
 32. **`extractJSON` (B.28.h)** now handles JSON embedded mid-text. Falls back to regex extraction of first `{...}`/`[...]` block when cleaned text doesn't start with `{` or `[`.
 33. **AI modules baseline (B.28):** `api/_ai-provider.ts`, `api/food-vision.ts`, `api/ai-insights.ts`, `api/ai-categorize.ts`, `api/ai-chat.ts`, `src/redactor.js`, `src/foodVision.js`, `src/financeScore.js` — all bugs fixed. Unit tests for these modules are still covered by the existing 266-test suite via indirect imports. Direct unit tests for AI modules would require mocking fetch + env vars — future work if needed.
+34. **`COLS` in `src/dbCols.js` is the ONLY source of truth for Supabase column lists.** NEVER write an inline array in a `toSB()` call — always use `COLS.<table>`. When you add a new DB field (e.g. `tags` to expenses), add it to `COLS.expenses` in `src/dbCols.js` once and it automatically propagates to every write path (add, undo, first-connect sync, paidBy, etc.). The `src/__tests__/dbCols.test.js` suite asserts required fields per table and will fail CI if a critical field is removed. This pattern was introduced to fix repeated "field disappears on one specific write path" bugs.
+35. **GitHub Actions CI (`/.github/workflows/ci.yml`)** runs `npm test` + `npm run build` on every push and pull request. Tests must stay green before merging. If CI is red, fix the tests — do not skip or ignore the failure.
