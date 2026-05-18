@@ -410,3 +410,67 @@ describe('isPendingDelete', () => {
     expect(isPendingDelete('expenses', 'abc')).toBe(false);
   });
 });
+
+describe('isPendingUpsert', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.resetModules();
+  });
+
+  it('returns false when the queue is empty', async () => {
+    const { isPendingUpsert } = await import('../offlineSync.js');
+    expect(isPendingUpsert('expenses', 'abc123')).toBe(false);
+  });
+
+  it('returns true when a matching upsert is queued (array body)', async () => {
+    const { isPendingUpsert, queueSupabaseRequest } = await import('../offlineSync.js');
+    queueSupabaseRequest(makeItem({
+      path: 'https://example.supabase.co/rest/v1/expenses',
+      body: JSON.stringify([{ id: 'abc123', amount: 100 }]),
+    }));
+    expect(isPendingUpsert('expenses', 'abc123')).toBe(true);
+  });
+
+  it('returns true when a matching upsert is queued (object body)', async () => {
+    const { isPendingUpsert, queueSupabaseRequest } = await import('../offlineSync.js');
+    queueSupabaseRequest(makeItem({
+      path: 'https://example.supabase.co/rest/v1/incomes',
+      body: JSON.stringify({ id: 'inc-9', amount: 500 }),
+    }));
+    expect(isPendingUpsert('incomes', 'inc-9')).toBe(true);
+    expect(isPendingUpsert('expenses', 'inc-9')).toBe(false);
+  });
+
+  it('returns false for queued items targeting a different table', async () => {
+    const { isPendingUpsert, queueSupabaseRequest } = await import('../offlineSync.js');
+    queueSupabaseRequest(makeItem({
+      path: 'https://example.supabase.co/rest/v1/incomes',
+      body: JSON.stringify([{ id: 'abc123' }]),
+    }));
+    expect(isPendingUpsert('expenses', 'abc123')).toBe(false);
+  });
+
+  it('ignores non-POST queued items (e.g. soft-delete PATCH)', async () => {
+    const { isPendingUpsert, queueSupabaseRequest } = await import('../offlineSync.js');
+    queueSupabaseRequest(makeItem({
+      method: 'PATCH',
+      path: 'https://example.supabase.co/rest/v1/expenses?id=eq.abc123',
+      body: JSON.stringify({ deleted_at: '2026-05-18T00:00:00Z' }),
+      dedupeKey: 'expenses:delete:abc123',
+    }));
+    expect(isPendingUpsert('expenses', 'abc123')).toBe(false);
+  });
+
+  it('returns false when id is null or undefined', async () => {
+    const { isPendingUpsert } = await import('../offlineSync.js');
+    expect(isPendingUpsert('expenses', null)).toBe(false);
+    expect(isPendingUpsert('expenses', undefined)).toBe(false);
+  });
+
+  it('survives malformed JSON in queue (returns false, no throw)', async () => {
+    const { isPendingUpsert } = await import('../offlineSync.js');
+    localStorage.setItem(QUEUE_KEY, 'not-json');
+    expect(() => isPendingUpsert('expenses', 'abc')).not.toThrow();
+    expect(isPendingUpsert('expenses', 'abc')).toBe(false);
+  });
+});

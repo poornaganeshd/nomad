@@ -3,7 +3,7 @@ import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote
 import { IconCheck, IconTrash, IconHistory, IconChevronRight, IconChevronLeft, IconSend, IconAlertTriangle, IconX, IconClock, IconArrowDown, IconArrowUp, IconPlus, IconPlayerSkipForward } from "@tabler/icons-react";
 import { ComposedChart, Bar, Line, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from "recharts";
 import RoutineApp from "./Routine";
-import { flushSyncQueue, getPendingSyncCount, getDeadLetterCount, clearDeadLetter, sendSupabaseRequest, subscribePendingSync, subscribeSyncDrops, isPendingDelete } from "./offlineSync";
+import { flushSyncQueue, getPendingSyncCount, getDeadLetterCount, clearDeadLetter, sendSupabaseRequest, subscribePendingSync, subscribeSyncDrops, isPendingDelete, isPendingUpsert } from "./offlineSync";
 import { checkBillReminders } from "./billReminders";
 import { getExchangeRate, saveCurrencyMeta, getCurrencyMeta } from "./currencyConverter";
 import ReceiptPicker from "./ReceiptPicker";
@@ -1024,6 +1024,10 @@ export default function Nomad() {
       loadLocalBackup({ sEx, sInc, sTr, sStl, sCats, sIsrc, sSp, sRec, sEvs, sDm, sWsb, sRecCats });
       sL(true);
       if (!SB_ENABLED || (typeof navigator !== "undefined" && !navigator.onLine)) return;
+      // Flush any pending offline writes before reading remote state, so newly
+      // added rows (especially ones still in the queue from the previous tab
+      // session) commit before we mirror Supabase back into local state.
+      try { await flushSyncQueue(); } catch { /* keep going on flush failure */ }
       // Background refresh — replace with authoritative Supabase data
       try {
         const [dbEx, dbInc, dbTr, dbStl, dbSp, dbRec, dbWsb, dbEvs] = await Promise.all([
@@ -1056,14 +1060,22 @@ export default function Nomad() {
           } catch { }
           return; // local data already rendered, nothing to replace
         }
-        // Update with authoritative remote data
-        sEx((dbEx || []).filter(e => !isPendingDelete("expenses", e.id)));
-        sInc((dbInc || []).filter(e => !isPendingDelete("incomes", e.id)));
-        sTr((dbTr || []).filter(e => !isPendingDelete("transfers", e.id)));
+        // Merge remote with local: keep any locally-known rows that still have
+        // a pending upsert in the offline queue, so a stale Supabase snapshot
+        // can't wipe an expense (or its receipt_url) that hasn't synced yet.
+        const mergeRemote = (table, remote, prev) => {
+          const list = (remote || []).filter(r => !isPendingDelete(table, r.id));
+          const remoteIds = new Set(list.map(r => r.id));
+          const unsynced = (prev || []).filter(r => r && r.id && !remoteIds.has(r.id) && isPendingUpsert(table, r.id));
+          return [...unsynced, ...list];
+        };
+        sEx(prev => mergeRemote("expenses", dbEx, prev));
+        sInc(prev => mergeRemote("incomes", dbInc, prev));
+        sTr(prev => mergeRemote("transfers", dbTr, prev));
         sStl(dbStl || []);
-        sSp((dbSp || []).filter(s => !isPendingDelete("splits", s.id)));
-        sRec((dbRec || []).filter(r => !isPendingDelete("recurring", r.id)));
-        sEvs((dbEvs || []).map(e => ({ ...e, participants: Array.isArray(e?.participants) ? e.participants.filter(p => typeof p === "string") : [] })).filter(e => !isPendingDelete("events", e.id)));
+        sSp(prev => mergeRemote("splits", dbSp, prev));
+        sRec(prev => mergeRemote("recurring", dbRec, prev));
+        sEvs(prev => mergeRemote("events", (dbEvs || []).map(e => ({ ...e, participants: Array.isArray(e?.participants) ? e.participants.filter(p => typeof p === "string") : [] })), prev));
         if (dbWsb?.length) { const wb = {}; wallets.forEach(w => { wb[w.id] = 0; }); dbWsb.forEach(r => { wb[r.wallet_id] = r.balance; }); sWsb(wb); }
         try {
           const lp = JSON.parse(localStorage.getItem("nomad-v5") || "{}");
