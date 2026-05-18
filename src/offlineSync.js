@@ -86,6 +86,25 @@ export const getDeadLetterCount = () => readDeadLetter().length;
 export const isPendingDelete = (table, id) =>
   readQueue().some(item => item.dedupeKey === `${table}:delete:${id}`);
 
+// True when an upsert for `id` against `table` is still waiting in the offline
+// queue (e.g. 5xx-retry, offline, or in-flight when the page was last reloaded).
+// Used by load() to keep locally-added rows visible until they reach the server,
+// so a stale Supabase read can't wipe them from state.
+export const isPendingUpsert = (table, id) => {
+  if (id == null) return false;
+  const pathSuffix = `/rest/v1/${table}`;
+  return readQueue().some(item => {
+    if (item.method !== "POST") return false;
+    if (!item.path || !item.path.includes(pathSuffix)) return false;
+    if (!item.body) return false;
+    try {
+      const body = JSON.parse(item.body);
+      if (Array.isArray(body)) return body.some(row => row && row.id === id);
+      return body && body.id === id;
+    } catch { return false; }
+  });
+};
+
 export const clearDeadLetter = () => {
   if (canUseStorage()) localStorage.removeItem(DEAD_LETTER_KEY);
 };
@@ -172,6 +191,12 @@ export const sendSupabaseRequest = async (request, options = {}) => {
       return { ok: false, queued: true, offline: false, response };
     }
 
+    // 4xx on upsert writes is a definitive reject the user must know about
+    // (typically a schema mismatch). PATCH (soft-delete) and DELETE have
+    // graceful fallbacks via sbDelete → sbDeleteWhere, so stay quiet there.
+    if (item.method === "POST") {
+      notifyDrops({ kind: "rejected", status: response.status, item });
+    }
     return { ok: false, queued: false, offline: false, response };
   } catch {
     if (shouldQueue) {
