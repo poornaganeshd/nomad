@@ -899,12 +899,33 @@ export default function Nomad() {
   const [lionMsg, sLionMsg] = useState(""); const [lionMsgLoading, sLionMsgLoading] = useState(false);
   const [walletsMgrOpen, sWalletsMgrOpen] = useState(false);
   const [newWalletName, sNewWalletName] = useState(""), [newWalletColor, sNewWalletColor] = useState("#A78BFA");
+  const toastTimersRef = useRef({});
   const showT = (msg, type = "info") => {
-    const id = Date.now() + Math.random();
-    sToasts(prev => [...prev, { id, msg, type }]);
-    setTimeout(() => sToasts(prev => prev.filter(t => t.id !== id)), 2000);
+    // Dedupe identical toasts so a cascade (e.g. 11 sync-rejected from the
+    // same load) collapses into a single chip with a "×N" counter. Each
+    // bump resets the dismissal timer so the user has time to read.
+    sToasts(prev => {
+      const existing = prev.find(t => t.msg === msg && t.type === type);
+      if (existing) {
+        if (toastTimersRef.current[existing.id]) clearTimeout(toastTimersRef.current[existing.id]);
+        toastTimersRef.current[existing.id] = setTimeout(() => {
+          sToasts(p => p.filter(t => t.id !== existing.id));
+          delete toastTimersRef.current[existing.id];
+        }, 2500);
+        return prev.map(t => t.id === existing.id ? { ...t, count: (t.count || 1) + 1 } : t);
+      }
+      const id = Date.now() + Math.random();
+      toastTimersRef.current[id] = setTimeout(() => {
+        sToasts(p => p.filter(t => t.id !== id));
+        delete toastTimersRef.current[id];
+      }, 2000);
+      return [...prev, { id, msg, type }];
+    });
   };
-  const dismissToast = (id) => sToasts(prev => prev.filter(t => t.id !== id));
+  const dismissToast = (id) => {
+    if (toastTimersRef.current[id]) { clearTimeout(toastTimersRef.current[id]); delete toastTimersRef.current[id]; }
+    sToasts(prev => prev.filter(t => t.id !== id));
+  };
 
   const subscribeToPush = async () => {
     if (!SB_ENABLED || !navigator.serviceWorker) return;
@@ -943,7 +964,11 @@ export default function Nomad() {
     if (info.kind === "storage") { showT("Storage full — clear some data or export and reset", "error"); return; }
     if (info.kind === "conflict") { showT("Sync conflict — a newer version exists; local change discarded", "error"); return; }
     if (info.kind === "dead-letter") { sDeadLetterCount(getDeadLetterCount()); sDlBanner(true); showT("Change failed after 3 retries — moved to failed queue (see Sync Status)", "error"); return; }
-    if (info.kind === "rejected") { const code = info.status === 0 ? "blocked" : info.status; showT(`Sync rejected (${code}) — change couldn't be saved`, "error"); }
+    if (info.kind === "rejected") {
+      if (info.status === 404) { showT("Supabase table missing — run nomad_setup.sql in your SQL editor", "error"); return; }
+      const code = info.status === 0 ? "blocked" : info.status;
+      showT(`Sync rejected (${code}) — change couldn't be saved`, "error");
+    }
   }), []);
 
   useEffect(() => {
@@ -1796,8 +1821,9 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
     {toasts.length > 0 && (
       <div style={{ position: "fixed", top: 24, left: "50%", transform: "translateX(-50%)", zIndex: 300, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, pointerEvents: "none" }}>
         {toasts.map(t => (
-          <div key={t.id} style={{ pointerEvents: "auto", background: t.type === "error" ? "#D4726A" : t.type === "success" ? "#6BAA75" : t.type === "warn" ? "#E07A5F" : "#7B8CDE", color: "#fff", borderRadius: 50, padding: "9px 22px", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, boxShadow: "0 4px 16px rgba(0,0,0,0.15)", textAlign: "center", whiteSpace: "nowrap", animation: "ti 0.25s ease-out", display: "flex", alignItems: "center", gap: 12 }}>
-            {t.msg}
+          <div key={t.id} style={{ pointerEvents: "auto", background: t.type === "error" ? "#D4726A" : t.type === "success" ? "#6BAA75" : t.type === "warn" ? "#E07A5F" : "#7B8CDE", color: "#fff", borderRadius: 50, padding: "9px 22px", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, boxShadow: "0 4px 16px rgba(0,0,0,0.15)", textAlign: "center", whiteSpace: "nowrap", animation: "ti 0.25s ease-out", display: "flex", alignItems: "center", gap: 8 }}>
+            <span>{t.msg}</span>
+            {t.count > 1 && <span style={{ background: "rgba(255,255,255,0.28)", borderRadius: 10, padding: "1px 7px", fontSize: 10, fontWeight: 700 }}>×{t.count}</span>}
             {t.undo && <button onClick={() => undoDelete(t.id)} style={{ background: "rgba(255,255,255,0.25)", color: "#fff", border: "none", borderRadius: 12, padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>UNDO</button>}
           </div>
         ))}
