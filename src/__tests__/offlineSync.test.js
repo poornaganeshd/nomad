@@ -239,6 +239,23 @@ describe('sendSupabaseRequest', () => {
     expect(drops).toHaveLength(0);
   });
 
+  it('parses PostgREST 400 body and surfaces code+message on drop', async () => {
+    const { sendSupabaseRequest, subscribeSyncDrops } = await import('../offlineSync.js');
+    const body = JSON.stringify({ code: 'PGRST204', message: "Could not find the 'balBefore' column of 'expenses' in the schema cache" });
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      clone() { return { text: async () => body }; },
+    });
+    const drops = [];
+    const unsub = subscribeSyncDrops((info) => drops.push(info));
+    await sendSupabaseRequest(makeItem({ method: 'POST' }));
+    unsub();
+    expect(drops).toHaveLength(1);
+    expect(drops[0].code).toBe('PGRST204');
+    expect(drops[0].message).toContain('balBefore');
+  });
+
   it('queues when fetch throws (network failure)', async () => {
     const { sendSupabaseRequest, getPendingSyncCount } = await import('../offlineSync.js');
     global.fetch = vi.fn().mockRejectedValueOnce(new Error('Failed to fetch'));

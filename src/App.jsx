@@ -967,6 +967,16 @@ export default function Nomad() {
     if (info.kind === "dead-letter") { sDeadLetterCount(getDeadLetterCount()); sDlBanner(true); showT("Change failed after 3 retries — moved to failed queue (see Sync Status)", "error"); return; }
     if (info.kind === "rejected") {
       if (info.status === 404) { showT("Supabase table missing — run nomad_setup.sql in your SQL editor", "error"); return; }
+      // PostgREST schema-cache errors mean the DB is missing a column the
+      // client is sending. PGRST204 = column not in schema cache;
+      // 42703 = undefined_column. Tell the user exactly which column and
+      // point them at the migration so they can act on it.
+      if (info.status === 400 && (info.code === "PGRST204" || info.code === "42703")) {
+        const colMatch = typeof info.message === "string" ? info.message.match(/'([^']+)'\s+column/i) : null;
+        const col = colMatch ? colMatch[1] : null;
+        showT(col ? `Schema missing '${col}' — re-run nomad_setup.sql in your SQL editor` : "Database schema out of date — re-run nomad_setup.sql in your SQL editor", "error");
+        return;
+      }
       const code = info.status === 0 ? "blocked" : info.status;
       showT(`Sync rejected (${code}) — change couldn't be saved`, "error");
     }

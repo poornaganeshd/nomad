@@ -202,8 +202,29 @@ export const sendSupabaseRequest = async (request, options = {}) => {
     // graceful fallbacks via sbDelete → sbDeleteWhere, so stay quiet there.
     // Heal items are background retries and must also stay quiet — see
     // isHealItem() above.
+    //
+    // Parse the response body once so the UI can surface a specific message
+    // (e.g. PGRST204 → "Database schema out of date"). PostgREST returns
+    // structured JSON for 4xx. We cache the parsed result on the response
+    // object so sbWrite can still log it without re-reading the stream.
+    let errorBody = null;
+    if (response.status >= 400 && response.status < 500) {
+      try {
+        const text = await response.clone().text();
+        errorBody = text;
+      } catch { /* body unreadable — leave null */ }
+    }
     if (item.method === "POST" && !isHealItem(item)) {
-      notifyDrops({ kind: "rejected", status: response.status, item });
+      let code = null;
+      let message = null;
+      if (errorBody) {
+        try {
+          const parsed = JSON.parse(errorBody);
+          code = parsed?.code ?? null;
+          message = parsed?.message ?? null;
+        } catch { /* not JSON */ }
+      }
+      notifyDrops({ kind: "rejected", status: response.status, item, code, message, body: errorBody });
     }
     return { ok: false, queued: false, offline: false, response };
   } catch {
@@ -277,7 +298,18 @@ export const flushSyncQueue = async () => {
       // retries can't spam toasts the user can't act on.
       progressedDuringFlush = true;
       if (!isHealItem(item)) {
-        notifyDrops({ kind: "rejected", status: response.status, item });
+        let code = null;
+        let message = null;
+        let body = null;
+        if (response.status >= 400 && response.status < 500) {
+          try {
+            body = await response.clone().text();
+            const parsed = JSON.parse(body);
+            code = parsed?.code ?? null;
+            message = parsed?.message ?? null;
+          } catch { /* body unreadable or non-JSON */ }
+        }
+        notifyDrops({ kind: "rejected", status: response.status, item, code, message, body });
       }
       continue;
     } catch {
