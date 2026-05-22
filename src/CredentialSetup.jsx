@@ -310,6 +310,7 @@ export default function CredentialSetup({ onDone, onCancel }) {
           apiKey: typeof d.apiKey === "string" ? d.apiKey.trim() : "",
           apiSecret: typeof d.apiSecret === "string" ? d.apiSecret.trim() : "",
         });
+        try { localStorage.removeItem("nomad-local-mode"); } catch { /* ignore */ }
         onDone();
       } catch { setError("Failed to read config file."); }
     };
@@ -322,6 +323,7 @@ export default function CredentialSetup({ onDone, onCancel }) {
       setError("Invalid Supabase URL format. Expected https://{20-char-ref}.supabase.co"); return;
     }
     saveCredentials({ sbUrl: sbUrl.trim(), sbKey: sbKey.trim(), cloudName: cloudName.trim(), uploadPreset: uploadPreset.trim(), apiKey: apiKey.trim(), apiSecret: apiSecret.trim() });
+    try { localStorage.removeItem("nomad-local-mode"); } catch { /* ignore */ }
     onDone();
   };
 
