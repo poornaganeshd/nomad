@@ -269,6 +269,38 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
 
 ALTER TABLE push_subscriptions DISABLE ROW LEVEL SECURITY;
 
+-- Per-slot push reminders. Cron checks each row daily.
+-- slot_id: free-form ("am_skincare", "water_2h", "pm_skincare", custom)
+-- time_hhmm: HH:MM in user's local time (best-effort; client provides offset_minutes vs UTC)
+-- days_mask: bitmask Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64 (127 = all days)
+CREATE TABLE IF NOT EXISTS routine_reminders (
+  id              TEXT        PRIMARY KEY,
+  slot_id         TEXT        NOT NULL,
+  label           TEXT        NOT NULL DEFAULT '',
+  time_hhmm       TEXT        NOT NULL DEFAULT '08:00',
+  days_mask       INTEGER     NOT NULL DEFAULT 127,
+  offset_minutes  INTEGER     NOT NULL DEFAULT 0,
+  enabled         BOOLEAN     NOT NULL DEFAULT TRUE,
+  last_sent_at    TIMESTAMPTZ DEFAULT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE routine_reminders DISABLE ROW LEVEL SECURITY;
+
+-- Weekly routine email report opt-in. One row per user (id='self').
+CREATE TABLE IF NOT EXISTS routine_report_schedules (
+  id               TEXT        PRIMARY KEY DEFAULT 'self',
+  email            TEXT        NOT NULL DEFAULT '',
+  enabled          BOOLEAN     NOT NULL DEFAULT FALSE,
+  send_day_of_week INTEGER     NOT NULL DEFAULT 0,   -- 0=Sun..6=Sat
+  send_hour        INTEGER     NOT NULL DEFAULT 8,    -- 0-23 local hour
+  offset_minutes   INTEGER     NOT NULL DEFAULT 0,    -- IST offset for owner default = -330
+  last_sent_at     TIMESTAMPTZ DEFAULT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE routine_report_schedules DISABLE ROW LEVEL SECURITY;
+
 -- ── 6. PRE-TRANSACTION BALANCE SNAPSHOTS ─────────────────────
 -- Stores the wallet balance captured at the moment each transaction was
 -- created. Calibration-independent: never recomputed, never changes.

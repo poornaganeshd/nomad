@@ -39,7 +39,31 @@ const ReceiptPicker = forwardRef(function ReceiptPicker({ cloudinaryEnabled = tr
       setItems(prev => { prev.forEach(it => URL.revokeObjectURL(it.localUrl)); return []; });
       setShowMenu(false);
     },
+    // Compress first non-PDF item to base64 for OCR. Returns { imageBase64, mimeType } or null.
+    async getFirstImageData(maxPx = 800, quality = 0.7) {
+      const it = items.find(x => !x.isPdf);
+      if (!it) return null;
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          if (!img.width || !img.height) { reject(new Error("Image has zero dimensions.")); return; }
+          const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
+          const w = Math.round(img.width * scale);
+          const h = Math.round(img.height * scale);
+          const canvas = document.createElement("canvas");
+          canvas.width = w; canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL("image/jpeg", quality);
+          const base64 = dataUrl.replace(/^data:image\/jpeg;base64,/, "");
+          resolve({ imageBase64: base64, mimeType: "image/jpeg" });
+        };
+        img.onerror = () => reject(new Error("Image load failed."));
+        img.src = it.localUrl;
+      });
+    },
     get count() { return items.length; },
+    get hasImage() { return items.some(x => !x.isPdf); },
   }));
 
   // ── Helpers ────────────────────────────────────────────────────

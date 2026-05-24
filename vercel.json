@@ -3,6 +3,14 @@
     {
       "path": "/api/send-reports",
       "schedule": "30 2 * * *"
+    },
+    {
+      "path": "/api/push-scheduler",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/send-routine-report",
+      "schedule": "0 3 * * *"
     }
   ],
   "headers": [

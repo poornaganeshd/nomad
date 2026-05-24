@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback, memo } from "react";
-import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning, Wallet, Target, Lightning, Envelope, Fire, Sparkle, Lightbulb, ChartBar, ClipboardText, Timer, HandWaving, BellSlash, Robot, Receipt, FilePdf, Trash, Moon, Sun, Scales, Gear, PushPin, Hash } from "@phosphor-icons/react";
+import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning, Wallet, Target, Lightning, Envelope, Fire, Sparkle, Lightbulb, ChartBar, ClipboardText, Timer, HandWaving, BellSlash, Robot, Receipt, FilePdf, Trash, Moon, Sun, Scales, Gear, PushPin, Hash, Microphone } from "@phosphor-icons/react";
 import { IconCheck, IconTrash, IconHistory, IconChevronRight, IconChevronLeft, IconSend, IconAlertTriangle, IconX, IconClock, IconArrowDown, IconArrowUp, IconPlus, IconPlayerSkipForward } from "@tabler/icons-react";
 import { ComposedChart, Bar, Line, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from "recharts";
 import RoutineApp from "./Routine";
@@ -518,7 +518,56 @@ function extractKeyword(note) {
   return words[0] || note.toLowerCase().trim().slice(0, 20);
 }
 
-function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], autoRules = [], onLearnRule = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false }) {
+function parseVoiceTx(transcript, { wallets = [], categories = [] } = {}) {
+  if (!transcript) return {};
+  const txt = String(transcript).toLowerCase().replace(/[,.!?]/g, " ").replace(/\s+/g, " ").trim();
+  const amtMatch = txt.match(/(?:rs\.?|rupees?|₹)?\s*(\d+(?:\.\d+)?)\s*(?:rs\.?|rupees?|₹|bucks?)?/);
+  const amount = amtMatch ? parseFloat(amtMatch[1]) : null;
+  let wid = null;
+  const walletAliases = { upi_lite: ["upi lite", "upi", "lite"], bank: ["bank", "account", "debit"], cash: ["cash"] };
+  for (const w of wallets) {
+    const aliases = walletAliases[w.id] || [w.name.toLowerCase()];
+    if (aliases.some(a => txt.includes(a))) { wid = w.id; break; }
+  }
+  let cid = null;
+  for (const c of categories) {
+    if (txt.includes(c.name.toLowerCase())) { cid = c.id; break; }
+  }
+  let note = txt;
+  if (amtMatch) note = note.replace(amtMatch[0], " ");
+  note = note.replace(/\b(rs|rupees?|bucks?|paid|spent|got|received|added)\b/g, " ");
+  if (wid) (walletAliases[wid] || []).forEach(a => { note = note.replace(new RegExp("\\b" + a + "\\b", "g"), " "); });
+  note = note.replace(/\s+/g, " ").trim();
+  return { amount, walletId: wid, categoryId: cid, note: note || null };
+}
+
+function VoiceAdd({ onParsed, accent = "#E07A5F" }) {
+  const [listening, setListening] = useState(false);
+  const [error, setError] = useState(null);
+  const recRef = useRef(null);
+  const SR = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+  if (!SR) return null;
+  const start = () => {
+    setError(null);
+    try {
+      const rec = new SR();
+      rec.lang = "en-IN";
+      rec.interimResults = false;
+      rec.maxAlternatives = 1;
+      rec.continuous = false;
+      rec.onresult = (e) => { const t = e.results?.[0]?.[0]?.transcript || ""; onParsed(t); setListening(false); };
+      rec.onerror = (e) => { setError(e.error || "voice error"); setListening(false); };
+      rec.onend = () => setListening(false);
+      recRef.current = rec;
+      rec.start();
+      setListening(true);
+    } catch { setError("mic unavailable"); }
+  };
+  const stop = () => { try { recRef.current?.stop(); } catch { /* ignore */ } setListening(false); };
+  return <div style={{ marginBottom: 14 }}><button onClick={listening ? stop : start} style={{ width: "100%", padding: "10px 14px", border: `1.5px dashed ${listening ? "#E07A5F" : accent}`, borderRadius: 10, background: listening ? "#E07A5F12" : "var(--card)", color: listening ? "#E07A5F" : accent, fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}><Microphone size={14} weight={listening ? "fill" : "regular"} />{listening ? "Listening… tap to stop" : "Voice add — say e.g. \"300 coffee bank\""}</button>{error && <div style={{ fontSize: 11, color: "#E07A5F", marginTop: 4, fontFamily: "var(--font-h)" }}>{error}</div>}</div>;
+}
+
+function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], autoRules = [], onLearnRule = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false, onLocalReceipt }) {
   const _AD = (() => { try { return JSON.parse(sessionStorage.getItem("nomad-add-draft") || "{}"); } catch { return {}; } })();
   const [type, sType] = useState(_AD.type || "expense"), [amt, sAmt] = useState(_AD.amt || "0"), [catId, sCat] = useState(_AD.catId || cats[0]?.id || ""), [srcId, sSrc] = useState(isrc[0]?.id || ""), [wid, sW] = useState(_AD.wid || "bank"), [iwid, sIW] = useState("bank"), [tFrom, sTF] = useState("bank"), [tTo, sTT] = useState("upi_lite"), [date, sDate] = useState(_AD.date || localDateKey()), [note, sNote] = useState(_AD.note || "");
   const [rName, sRN] = useState(""), [rAmt, sRA] = useState(""), [rCat, sRC] = useState("rent"), [rWal, sRW] = useState("bank"), [rFreq, sRF] = useState("monthly"), [rDay, sRD] = useState(1), [rInt, sRI] = useState(30), [rStart, sRS] = useState(localDateKey()), [rOther, sRO] = useState(""), [rYM, sRYM] = useState(1), [rYD, sRYD] = useState(1);
@@ -528,7 +577,28 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
   const [submitting, setSubmitting] = useState(false);
   const [aiCatSug, sAiCatSug] = useState(null); // {categoryId, confidence, keyword} | null
   const [aiCatLoading, sAiCatLoading] = useState(false);
+  const [ocrLoading, sOcrLoading] = useState(false);
   const aiDebounceRef = useRef(null);
+  const scanReceipt = async () => {
+    if (ocrLoading) return;
+    if (!receiptPickerRef.current?.hasImage) { showT("Add a receipt photo first", "error"); return; }
+    sOcrLoading(true);
+    try {
+      const data = await receiptPickerRef.current.getFirstImageData();
+      if (!data) { showT("No image to scan", "error"); return; }
+      const r = await fetch("/api/receipt-ocr", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "OCR failed");
+      if (d.amount > 0) sAmt(String(d.amount));
+      if (d.merchant) sNote(d.merchant);
+      if (d.date && /^\d{4}-\d{2}-\d{2}$/.test(d.date)) sDate(d.date);
+      showT(`Scanned: ${d.merchant || "(no merchant)"} ${d.amount > 0 ? "₹" + d.amount : ""} · ${d.confidence}`, d.confidence === "low" ? "info" : "success");
+    } catch (e) {
+      showT(e.message || "OCR error", "error");
+    } finally {
+      sOcrLoading(false);
+    }
+  };
   useEffect(() => { const c = fxCur.trim().toUpperCase(); if (c.length !== 3 || c === "INR") { setFxRate(null); return; } setFxFetching(true); getExchangeRate(c).then(r => { setFxRate(r); setFxFetching(false); }).catch(() => { setFxRate(null); setFxFetching(false); }); }, [fxCur]);
   useEffect(() => { try { sessionStorage.setItem("nomad-add-draft", JSON.stringify({ type, amt, catId, wid, date, note })); } catch { /* ignore storage errors */ } }, [type, amt, catId, wid, date, note]);
   const ts = useRef(null), tc = type === "expense" ? "#E07A5F" : type === "income" ? "#6BAA75" : type === "transfer" ? "#7B8CDE" : "#A78BFA";
@@ -580,6 +650,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
   const WB = ({ wallets, sel, onSel }) => <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>{wallets.map(w => <button key={w.id} onClick={() => onSel(w.id)} style={{ flex: 1, padding: "10px 6px", borderRadius: 10, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, border: `2px solid ${sel === w.id ? w.color : "var(--border)"}`, background: sel === w.id ? w.color + "15" : "var(--card)", cursor: "pointer" }}><div style={{ display: "flex", alignItems: "center", gap: 4 }}><DI2 id={w.id} accent={w.neon || w.color} size={12} /><span style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: sel === w.id ? 700 : 500, color: sel === w.id ? w.color : "var(--muted)" }}>{w.name}</span></div>{w.desc && <span style={{ fontSize: 8, color: sel === w.id ? w.color : "var(--muted)", fontFamily: "var(--font-b)", opacity: 0.7, lineHeight: 1 }}>{w.desc}</span>}</button>)}</div>;
   return <div style={{ padding: "0 0 20px" }}>
     {(() => { const SI = { expense: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><polyline points="19 12 12 19 5 12" /></svg>, income: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></svg>, transfer: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9" /><line x1="3" y1="5" x2="21" y2="5" /><polyline points="7 23 3 19 7 15" /><line x1="21" y1="19" x2="3" y2="19" /></svg>, recurring: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><polyline points="7 23 3 19 7 15" /><path d="M21 13v2a4 4 0 0 1-4 4H3" /></svg> }; return <div style={{ display: "flex", background: "var(--card)", borderRadius: 12, padding: 4, border: "1px solid var(--border)", marginBottom: 20, gap: 2 }}>{[{ id: "expense", label: "Expense" }, { id: "income", label: "Income" }, { id: "transfer", label: "Transfer" }, { id: "recurring", label: "Recurring" }].map(t => <button key={t.id} onClick={() => sType(t.id)} style={{ flex: 1, padding: "10px 4px", border: "none", borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", gap: 4, lineHeight: 1, background: type === t.id ? (t.id === "expense" ? "#E07A5F" : t.id === "income" ? "#6BAA75" : t.id === "transfer" ? "#7B8CDE" : "#A78BFA") : "transparent", color: type === t.id ? "#fff" : "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.15s" }}>{SI[t.id]}{t.label}</button>)}</div>; })()}
+    {(type === "expense" || type === "income") && <VoiceAdd accent={tc} onParsed={t => { const r = parseVoiceTx(t, { wallets: aw, categories: type === "expense" ? cats : isrc }); if (r.amount) sAmt(String(r.amount)); if (r.note) sNote(r.note); if (r.walletId) { if (type === "expense") sW(r.walletId); else if (!isUpiLite(aw.find(w => w.id === r.walletId) || {})) sIW(r.walletId); } if (r.categoryId) { if (type === "expense") sCat(r.categoryId); else sSrc(r.categoryId); } showT(r.amount ? `Heard: ₹${r.amount} ${r.note || ""}` : "Couldn't parse — try \"300 coffee bank\"", r.amount ? "info" : "error"); }} />}
     {type === "expense" && patterns.length > 0 && <div style={{ marginBottom: 16 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 11, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600, marginBottom: 8 }}>QUICK ADD</div><div style={{ display: "flex", gap: 6, overflowX: "auto", scrollbarWidth: "none", WebkitOverflowScrolling: "touch", paddingBottom: 4 }}>{patterns.map((p, i) => { const cat = cats.find(c => c.id === p.categoryId); const accent = cat?.color || "#E07A5F"; return <button key={i} onClick={() => { sAmt(String(p.amount)); sCat(p.categoryId); sW(p.walletId); if (p.note) sNote(p.note); }} style={{ flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 5, padding: "7px 13px", borderRadius: 20, border: `1.5px solid ${accent}`, background: accent + "18", cursor: "pointer", fontFamily: "var(--font-h)", transition: "background 0.12s" }}><DI2 id={p.categoryId} accent={cat?.neon || accent} size={13} /><span style={{ fontSize: 13, fontWeight: 700, color: accent }}>₹{p.amount}</span>{p.note && <span style={{ fontSize: 11, color: "var(--ts)", maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.note}</span>}<span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 600, marginLeft: 1 }}>×{p.count}</span></button>; })}</div></div>}
     {type !== "recurring" && <><div style={{ marginBottom: 16 }}><label style={ls}>Amount</label>
       {/* Merged amount + currency box */}
@@ -602,7 +673,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       <div style={{ display: "flex", gap: 10, marginBottom: aiCatSug || aiCatLoading ? 6 : 18 }}><div style={{ flex: 1 }}><label style={ls}>Date</label><input type="date" value={date} onChange={e => sDate(e.target.value)} style={is} /></div><div style={{ flex: 1 }}><label style={ls}>Note</label><input value={note} onChange={e => { const v = e.target.value; sNote(v); sAiCatSug(null); if (aiDebounceRef.current) clearTimeout(aiDebounceRef.current); if (type === "expense") { const kw = v.toLowerCase().trim(); const m = autoRules.find(r => kw.includes(r.keyword.toLowerCase())); if (m) { sCat(m.categoryId); } else if (v.trim().length >= 3) { aiDebounceRef.current = setTimeout(async () => { sAiCatLoading(true); try { const r = await fetch("/api/ai-categorize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ note: v.trim(), categories: cats.map(c => ({ id: c.id, name: c.name })) }) }); const d = await r.json(); if (r.ok && d.categoryId) sAiCatSug({ ...d, keyword: extractKeyword(v) }); } catch { /* silent */ } finally { sAiCatLoading(false); } }, 800); } } }} placeholder="Optional…" style={is} /></div></div>
       {aiCatLoading && <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 12, display: "flex", alignItems: "center", gap: 5 }}>AI suggesting category…</div>}
       {aiCatSug && (() => { const c = cats.find(x => x.id === aiCatSug.categoryId); if (!c) return null; return <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, padding: "7px 10px", borderRadius: 8, background: (c.color || "#6BAA75") + "12", border: `1px solid ${c.color || "#6BAA75"}` }}><DI2 id={c.id} accent={c.neon || c.color} size={14} /><span style={{ flex: 1, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--text)", display: "flex", alignItems: "center", gap: 4 }}><Robot size={12} />{c.name}?</span><span style={{ fontSize: 9, color: c.color, background: (c.color || "#6BAA75") + "20", padding: "1px 5px", borderRadius: 4, fontWeight: 700 }}>{aiCatSug.confidence}</span><button onClick={() => { sCat(aiCatSug.categoryId); onLearnRule({ keyword: aiCatSug.keyword, categoryId: aiCatSug.categoryId, source: "ai", confidence: 0.9, hitCount: 0, createdAt: localDateKey() }); sAiCatSug(null); }} style={{ padding: "4px 10px", borderRadius: 6, border: "none", background: c.color || "#6BAA75", color: "#fff", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>✓</button><button onClick={() => sAiCatSug(null)} style={{ padding: "4px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 11, cursor: "pointer" }}>✗</button></div>; })()}
-      {type !== "transfer" && <div style={{ marginBottom: 18 }}><ReceiptPicker ref={receiptPickerRef} cloudinaryEnabled={cloudinaryEnabled} /></div>}
+      {type !== "transfer" && <div style={{ marginBottom: 18 }}><ReceiptPicker ref={receiptPickerRef} cloudinaryEnabled={cloudinaryEnabled} />{type === "expense" && <button onClick={scanReceipt} disabled={ocrLoading} style={{ marginTop: 8, width: "100%", padding: "9px 12px", border: `1.5px dashed ${tc}`, borderRadius: 10, background: ocrLoading ? "var(--border)" : "var(--card)", color: tc, fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: ocrLoading ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}><Receipt size={14} weight="fill" />{ocrLoading ? "Scanning…" : "Scan receipt — auto-fill amount, merchant, date"}</button>}</div>}
       <button onClick={submit} disabled={submitting} style={{ width: "100%", padding: "14px", border: "none", borderRadius: 12, background: submitting ? tc + "99" : tc, color: "#fff", fontSize: 15, fontFamily: "var(--font-h)", fontWeight: 600, cursor: submitting ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
         {submitting && <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.8s" repeatCount="indefinite" /></path></svg>}
         {submitting ? "Uploading…" : type === "expense" ? "Add Expense" : type === "income" ? "Add Income" : "Transfer"}

@@ -1511,6 +1511,33 @@ const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const dayOfWeek = (d = new Date()) => DOW[d.getDay()];
 const isAfterNoon = () => new Date().getHours() >= 12;
 
+/* Per-item habit streak — walk back counting consecutive days where dailyChecks[itemId] is true.
+   Today counts if checked; otherwise streak walks back from yesterday. */
+const habitStreak = (itemId, allData) => {
+    if (!itemId || !allData) return 0;
+    const d = new Date(); d.setHours(12, 0, 0, 0);
+    let s = 0;
+    if (allData[todayKey(d)]?.dailyChecks?.[itemId]) s = 1;
+    d.setDate(d.getDate() - 1);
+    let safety = 0;
+    while (safety < 5000) {
+        if (allData[todayKey(d)]?.dailyChecks?.[itemId]) { s++; d.setDate(d.getDate() - 1); safety++; } else break;
+    }
+    return s;
+};
+
+/* Days in last `windowDays` where item was checked */
+const habitWeekDone = (itemId, allData, windowDays = 7) => {
+    if (!itemId || !allData) return 0;
+    const d = new Date(); d.setHours(12, 0, 0, 0);
+    let n = 0;
+    for (let i = 0; i < windowDays; i++) {
+        if (allData[todayKey(d)]?.dailyChecks?.[itemId]) n++;
+        d.setDate(d.getDate() - 1);
+    }
+    return n;
+};
+
 /* Parse morning water amount string → litres */
 const parseMorningWater = (s) => {
     if (!s) return 0;
@@ -1629,12 +1656,18 @@ const DEFAULT_DAY = {
     sleepQuality: '',
     skinPhoto: '',
     hairPhoto: '',
+    meditationMin: 0,
+    workout: null,    // { type, durationMin, notes } | null
 };
 
 const DEFAULT_CONFIG = {
     waterTarget: 3.5,
     eggsTarget: 2,
     retinolPhase: 1,
+    calGoal: 2000,
+    proteinGoal: 80,
+    carbsGoal: 250,
+    fatGoal: 65,
     darkMode: false,
     showProductNames: true,
     snackRotation: {
@@ -1672,6 +1705,10 @@ const sanitizeConfig = (value) => {
         waterTarget: clamp(Number(c.waterTarget ?? DEFAULT_CONFIG.waterTarget) || DEFAULT_CONFIG.waterTarget, 0.5, 5),
         eggsTarget: clamp(Number(c.eggsTarget ?? DEFAULT_CONFIG.eggsTarget) || DEFAULT_CONFIG.eggsTarget, 1, 4),
         retinolPhase: clamp(Number(c.retinolPhase ?? DEFAULT_CONFIG.retinolPhase) || DEFAULT_CONFIG.retinolPhase, 1, 3),
+        calGoal: clamp(Number(c.calGoal ?? DEFAULT_CONFIG.calGoal) || DEFAULT_CONFIG.calGoal, 800, 5000),
+        proteinGoal: clamp(Number(c.proteinGoal ?? DEFAULT_CONFIG.proteinGoal) || DEFAULT_CONFIG.proteinGoal, 20, 300),
+        carbsGoal: clamp(Number(c.carbsGoal ?? DEFAULT_CONFIG.carbsGoal) || DEFAULT_CONFIG.carbsGoal, 50, 600),
+        fatGoal: clamp(Number(c.fatGoal ?? DEFAULT_CONFIG.fatGoal) || DEFAULT_CONFIG.fatGoal, 20, 200),
         customProducts,
         customDailyItems: Array.isArray(c.customDailyItems) ? c.customDailyItems : DEFAULT_CONFIG.customDailyItems,
         snackRotation: { ...DEFAULT_CONFIG.snackRotation, ...(c.snackRotation || {}) },
@@ -1962,6 +1999,115 @@ const EodCard = ({ day, config }) => {
 };
 
 /* ============================================================
+   MEDITATION CARD — countdown timer w/ presets
+   On finish: logs minutes to day.meditationMin (cumulative) + sets dailyChecks.meditation=true
+   so habitStreak('meditation', allData) works without parallel state.
+   ============================================================ */
+const MeditationCard = ({ day, update, showToast = () => {} }) => {
+    const [mins, setMins] = useState(10);
+    const [remaining, setRemaining] = useState(0); // seconds
+    const [active, setActive] = useState(false);
+    const intervalRef = useRef(null);
+    const presets = [5, 10, 15, 20];
+    const done = (day.meditationMin || 0) > 0;
+
+    useEffect(() => {
+        if (!active) return;
+        intervalRef.current = setInterval(() => {
+            setRemaining(r => {
+                if (r <= 1) {
+                    clearInterval(intervalRef.current);
+                    setActive(false);
+                    const newTotal = (day.meditationMin || 0) + mins;
+                    update({ meditationMin: newTotal, dailyChecks: { ...(day.dailyChecks || {}), meditation: true } });
+                    try { if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate([200, 100, 200]); } catch { /* ignore */ }
+                    showToast(`Meditation done · ${mins} min logged`, 'success');
+                    return 0;
+                }
+                return r - 1;
+            });
+        }, 1000);
+        return () => clearInterval(intervalRef.current);
+    }, [active, mins, day.meditationMin, day.dailyChecks, update, showToast]);
+
+    const start = () => { setRemaining(mins * 60); setActive(true); };
+    const stop = () => { setActive(false); clearInterval(intervalRef.current); setRemaining(0); };
+    const fmtTime = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+
+    return (
+        <div className="card" style={{ marginBottom: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <PhosphorIcon name="sparkle" size={18} color="#A78BFA" opacity={0.9} />
+                <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--txm)' }}>Meditation</span>
+                {done && <span style={{ marginLeft: 'auto', fontSize: 11, color: '#A78BFA', fontWeight: 700, background: 'rgba(167,139,250,0.13)', borderRadius: 8, padding: '2px 8px' }}>{day.meditationMin}m today</span>}
+            </div>
+            {active ? (
+                <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 38, fontWeight: 800, fontFamily: 'var(--mono)', color: '#A78BFA', marginBottom: 10 }}>{fmtTime(remaining)}</div>
+                    <button onClick={stop} style={{ padding: '8px 24px', borderRadius: 10, border: '1.5px solid #E07A5F', background: 'rgba(224,122,95,0.13)', color: '#E07A5F', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Stop</button>
+                </div>
+            ) : (
+                <>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 10 }}>
+                        {presets.map(m => (
+                            <div key={m} onClick={() => setMins(m)} style={{ textAlign: 'center', padding: '8px 4px', borderRadius: 10, background: mins === m ? 'rgba(167,139,250,0.18)' : 'var(--sf)', border: `1.5px solid ${mins === m ? '#A78BFA' : 'var(--bd)'}`, cursor: 'pointer' }}>
+                                <span style={{ fontSize: 13, fontWeight: 700, color: mins === m ? '#A78BFA' : 'var(--txm)' }}>{m}m</span>
+                            </div>
+                        ))}
+                    </div>
+                    <button onClick={start} style={{ width: '100%', padding: '10px', borderRadius: 10, border: 'none', background: '#A78BFA', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>Start {mins}-min session</button>
+                </>
+            )}
+        </div>
+    );
+};
+
+/* ============================================================
+   WORKOUT CARD — type + duration log
+   ============================================================ */
+const WorkoutCard = ({ day, update }) => {
+    const w = day.workout || {};
+    const types = [
+        { id: 'cardio', label: 'Cardio', color: '#E07A5F' },
+        { id: 'strength', label: 'Strength', color: '#7B8CDE' },
+        { id: 'yoga', label: 'Yoga', color: '#6BAA75' },
+        { id: 'other', label: 'Other', color: 'var(--amber)' },
+    ];
+    const setField = (field, val) => update({ workout: { ...w, [field]: val } });
+    const clear = () => update({ workout: null });
+    return (
+        <div className="card" style={{ marginBottom: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <PhosphorIcon name="run" size={18} color="#E07A5F" opacity={0.9} />
+                <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--txm)' }}>Workout</span>
+                {w.type && w.durationMin > 0 && <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--tx)', fontWeight: 700, background: 'var(--sf)', borderRadius: 8, padding: '2px 8px' }}>{w.durationMin}m · {w.type}</span>}
+                {w.type && <button onClick={clear} style={{ marginLeft: w.durationMin > 0 ? 6 : 'auto', background: 'none', border: 'none', color: 'var(--txd)', fontSize: 14, cursor: 'pointer' }}>×</button>}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 10 }}>
+                {types.map(({ id, label, color }) => (
+                    <div key={id} onClick={() => setField('type', w.type === id ? '' : id)} style={{ textAlign: 'center', padding: '7px 4px', borderRadius: 10, background: w.type === id ? `${color}22` : 'var(--sf)', border: `1.5px solid ${w.type === id ? color : 'var(--bd)'}`, cursor: 'pointer' }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: w.type === id ? color : 'var(--txm)' }}>{label}</span>
+                    </div>
+                ))}
+            </div>
+            {w.type && (
+                <>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--txm)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Duration</span>
+                        <div className="stepper" style={{ marginLeft: 'auto' }}>
+                            <button onClick={() => setField('durationMin', Math.max(0, (Number(w.durationMin) || 0) - 5))}>−</button>
+                            <div className="val">{Number(w.durationMin) || 0}m</div>
+                            <button onClick={() => setField('durationMin', Math.min(300, (Number(w.durationMin) || 0) + 5))}>+</button>
+                        </div>
+                    </div>
+                    <input className="inp" placeholder="Notes (sets/reps/route…)" value={w.notes || ''} onChange={e => setField('notes', e.target.value)} style={{ width: '100%' }} />
+                </>
+            )}
+        </div>
+    );
+};
+
+/* ============================================================
    FOOD SCREEN
    ============================================================ */
 const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () => {} }) => {
@@ -2151,6 +2297,14 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                         const doneColors = ['hc-purple', 'hc-pink', 'hc-green', 'hc-amber', 'hc-teal', 'hc-sage'];
                         const idleColors = ['hc-purple-idle', 'hc-pink-idle', 'hc-green-idle', 'hc-amber-idle', 'hc-teal-idle', 'hc-sage-idle'];
                         const cls = done ? doneColors[idx % doneColors.length] : idleColors[idx % idleColors.length];
+                        const streak = habitStreak(it.id, allData);
+                        const target = Number(it.target) > 0 ? Number(it.target) : null;
+                        const weekDone = target ? habitWeekDone(it.id, allData, 7) : 0;
+                        const meta = done
+                            ? (streak >= 2 ? `done · ${streak}d streak` : 'done')
+                            : target
+                                ? `${weekDone}/${target} this week`
+                                : (streak >= 2 ? `tap · ${streak}d streak` : 'tap to log');
                         return (
                             <div
                                 key={it.id}
@@ -2167,8 +2321,8 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                                     }
                                 </div>
                                 <div className="hc-body">
-                                    <div className="hc-name" style={{ color: done ? 'rgba(0,0,0,0.62)' : 'var(--tx)' }}>{it.label}</div>
-                                    <div className="hc-meta" style={{ color: done ? 'rgba(0,0,0,0.32)' : 'var(--txm)' }}>{done ? 'done' : 'tap to log'}</div>
+                                    <div className="hc-name" style={{ color: done ? 'rgba(0,0,0,0.62)' : 'var(--tx)' }}>{it.label}{streak >= 7 && <span style={{ marginLeft: 4 }}>🔥</span>}</div>
+                                    <div className="hc-meta" style={{ color: done ? 'rgba(0,0,0,0.32)' : 'var(--txm)' }}>{meta}</div>
                                 </div>
                             </div>
                         );
@@ -2225,6 +2379,12 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                         ))}
                     </div>
                 </div>
+
+                {/* Meditation card */}
+                <MeditationCard day={day} update={update} showToast={showToast} />
+
+                {/* Workout card */}
+                <WorkoutCard day={day} update={update} />
 
                 {/* Water total card */}
                 <div className="card" style={{ marginBottom: 10 }}>
@@ -2317,7 +2477,7 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                                     </span>
                                 </div>
                             ))}
-                            {dailyCals > 0 && (() => { const totalProt = foodLog.reduce((s, e) => s + (e.protein_g || 0), 0); const totalCarbs = foodLog.reduce((s, e) => s + (e.carbs_g || 0), 0); const totalFat = foodLog.reduce((s, e) => s + (e.fat_g || 0), 0); const calGoal = config.calGoal || 2000; const calPct = Math.min(100, Math.round(dailyCals / calGoal * 100)); const macroKcal = totalProt * 4 + totalCarbs * 4 + totalFat * 9; const hasMacros = macroKcal > 0; return (<div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 10, background: 'var(--sf)', border: '1px solid var(--bd)' }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}><span style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx)' }}>~{dailyCals} kcal</span><span style={{ fontSize: 11, color: 'var(--txm)' }}>of {calGoal} goal · {calPct}%</span></div><div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', background: 'var(--bg2)' }}><div style={{ width: `${calPct}%`, background: calPct >= 100 ? 'var(--amber)' : 'var(--green)', transition: 'width 0.5s ease', borderRadius: 3 }} /></div>{hasMacros && (<><div style={{ display: 'flex', height: 4, borderRadius: 2, overflow: 'hidden', background: 'var(--bg2)', marginTop: 5 }}><div style={{ flex: totalProt * 4, background: '#7B8CDE', transition: 'flex 0.4s' }} /><div style={{ flex: totalCarbs * 4, background: 'var(--amber)', transition: 'flex 0.4s' }} /><div style={{ flex: totalFat * 9, background: '#E07A5F', transition: 'flex 0.4s' }} /></div><div style={{ display: 'flex', gap: 10, marginTop: 5 }}><span style={{ fontSize: 10, color: '#7B8CDE', fontWeight: 700 }}>P {Math.round(totalProt)}g</span><span style={{ fontSize: 10, color: 'var(--amber-deep)', fontWeight: 700 }}>C {Math.round(totalCarbs)}g</span><span style={{ fontSize: 10, color: '#E07A5F', fontWeight: 700 }}>F {Math.round(totalFat)}g</span></div></>)}</div>); })()}
+                            {dailyCals > 0 && (() => { const totalProt = foodLog.reduce((s, e) => s + (e.protein_g || 0), 0); const totalCarbs = foodLog.reduce((s, e) => s + (e.carbs_g || 0), 0); const totalFat = foodLog.reduce((s, e) => s + (e.fat_g || 0), 0); const calGoal = config.calGoal || 2000; const pGoal = config.proteinGoal || 80; const cGoal = config.carbsGoal || 250; const fGoal = config.fatGoal || 65; const calPct = Math.min(100, Math.round(dailyCals / calGoal * 100)); const pPct = Math.min(100, Math.round(totalProt / pGoal * 100)); const cPct = Math.min(100, Math.round(totalCarbs / cGoal * 100)); const fPct = Math.min(100, Math.round(totalFat / fGoal * 100)); const macroKcal = totalProt * 4 + totalCarbs * 4 + totalFat * 9; const hasMacros = macroKcal > 0; const MacroBar = ({ label, val, goal, pct, color }) => (<div style={{ marginTop: 6 }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}><span style={{ fontSize: 10, fontWeight: 700, color }}>{label} {Math.round(val)}g</span><span style={{ fontSize: 9, color: 'var(--txm)', fontWeight: 600 }}>/{goal}g · {pct}%</span></div><div style={{ height: 4, borderRadius: 2, background: 'var(--bg2)', overflow: 'hidden' }}><div style={{ width: `${pct}%`, background: color, transition: 'width 0.5s ease', borderRadius: 2 }} /></div></div>); return (<div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 10, background: 'var(--sf)', border: '1px solid var(--bd)' }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}><span style={{ fontSize: 13, fontWeight: 700, color: 'var(--tx)' }}>~{dailyCals} kcal</span><span style={{ fontSize: 11, color: 'var(--txm)' }}>of {calGoal} · {calPct}%</span></div><div style={{ display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden', background: 'var(--bg2)' }}><div style={{ width: `${calPct}%`, background: calPct >= 100 ? 'var(--amber)' : 'var(--green)', transition: 'width 0.5s ease', borderRadius: 3 }} /></div>{hasMacros && (<><MacroBar label="P" val={totalProt} goal={pGoal} pct={pPct} color="#7B8CDE" /><MacroBar label="C" val={totalCarbs} goal={cGoal} pct={cPct} color="var(--amber-deep)" /><MacroBar label="F" val={totalFat} goal={fGoal} pct={fPct} color="#E07A5F" /></>)}</div>); })()}
                         </div>
                     )}
                 </div>
@@ -2928,7 +3088,49 @@ const LogScreen = ({ allData, config }) => {
                         <IconCalendarWeek size={15} color={logView === 'week' ? '#fff' : 'var(--txm)'} />
                         Week
                     </button>
+                    <button onClick={() => setLogView('photos')} style={{ flex: 1, padding: '8px 0', borderRadius: 10, border: '1.5px solid var(--bd)', background: logView === 'photos' ? 'var(--teal)' : 'var(--sf)', color: logView === 'photos' ? '#fff' : 'var(--txm)', fontWeight: 700, fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5 }}>
+                        <IconCameraFilled size={15} color={logView === 'photos' ? '#fff' : 'var(--txm)'} />
+                        Photos
+                    </button>
                 </div>
+
+                {logView === 'photos' && (() => {
+                    const entries = Object.entries(allData)
+                        .filter(([, rec]) => rec && (rec.skinPhoto || rec.hairPhoto))
+                        .sort(([a], [b]) => b.localeCompare(a))
+                        .slice(0, 60);
+                    if (entries.length === 0) {
+                        return (
+                            <div className="card" style={{ marginBottom: 14, padding: '28px 16px', textAlign: 'center' }}>
+                                <IconCameraFilled size={28} color="var(--txm)" />
+                                <div style={{ fontSize: 13, color: 'var(--txm)', marginTop: 8, fontWeight: 600 }}>No progress photos yet</div>
+                                <div style={{ fontSize: 11, color: 'var(--txd)', marginTop: 4 }}>Add Face/Hair photos in the daily Photo Journal section</div>
+                            </div>
+                        );
+                    }
+                    return (
+                        <div className="card" style={{ marginBottom: 14, padding: '14px 14px' }}>
+                            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--txm)', marginBottom: 12, display: 'flex', justifyContent: 'space-between' }}>
+                                <span>Photo timeline</span>
+                                <span style={{ color: 'var(--txd)', fontWeight: 600 }}>{entries.length} day{entries.length === 1 ? '' : 's'}</span>
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(80px, 1fr))', gap: 8 }}>
+                                {entries.map(([k, rec]) => {
+                                    const dateLabel = new Date(k + 'T12:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+                                    return (
+                                        <div key={k} onClick={() => setActiveDay(k)} style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                            <div style={{ position: 'relative', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: 'var(--sf)', border: '1px solid var(--bd)' }}>
+                                                {rec.skinPhoto ? <img src={rec.skinPhoto} alt={dateLabel} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : rec.hairPhoto ? <img src={rec.hairPhoto} alt={dateLabel} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : null}
+                                                {rec.skinPhoto && rec.hairPhoto && <div style={{ position: 'absolute', bottom: 3, right: 3, background: 'rgba(0,0,0,0.55)', borderRadius: 4, padding: '1px 4px', fontSize: 8, color: '#fff', fontWeight: 700 }}>2</div>}
+                                            </div>
+                                            <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--txm)', textAlign: 'center' }}>{dateLabel}</div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    );
+                })()}
 
                 {logView === 'week' && (() => {
                     const mon = new Date(); mon.setDate(mon.getDate() - ((mon.getDay() + 6) % 7) + weekOffset * 7); mon.setHours(12, 0, 0, 0);
@@ -3105,11 +3307,71 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
 
     const [newSnack, setNewSnack] = useState('');
     const [restoreMode, setRestoreMode] = useState('both'); // 'both' | 'data' | 'config'
-    const [open, setOpen] = useState({ targets: true, dailyitems: false, skincare: false, routine: false, snackrot: false, data: true });
+    const [open, setOpen] = useState({ targets: true, dailyitems: false, skincare: false, routine: false, snackrot: false, reminders: false, weeklyemail: false, data: true });
     const [newProduct, setNewProduct] = useState({ kind: '', name: '', slot: 'both' });
     const [newDailyItem, setNewDailyItem] = useState({ label: '', emoji: '' });
     const [iconPickerFor, setIconPickerFor] = useState(null); // item id or 'new'
     const PRESET_ICONS = ['leaf', 'drop', 'bowl', 'bottle', 'egg', 'sparkle', 'heart', 'flame', 'cup', 'pill', 'book', 'star', 'run', 'sun', 'moon', 'notepad'];
+
+    // Reminders + weekly email — fetched from Supabase on first open
+    const [reminders, setReminders] = useState([]);
+    const [remindersLoaded, setRemindersLoaded] = useState(false);
+    const [newReminder, setNewReminder] = useState({ slot_id: 'am_skincare', label: 'AM skincare', time_hhmm: '07:30' });
+    const [weeklyEmail, setWeeklyEmail] = useState({ id: 'self', email: '', enabled: false, send_day_of_week: 0, send_hour: 8, offset_minutes: -new Date().getTimezoneOffset() });
+    const [weeklyEmailLoaded, setWeeklyEmailLoaded] = useState(false);
+
+    useEffect(() => {
+        if (!open.reminders || remindersLoaded || !SB_ENABLED) return;
+        (async () => {
+            try {
+                const r = await fetch(`${SB_URL}/rest/v1/routine_reminders?select=*&order=time_hhmm.asc`, { headers: sbH });
+                if (r.ok) { const j = await r.json(); setReminders(Array.isArray(j) ? j : []); }
+            } catch { /* ignore — Supabase may not have table yet */ }
+            setRemindersLoaded(true);
+        })();
+    }, [open.reminders, remindersLoaded]);
+
+    useEffect(() => {
+        if (!open.weeklyemail || weeklyEmailLoaded || !SB_ENABLED) return;
+        (async () => {
+            try {
+                const r = await fetch(`${SB_URL}/rest/v1/routine_report_schedules?id=eq.self&select=*`, { headers: sbH });
+                if (r.ok) { const j = await r.json(); if (Array.isArray(j) && j[0]) setWeeklyEmail({ ...weeklyEmail, ...j[0] }); }
+            } catch { /* ignore */ }
+            setWeeklyEmailLoaded(true);
+        })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open.weeklyemail, weeklyEmailLoaded]);
+
+    const addReminder = async () => {
+        if (!newReminder.label.trim()) return;
+        const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        const offsetMinutes = -new Date().getTimezoneOffset();
+        const row = { id, slot_id: newReminder.slot_id, label: newReminder.label.trim(), time_hhmm: newReminder.time_hhmm, days_mask: 127, offset_minutes: offsetMinutes, enabled: true };
+        setReminders(prev => [...prev, row]);
+        await sbUpsertR('routine_reminders', row, `routine_reminders:upsert:${id}`);
+        setNewReminder({ slot_id: 'am_skincare', label: 'AM skincare', time_hhmm: '07:30' });
+        showToast('Reminder added', 'success');
+    };
+
+    const toggleReminder = async (r) => {
+        const next = { ...r, enabled: !r.enabled };
+        setReminders(prev => prev.map(x => x.id === r.id ? next : x));
+        await sbUpsertR('routine_reminders', next, `routine_reminders:upsert:${r.id}`);
+    };
+
+    const deleteReminder = async (r) => {
+        setReminders(prev => prev.filter(x => x.id !== r.id));
+        await sbDeleteR('routine_reminders', r.id);
+    };
+
+    const saveWeeklyEmail = async () => {
+        const offsetMinutes = -new Date().getTimezoneOffset();
+        const row = { ...weeklyEmail, id: 'self', offset_minutes: offsetMinutes };
+        setWeeklyEmail(row);
+        await sbUpsertR('routine_report_schedules', row, 'routine_report_schedules:upsert:self');
+        showToast('Email settings saved', 'success');
+    };
 
     const toggle = (k) => setOpen(o => ({ ...o, [k]: !o[k] }));
     const SecHd = ({ label, k }) => (
@@ -3245,6 +3507,58 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                                 </div>
                             </div>
                         </div>
+                        <div className="set-row">
+                            <div className="r">
+                                <div>
+                                    <div className="lbl">Calorie goal</div>
+                                    <div className="desc">Daily kcal</div>
+                                </div>
+                                <div className="stepper">
+                                    <button onClick={() => update({ calGoal: Math.max(800, (config.calGoal || 2000) - 100) })}>−</button>
+                                    <div className="val">{config.calGoal || 2000}</div>
+                                    <button onClick={() => update({ calGoal: Math.min(5000, (config.calGoal || 2000) + 100) })}>+</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="set-row">
+                            <div className="r">
+                                <div>
+                                    <div className="lbl">Protein goal</div>
+                                    <div className="desc">Daily grams</div>
+                                </div>
+                                <div className="stepper">
+                                    <button onClick={() => update({ proteinGoal: Math.max(20, (config.proteinGoal || 80) - 5) })}>−</button>
+                                    <div className="val">{config.proteinGoal || 80}g</div>
+                                    <button onClick={() => update({ proteinGoal: Math.min(300, (config.proteinGoal || 80) + 5) })}>+</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="set-row">
+                            <div className="r">
+                                <div>
+                                    <div className="lbl">Carbs goal</div>
+                                    <div className="desc">Daily grams</div>
+                                </div>
+                                <div className="stepper">
+                                    <button onClick={() => update({ carbsGoal: Math.max(50, (config.carbsGoal || 250) - 10) })}>−</button>
+                                    <div className="val">{config.carbsGoal || 250}g</div>
+                                    <button onClick={() => update({ carbsGoal: Math.min(600, (config.carbsGoal || 250) + 10) })}>+</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="set-row">
+                            <div className="r">
+                                <div>
+                                    <div className="lbl">Fat goal</div>
+                                    <div className="desc">Daily grams</div>
+                                </div>
+                                <div className="stepper">
+                                    <button onClick={() => update({ fatGoal: Math.max(20, (config.fatGoal || 65) - 5) })}>−</button>
+                                    <div className="val">{config.fatGoal || 65}g</div>
+                                    <button onClick={() => update({ fatGoal: Math.min(200, (config.fatGoal || 65) + 5) })}>+</button>
+                                </div>
+                            </div>
+                        </div>
                     </>}
                 </div>
 
@@ -3266,6 +3580,17 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                                             update({ customDailyItems: config.customDailyItems.filter(x => x.id !== it.id) });
                                             showToast(`${it.label} removed`, 'info');
                                         }}>×</button>
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 8, paddingTop: 8, borderTop: '1px dashed var(--bd)' }}>
+                                    <div>
+                                        <div className="lbl" style={{ fontSize: 11 }}>Weekly goal</div>
+                                        <div className="desc" style={{ fontSize: 10 }}>Days/week (0 = no goal)</div>
+                                    </div>
+                                    <div className="stepper">
+                                        <button onClick={() => update({ customDailyItems: config.customDailyItems.map(x => x.id === it.id ? { ...x, target: Math.max(0, (Number(x.target) || 0) - 1) } : x) })}>−</button>
+                                        <div className="val">{Number(it.target) > 0 ? `${it.target}/7` : 'off'}</div>
+                                        <button onClick={() => update({ customDailyItems: config.customDailyItems.map(x => x.id === it.id ? { ...x, target: Math.min(7, (Number(x.target) || 0) + 1) } : x) })}>+</button>
+                                    </div>
                                 </div>
                                 {iconPickerFor === it.id && (
                                     <div className="icon-picker-grid">
@@ -3420,6 +3745,84 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                                 <input className="inp" value={config.snackRotation[d] || ''} onChange={(e) => updateRotation(d, e.target.value)} />
                             </div>
                         </div>
+                    ))}
+                </div>
+
+                {/* Reminders (push) */}
+                <div className="sec">
+                    <SecHd label="Reminders" k="reminders" />
+                    {open.reminders && (!SB_ENABLED ? (
+                        <div style={{ fontSize: 12, color: 'var(--txm)', padding: '8px 0' }}>Connect Supabase to enable push reminders.</div>
+                    ) : (
+                        <>
+                            <div style={{ fontSize: 11, color: 'var(--txm)', marginBottom: 12 }}>Push reminders fire at the configured time daily. Requires push notifications enabled in finance Settings.</div>
+                            {reminders.length === 0 && <div style={{ fontSize: 12, color: 'var(--txd)', padding: '8px 0' }}>No reminders yet.</div>}
+                            {reminders.map(r => (
+                                <div key={r.id} className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, padding: '10px 12px', marginBottom: 6 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        <input type="checkbox" checked={!!r.enabled} onChange={() => toggleReminder(r)} style={{ cursor: 'pointer' }} />
+                                        <input className="inp" style={{ flex: 1, padding: '6px 8px', fontSize: 12 }} value={r.label} readOnly />
+                                        <input className="inp" type="time" style={{ width: 90, padding: '6px 8px', fontSize: 12 }} value={r.time_hhmm} readOnly />
+                                        <button onClick={() => deleteReminder(r)} style={{ background: 'none', border: 'none', color: 'var(--txd)', fontSize: 18, cursor: 'pointer' }}>×</button>
+                                    </div>
+                                </div>
+                            ))}
+                            <div className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, padding: '10px 12px', marginTop: 8 }}>
+                                <div className="lbl" style={{ marginBottom: 8, fontSize: 11 }}>Add reminder</div>
+                                <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                                    <input className="inp" placeholder="Label (e.g. Water break)" value={newReminder.label} onChange={e => setNewReminder({ ...newReminder, label: e.target.value })} style={{ flex: 1, padding: '7px 9px', fontSize: 12 }} />
+                                    <input className="inp" type="time" value={newReminder.time_hhmm} onChange={e => setNewReminder({ ...newReminder, time_hhmm: e.target.value })} style={{ width: 100, padding: '7px 9px', fontSize: 12 }} />
+                                </div>
+                                <button onClick={addReminder} style={{ width: '100%', padding: '8px', border: 'none', borderRadius: 9, background: 'var(--teal)', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>+ Add reminder</button>
+                            </div>
+                        </>
+                    ))}
+                </div>
+
+                {/* Weekly email report */}
+                <div className="sec">
+                    <SecHd label="Weekly email summary" k="weeklyemail" />
+                    {open.weeklyemail && (!SB_ENABLED ? (
+                        <div style={{ fontSize: 12, color: 'var(--txm)', padding: '8px 0' }}>Connect Supabase to enable email summaries.</div>
+                    ) : (
+                        <>
+                            <div style={{ fontSize: 11, color: 'var(--txm)', marginBottom: 12 }}>Weekly HTML summary of your routine — days logged, sleep avg, mood, workout/meditation minutes.</div>
+                            <div className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, padding: '10px 12px', marginBottom: 6 }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <input type="checkbox" checked={!!weeklyEmail.enabled} onChange={e => setWeeklyEmail({ ...weeklyEmail, enabled: e.target.checked })} style={{ cursor: 'pointer' }} />
+                                    <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx)' }}>Enable weekly summary</span>
+                                </div>
+                            </div>
+                            <div className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, padding: '10px 12px', marginBottom: 6 }}>
+                                <div className="lbl" style={{ marginBottom: 6, fontSize: 11 }}>Email address</div>
+                                <input className="inp" type="email" value={weeklyEmail.email} onChange={e => setWeeklyEmail({ ...weeklyEmail, email: e.target.value })} placeholder="you@example.com" style={{ width: '100%', padding: '7px 9px', fontSize: 12 }} />
+                            </div>
+                            <div className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, padding: '10px 12px', marginBottom: 6 }}>
+                                <div className="r">
+                                    <div>
+                                        <div className="lbl" style={{ fontSize: 11 }}>Send day</div>
+                                        <div className="desc" style={{ fontSize: 10 }}>Day of week</div>
+                                    </div>
+                                    <select value={weeklyEmail.send_day_of_week} onChange={e => setWeeklyEmail({ ...weeklyEmail, send_day_of_week: Number(e.target.value) })} className="inp" style={{ padding: '6px 8px', fontSize: 12, width: 110 }}>
+                                        {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d, i) => <option key={i} value={i}>{d}</option>)}
+                                    </select>
+                                </div>
+                            </div>
+                            <div className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, padding: '10px 12px', marginBottom: 8 }}>
+                                <div className="r">
+                                    <div>
+                                        <div className="lbl" style={{ fontSize: 11 }}>Send hour</div>
+                                        <div className="desc" style={{ fontSize: 10 }}>Local time (0-23)</div>
+                                    </div>
+                                    <div className="stepper">
+                                        <button onClick={() => setWeeklyEmail({ ...weeklyEmail, send_hour: Math.max(0, weeklyEmail.send_hour - 1) })}>−</button>
+                                        <div className="val">{weeklyEmail.send_hour}:00</div>
+                                        <button onClick={() => setWeeklyEmail({ ...weeklyEmail, send_hour: Math.min(23, weeklyEmail.send_hour + 1) })}>+</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <button onClick={saveWeeklyEmail} style={{ width: '100%', padding: '10px', border: 'none', borderRadius: 9, background: 'var(--teal)', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Save email settings</button>
+                        </>
                     ))}
                 </div>
 
