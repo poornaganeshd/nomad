@@ -19,13 +19,21 @@ const ReceiptPicker = forwardRef(function ReceiptPicker({ cloudinaryEnabled = tr
 
   // ── Exposed to parent via ref ──────────────────────────────────
   useImperativeHandle(ref, () => ({
-    // Upload all pending files, return array of Cloudinary URLs
+    // Upload all pending files, return array of Cloudinary URLs.
+    // Throws on any failure so the caller can surface a clear error
+    // toast and keep the picker state intact for retry.
     async upload() {
       if (items.length === 0) return [];
-      const urls = await Promise.all(
-        items.map(it => uploadReceipt(it.file).catch(() => null))
-      );
-      return urls.filter(Boolean);
+      const results = await Promise.allSettled(items.map(it => uploadReceipt(it.file)));
+      const failed = results.filter(r => r.status === "rejected");
+      if (failed.length > 0) {
+        const reason = failed[0].reason?.message || "Upload failed";
+        const msg = failed.length === items.length
+          ? `Receipt upload failed: ${reason}`
+          : `${failed.length} of ${items.length} receipts failed to upload: ${reason}`;
+        throw new Error(msg);
+      }
+      return results.map(r => r.value);
     },
     clear() {
       setItems(prev => { prev.forEach(it => URL.revokeObjectURL(it.localUrl)); return []; });

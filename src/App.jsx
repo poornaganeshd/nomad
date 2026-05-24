@@ -542,8 +542,13 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       // Upload receipts only at submit time — fixes premature Cloudinary uploads
       let rUrl = null;
       if (type !== "transfer" && receiptPickerRef.current?.count > 0) {
-        const urls = await receiptPickerRef.current.upload();
-        rUrl = urls.length === 1 ? urls[0] : urls.length > 1 ? JSON.stringify(urls) : null;
+        try {
+          const urls = await receiptPickerRef.current.upload();
+          rUrl = urls.length === 1 ? urls[0] : urls.length > 1 ? JSON.stringify(urls) : null;
+        } catch (err) {
+          showT(err?.message || "Receipt upload failed — please try again", "error");
+          return; // keep form + picker state intact for retry
+        }
       }
       const isFX = fxCur.trim().toUpperCase() !== "INR" && fxRate > 0;
       const inrAmt = isFX ? roundMoney(a * fxRate) : a;
