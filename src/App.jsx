@@ -586,7 +586,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
     try {
       const data = await receiptPickerRef.current.getFirstImageData();
       if (!data) { showT("No image to scan", "error"); return; }
-      const r = await fetch("/api/receipt-ocr", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+      const r = await fetch("/api/food-vision", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...data, type: "receipt" }) });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "OCR failed");
       if (d.amount > 0) sAmt(String(d.amount));

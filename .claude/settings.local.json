@@ -37,7 +37,12 @@
       "Bash(node -e ' *)",
       "Bash(git pull *)",
       "Bash(git stash *)",
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "Bash(git push *)",
+      "Bash(git reset *)",
+      "Bash(grep -v \"context\\\\|---\\\\|^>$\")",
+      "Bash(gh pr create --title 'Routine + finance expansion: voice/OCR/streaks/macro/workout/meditation/push scheduler/weekly email' --body ' *)",
+      "Bash(cd .. && npm run build 2>&1 | tail -5)"
     ]
   }
 }

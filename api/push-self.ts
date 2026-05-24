@@ -20,7 +20,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const r = await fetch(`${supabase_url}/rest/v1/push_subscriptions?select=*`, { headers });
     if (!r.ok) return res.status(502).json({ error: `Supabase ${r.status}: ${await r.text().catch(() => "")}` });
-    subs = await r.json();
+    subs = (await r.json()) as any[];
   } catch (e) {
     return res.status(502).json({ error: (e as Error).message });
   }
