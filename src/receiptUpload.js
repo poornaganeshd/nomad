@@ -59,15 +59,22 @@ function toDataUrl(blob) {
 //   Callers should check isLocalReceipt(url) to surface a "stored locally" notice.
 //
 // Returns the secure_url (remote) or a data: URL (local fallback).
-export async function uploadReceipt(file) {
+//
+// When `{throwOnFail: true}` is passed, Cloudinary errors (4xx, 5xx, network)
+// throw with the actual server message instead of silently falling back. Used
+// by the manual migrate-local-receipts flow so the user sees the real reason
+// the upload failed (bad preset, signed-only, quota, etc).
+export async function uploadReceipt(file, opts = {}) {
   const creds = getCredentials();
   const { cloudName, apiKey, apiSecret, uploadPreset } = creds;
+  const throwOnFail = !!opts.throwOnFail;
 
   const isPdf = file.type === "application/pdf";
   const blob = isPdf ? file : await compressImage(file);
 
   // No Cloudinary configured — store locally
   if (!cloudName) {
+    if (throwOnFail) throw new Error("Cloudinary cloudName not configured");
     return await toDataUrl(blob);
   }
 
@@ -86,7 +93,7 @@ export async function uploadReceipt(file) {
     // Unsigned upload via an unsigned upload preset
     form.append("upload_preset", uploadPreset);
   } else {
-    // cloudName set but no auth — store locally rather than blocking the user
+    if (throwOnFail) throw new Error("Cloudinary has no auth — set apiKey+apiSecret or uploadPreset");
     return await toDataUrl(blob);
   }
 
@@ -100,20 +107,16 @@ export async function uploadReceipt(file) {
       body: form,
     });
     if (!res.ok) {
-      // Cloudinary returned 4xx (bad signature, bad creds, expired preset, quota) or 5xx.
-      // Earlier impl threw here, which blocked the entire expense save — the user lost
-      // their form input and the receipt vanished. Fall back to local data URL instead
-      // so the expense saves with the receipt, and surface a console warning so the
-      // user can diagnose the Cloudinary config via DevTools.
       const err = await res.json().catch(() => ({}));
       const msg = err.error?.message || `Upload failed (${res.status})`;
+      if (throwOnFail) throw new Error(msg);
       console.warn("Cloudinary upload rejected, storing receipt locally:", msg);
       return await toDataUrl(blob);
     }
     const data = await res.json();
     return data.secure_url;
   } catch (err) {
-    // Network failure (DNS, offline, CORS preflight fail, etc.) — fall back to local.
+    if (throwOnFail) throw err;
     console.warn("Cloudinary upload failed, storing receipt locally:", err?.message || err);
     return await toDataUrl(blob);
   }

@@ -1585,7 +1585,8 @@ export default function Nomad() {
     if (!_creds.cloudName) { showT("Configure Cloudinary first", "error"); return; }
     if (lrMigrating) return;
     sLrMigrating(true);
-    let migrated = 0, failed = 0, skipped = 0;
+    let migrated = 0, failed = 0;
+    let firstError = ""; // Cloudinary error message to surface in toast
     const processRow = async (row, table, setState) => {
       let urls;
       try { urls = JSON.parse(row.receipt_url); if (!Array.isArray(urls)) urls = [row.receipt_url]; }
@@ -1594,9 +1595,13 @@ export default function Nomad() {
         if (typeof u !== "string" || !u.startsWith("data:")) return u;
         try {
           const file = dataUrlToFile(u);
-          const r = await uploadReceipt(file);
+          const r = await uploadReceipt(file, { throwOnFail: true });
           return r;
-        } catch { return u; }
+        } catch (e) {
+          if (!firstError) firstError = e?.message || "Upload failed";
+          console.warn("Migration upload failed:", e?.message || e);
+          return u;
+        }
       }));
       const anyUpdated = newUrls.some((u, i) => u !== urls[i] && !u.startsWith("data:"));
       const allStillLocal = newUrls.every(u => typeof u === "string" && u.startsWith("data:"));
@@ -1616,10 +1621,10 @@ export default function Nomad() {
     for (const r of localEx) await processRow(r, "expenses", sEx);
     for (const r of localInc) await processRow(r, "incomes", sInc);
     sLrMigrating(false);
-    const total = migrated + failed + skipped;
+    const total = migrated + failed;
     if (migrated > 0 && failed === 0) showT(`Migrated ${migrated} receipt${migrated === 1 ? "" : "s"} to Cloudinary`, "success");
-    else if (migrated > 0) showT(`Migrated ${migrated} of ${total} · ${failed} failed (check Cloudinary credentials)`, "info");
-    else showT(`All ${failed} migration attempt${failed === 1 ? "" : "s"} failed — check Cloudinary credentials in Settings`, "error");
+    else if (migrated > 0) showT(`Migrated ${migrated} of ${total} · ${failed} failed: ${firstError || "unknown error"}`, "info");
+    else showT(`All ${failed} migration attempt${failed === 1 ? "" : "s"} failed: ${firstError || "unknown error"}`, "error");
   };
   // Parse CSV text into array of {date, amount, note, type} rows.
   // Handles HDFC/ICICI/SBI/generic bank statement formats.
