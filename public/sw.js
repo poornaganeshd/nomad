@@ -55,36 +55,3 @@ self.addEventListener('fetch', (event) => {
   }
 });
 
-self.addEventListener('notificationclick', (event) => {
-  event.notification.close();
-  event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
-      const focused = clients.find(c => c.focused) || clients[0];
-      if (focused) return focused.focus();
-      return self.clients.openWindow('/');
-    })
-  );
-});
-
-self.addEventListener('push', (event) => {
-  let payload = { title: 'NOMAD', body: '', tag: 'nomad-push', requireInteraction: false };
-  try { if (event.data) payload = { ...payload, ...event.data.json() }; } catch {}
-  event.waitUntil((async () => {
-    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    // If any window client is focused/visible on this device, app is active here — skip notif, toast already shown.
-    const active = clients.some(c => c.focused === true || c.visibilityState === 'visible');
-    if (active) {
-      // Forward to active client in case it wants to surface a toast for server-driven pushes (e.g. bill cron).
-      clients.forEach(c => { try { c.postMessage({ type: 'nomad-push', payload }); } catch {} });
-      return;
-    }
-    await self.registration.showNotification(payload.title, {
-      body: payload.body,
-      icon: '/icon-192.png',
-      badge: '/icon-192.png',
-      tag: payload.tag,
-      requireInteraction: payload.requireInteraction,
-      data: { url: '/' },
-    });
-  })());
-});

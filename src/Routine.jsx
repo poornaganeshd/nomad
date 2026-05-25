@@ -3325,71 +3325,11 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
 
     const [newSnack, setNewSnack] = useState('');
     const [restoreMode, setRestoreMode] = useState('both'); // 'both' | 'data' | 'config'
-    const [open, setOpen] = useState({ targets: true, dailyitems: false, skincare: false, routine: false, snackrot: false, reminders: false, weeklyemail: false, data: true });
+    const [open, setOpen] = useState({ targets: true, dailyitems: false, skincare: false, routine: false, snackrot: false, data: true });
     const [newProduct, setNewProduct] = useState({ kind: '', name: '', slot: 'both' });
     const [newDailyItem, setNewDailyItem] = useState({ label: '', emoji: '' });
     const [iconPickerFor, setIconPickerFor] = useState(null); // item id or 'new'
     const PRESET_ICONS = ['leaf', 'drop', 'bowl', 'bottle', 'egg', 'sparkle', 'heart', 'flame', 'cup', 'pill', 'book', 'star', 'run', 'sun', 'moon', 'notepad'];
-
-    // Reminders + weekly email — fetched from Supabase on first open
-    const [reminders, setReminders] = useState([]);
-    const [remindersLoaded, setRemindersLoaded] = useState(false);
-    const [newReminder, setNewReminder] = useState({ slot_id: 'am_skincare', label: 'AM skincare', time_hhmm: '07:30' });
-    const [weeklyEmail, setWeeklyEmail] = useState({ id: 'self', email: '', enabled: false, send_day_of_week: 0, send_hour: 8, offset_minutes: -new Date().getTimezoneOffset() });
-    const [weeklyEmailLoaded, setWeeklyEmailLoaded] = useState(false);
-
-    useEffect(() => {
-        if (!open.reminders || remindersLoaded || !SB_ENABLED) return;
-        (async () => {
-            try {
-                const r = await fetch(`${SB_URL}/rest/v1/routine_reminders?select=*&order=time_hhmm.asc`, { headers: sbH });
-                if (r.ok) { const j = await r.json(); setReminders(Array.isArray(j) ? j : []); }
-            } catch { /* ignore — Supabase may not have table yet */ }
-            setRemindersLoaded(true);
-        })();
-    }, [open.reminders, remindersLoaded]);
-
-    useEffect(() => {
-        if (!open.weeklyemail || weeklyEmailLoaded || !SB_ENABLED) return;
-        (async () => {
-            try {
-                const r = await fetch(`${SB_URL}/rest/v1/routine_report_schedules?id=eq.self&select=*`, { headers: sbH });
-                if (r.ok) { const j = await r.json(); if (Array.isArray(j) && j[0]) setWeeklyEmail({ ...weeklyEmail, ...j[0] }); }
-            } catch { /* ignore */ }
-            setWeeklyEmailLoaded(true);
-        })();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [open.weeklyemail, weeklyEmailLoaded]);
-
-    const addReminder = async () => {
-        if (!newReminder.label.trim()) return;
-        const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-        const offsetMinutes = -new Date().getTimezoneOffset();
-        const row = { id, slot_id: newReminder.slot_id, label: newReminder.label.trim(), time_hhmm: newReminder.time_hhmm, days_mask: 127, offset_minutes: offsetMinutes, enabled: true };
-        setReminders(prev => [...prev, row]);
-        await sbUpsertR('routine_reminders', row, `routine_reminders:upsert:${id}`);
-        setNewReminder({ slot_id: 'am_skincare', label: 'AM skincare', time_hhmm: '07:30' });
-        showToast('Reminder added', 'success');
-    };
-
-    const toggleReminder = async (r) => {
-        const next = { ...r, enabled: !r.enabled };
-        setReminders(prev => prev.map(x => x.id === r.id ? next : x));
-        await sbUpsertR('routine_reminders', next, `routine_reminders:upsert:${r.id}`);
-    };
-
-    const deleteReminder = async (r) => {
-        setReminders(prev => prev.filter(x => x.id !== r.id));
-        await sbDeleteR('routine_reminders', r.id);
-    };
-
-    const saveWeeklyEmail = async () => {
-        const offsetMinutes = -new Date().getTimezoneOffset();
-        const row = { ...weeklyEmail, id: 'self', offset_minutes: offsetMinutes };
-        setWeeklyEmail(row);
-        await sbUpsertR('routine_report_schedules', row, 'routine_report_schedules:upsert:self');
-        showToast('Email settings saved', 'success');
-    };
 
     const toggle = (k) => setOpen(o => ({ ...o, [k]: !o[k] }));
     const SecHd = ({ label, k }) => (
@@ -3765,85 +3705,6 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                         </div>
                     ))}
                 </div>
-
-                {/* Reminders (push) */}
-                <div className="sec">
-                    <SecHd label="Reminders" k="reminders" />
-                    {open.reminders && (!SB_ENABLED ? (
-                        <div style={{ fontSize: 12, color: 'var(--txm)', padding: '8px 0' }}>Connect Supabase to enable push reminders.</div>
-                    ) : (
-                        <>
-                            <div style={{ fontSize: 11, color: 'var(--txm)', marginBottom: 12 }}>Push reminders fire at the configured time daily. Requires push notifications enabled in finance Settings.</div>
-                            {reminders.length === 0 && <div style={{ fontSize: 12, color: 'var(--txd)', padding: '8px 0' }}>No reminders yet.</div>}
-                            {reminders.map(r => (
-                                <div key={r.id} className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, padding: '10px 12px', marginBottom: 6 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                        <input type="checkbox" checked={!!r.enabled} onChange={() => toggleReminder(r)} style={{ cursor: 'pointer' }} />
-                                        <input className="inp" style={{ flex: 1, padding: '6px 8px', fontSize: 12 }} value={r.label} readOnly />
-                                        <input className="inp" type="time" style={{ width: 90, padding: '6px 8px', fontSize: 12 }} value={r.time_hhmm} readOnly />
-                                        <button onClick={() => deleteReminder(r)} style={{ background: 'none', border: 'none', color: 'var(--txd)', fontSize: 18, cursor: 'pointer' }}>×</button>
-                                    </div>
-                                </div>
-                            ))}
-                            <div className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, padding: '10px 12px', marginTop: 8 }}>
-                                <div className="lbl" style={{ marginBottom: 8, fontSize: 11 }}>Add reminder</div>
-                                <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-                                    <input className="inp" placeholder="Label (e.g. Water break)" value={newReminder.label} onChange={e => setNewReminder({ ...newReminder, label: e.target.value })} style={{ flex: 1, padding: '7px 9px', fontSize: 12 }} />
-                                    <input className="inp" type="time" value={newReminder.time_hhmm} onChange={e => setNewReminder({ ...newReminder, time_hhmm: e.target.value })} style={{ width: 100, padding: '7px 9px', fontSize: 12 }} />
-                                </div>
-                                <button onClick={addReminder} style={{ width: '100%', padding: '8px', border: 'none', borderRadius: 9, background: 'var(--teal)', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>+ Add reminder</button>
-                            </div>
-                        </>
-                    ))}
-                </div>
-
-                {/* Weekly email report */}
-                <div className="sec">
-                    <SecHd label="Weekly email summary" k="weeklyemail" />
-                    {open.weeklyemail && (!SB_ENABLED ? (
-                        <div style={{ fontSize: 12, color: 'var(--txm)', padding: '8px 0' }}>Connect Supabase to enable email summaries.</div>
-                    ) : (
-                        <>
-                            <div style={{ fontSize: 11, color: 'var(--txm)', marginBottom: 12 }}>Weekly HTML summary of your routine — days logged, sleep avg, mood, workout/meditation minutes.</div>
-                            <div className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, padding: '10px 12px', marginBottom: 6 }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                    <input type="checkbox" checked={!!weeklyEmail.enabled} onChange={e => setWeeklyEmail({ ...weeklyEmail, enabled: e.target.checked })} style={{ cursor: 'pointer' }} />
-                                    <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--tx)' }}>Enable weekly summary</span>
-                                </div>
-                            </div>
-                            <div className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, padding: '10px 12px', marginBottom: 6 }}>
-                                <div className="lbl" style={{ marginBottom: 6, fontSize: 11 }}>Email address</div>
-                                <input className="inp" type="email" value={weeklyEmail.email} onChange={e => setWeeklyEmail({ ...weeklyEmail, email: e.target.value })} placeholder="you@example.com" style={{ width: '100%', padding: '7px 9px', fontSize: 12 }} />
-                            </div>
-                            <div className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, padding: '10px 12px', marginBottom: 6 }}>
-                                <div className="r">
-                                    <div>
-                                        <div className="lbl" style={{ fontSize: 11 }}>Send day</div>
-                                        <div className="desc" style={{ fontSize: 10 }}>Day of week</div>
-                                    </div>
-                                    <select value={weeklyEmail.send_day_of_week} onChange={e => setWeeklyEmail({ ...weeklyEmail, send_day_of_week: Number(e.target.value) })} className="inp" style={{ padding: '6px 8px', fontSize: 12, width: 110 }}>
-                                        {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d, i) => <option key={i} value={i}>{d}</option>)}
-                                    </select>
-                                </div>
-                            </div>
-                            <div className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, padding: '10px 12px', marginBottom: 8 }}>
-                                <div className="r">
-                                    <div>
-                                        <div className="lbl" style={{ fontSize: 11 }}>Send hour</div>
-                                        <div className="desc" style={{ fontSize: 10 }}>Local time (0-23)</div>
-                                    </div>
-                                    <div className="stepper">
-                                        <button onClick={() => setWeeklyEmail({ ...weeklyEmail, send_hour: Math.max(0, weeklyEmail.send_hour - 1) })}>−</button>
-                                        <div className="val">{weeklyEmail.send_hour}:00</div>
-                                        <button onClick={() => setWeeklyEmail({ ...weeklyEmail, send_hour: Math.min(23, weeklyEmail.send_hour + 1) })}>+</button>
-                                    </div>
-                                </div>
-                            </div>
-                            <button onClick={saveWeeklyEmail} style={{ width: '100%', padding: '10px', border: 'none', borderRadius: 9, background: 'var(--teal)', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Save email settings</button>
-                        </>
-                    ))}
-                </div>
-
 
                 {/* Data */}
                 <div className="sec">
