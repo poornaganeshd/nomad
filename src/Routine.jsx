@@ -2149,7 +2149,9 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
     // AI photo analysis state
     const [analyzing, setAnalyzing] = useState(false);
     const [aiMacros, setAiMacros] = useState(null); // { calories, protein_g, carbs_g, fat_g, confidence }
+    const [pickerOpen, setPickerOpen] = useState(false);
     const cameraInputRef = useRef(null);
+    const galleryInputRef = useRef(null);
 
     const analyzePhoto = async (file) => {
         setAnalyzing(true);
@@ -2458,8 +2460,9 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                             </div>
                         ))}
                     </div>
-                    {/* Hidden camera file input */}
+                    {/* Hidden camera + gallery file inputs */}
                     <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files?.[0]; if (f) analyzePhoto(f); e.target.value = ''; }} />
+                    <input ref={galleryInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files?.[0]; if (f) analyzePhoto(f); e.target.value = ''; }} />
                     <div style={{ display: 'flex', gap: 8 }}>
                         <input
                             className="inp"
@@ -2469,11 +2472,22 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                             onKeyDown={(e) => { if (e.key === 'Enter') addEntry(); }}
                             style={{ flex: 1 }}
                         />
-                        <button
-                            style={{ width: 38, height: 38, marginTop: 0, borderRadius: 10, border: '1.5px solid var(--bd)', background: analyzing ? 'var(--sf)' : 'var(--bg)', cursor: analyzing ? 'default' : 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
-                            onClick={() => { if (!analyzing) cameraInputRef.current?.click(); }}
-                            title="Analyse food photo"
-                        >{analyzing ? '⏳' : <Camera size={18} />}</button>
+                        <div style={{ position: 'relative', flexShrink: 0 }}>
+                            <button
+                                style={{ width: 38, height: 38, marginTop: 0, borderRadius: 10, border: '1.5px solid var(--bd)', background: analyzing ? 'var(--sf)' : 'var(--bg)', cursor: analyzing ? 'default' : 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                                onClick={() => { if (!analyzing) setPickerOpen(o => !o); }}
+                                title="Analyse food photo"
+                            >{analyzing ? '⏳' : <Camera size={18} />}</button>
+                            {pickerOpen && !analyzing && (
+                                <>
+                                    <div onClick={() => setPickerOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 9 }} />
+                                    <div style={{ position: 'absolute', bottom: 'calc(100% + 6px)', right: 0, background: 'var(--bg)', border: '1.5px solid var(--bd)', borderRadius: 12, boxShadow: '0 6px 16px rgba(0,0,0,0.18)', padding: 6, display: 'flex', flexDirection: 'column', gap: 2, minWidth: 170, zIndex: 10 }}>
+                                        <button style={{ padding: '9px 12px', borderRadius: 8, border: 'none', background: 'transparent', textAlign: 'left', fontSize: 12, fontWeight: 600, cursor: 'pointer', color: 'var(--tx)', display: 'flex', alignItems: 'center', gap: 8 }} onClick={() => { setPickerOpen(false); cameraInputRef.current?.click(); }}><IconCameraFilled size={14} color="var(--tx)" />Take Photo</button>
+                                        <button style={{ padding: '9px 12px', borderRadius: 8, border: 'none', background: 'transparent', textAlign: 'left', fontSize: 12, fontWeight: 600, cursor: 'pointer', color: 'var(--tx)', display: 'flex', alignItems: 'center', gap: 8 }} onClick={() => { setPickerOpen(false); galleryInputRef.current?.click(); }}><IconPhotoPlus size={14} color="var(--tx)" />Choose from Gallery</button>
+                                    </div>
+                                </>
+                            )}
+                        </div>
                         <button className="btn green" style={{ width: 'auto', marginTop: 0, padding: '0 16px', fontSize: 13 }} onClick={addEntry}>Add</button>
                     </div>
                     {/* AI macro preview — shown after photo analysis, before user taps Add */}
@@ -3956,8 +3970,8 @@ export default function RoutineApp({ darkMode = false, onTabChange }) {
                         }}
                     >
                         <div style={{
-                            padding: '10px 22px',
-                            borderRadius: 100,
+                            padding: '10px 18px',
+                            borderRadius: 18,
                             background: toast.msg
                                 ? (toast.variant === 'error' ? '#D4726A'
                                     : toast.variant === 'success' ? 'var(--green, #6BAA75)'
@@ -3967,9 +3981,9 @@ export default function RoutineApp({ darkMode = false, onTabChange }) {
                             color: '#fff',
                             fontSize: 13,
                             fontWeight: 500,
-                            whiteSpace: 'nowrap',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
+                            lineHeight: 1.4,
+                            wordBreak: 'break-word',
+                            textAlign: 'center',
                             boxShadow: '0 4px 16px rgba(0,0,0,0.2)',
                             fontFamily: 'var(--font)',
                         }}>

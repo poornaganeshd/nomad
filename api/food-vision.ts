@@ -39,8 +39,8 @@ const MAX_BASE64_BYTES = 2_800_000;
 const FOOD_SYSTEM_PROMPT = `You are a nutrition expert specialising in Indian home-cooked food and restaurant meals.
 Analyse the food photo and return ONLY valid JSON with no markdown fences or explanation:
 {
-  "name":         "food name in English (e.g. Dal Tadka, Aloo Paratha)",
-  "serving_desc": "visible portion description (e.g. 1 bowl ~250g, 2 rotis, 1 plate)",
+  "name":         "itemised list of every visible item with counts/portions joined by ' + ' (e.g. '1 carrot + 4 papaya slices + 2 eggs + 3 dates + 1 dry date + handful of peanuts')",
+  "serving_desc": "overall portion description (e.g. 1 plate, 1 bowl, snack plate)",
   "calories":     320,
   "protein_g":    12,
   "carbs_g":      45,
@@ -49,13 +49,16 @@ Analyse the food photo and return ONLY valid JSON with no markdown fences or exp
 }
 
 Rules:
+- Enumerate EVERY distinct visible item separately with an estimated count or portion size. Do NOT generalise to a single dish name like "Mixed Snack Plate" or "Assorted Fruits" — list each item.
+- Join items with " + " (space, plus, space). Use specific counts when countable (e.g. "2 eggs", "3 dates"), portion words otherwise (e.g. "handful of peanuts", "4 papaya slices").
+- For a recognised single composed dish (e.g. Dal Tadka, Aloo Paratha) without separable items, the name may be the dish name.
 - Use standard Indian home-cooked portion sizes as reference.
-- If multiple dishes are visible, describe the dominant or combined plate.
-- confidence: "high" if food is clearly identifiable, "medium" if partially obscured or mixed, "low" if unrecognisable.
+- Calories and macros must be the SUM across all listed items.
+- confidence: "high" if items are clearly identifiable, "medium" if partially obscured or mixed, "low" if unrecognisable.
 - All numeric values must be integers or one-decimal floats — never null or strings.
 - Return exactly this JSON structure, nothing else.`;
 
-const FOOD_USER_PROMPT = "Identify this food and estimate its nutrition for the visible Indian portion size.";
+const FOOD_USER_PROMPT = "Identify every visible food item in this photo. List each item separately with its count or portion size, then estimate combined nutrition for the visible Indian portions.";
 
 const RECEIPT_SYSTEM_PROMPT = `You are an OCR assistant that extracts structured data from receipt photos.
 Analyse the receipt and return ONLY valid JSON with no markdown fences or explanation:
