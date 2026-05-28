@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { sendSupabaseRequest } from './offlineSync';
 import { getCredentials as _getCreds } from './credentials';
 import { analyzeFood, foodResultToText, foodResultToMacroString } from './foodVision';
-import { IconFlameFilled, IconDropletFilled, IconCalendarMonth, IconCircleCheckFilled, IconEggFilled, IconMoodHappyFilled, IconMoodNeutralFilled, IconMoodSadFilled, IconMoodAngryFilled, IconBedFilled, IconMoonFilled, IconCameraFilled, IconCalendarWeek, IconPhotoPlus } from '@tabler/icons-react';
+import { IconFlameFilled, IconDropletFilled, IconCalendarMonth, IconCircleCheckFilled, IconMoodHappyFilled, IconMoodNeutralFilled, IconMoodSadFilled, IconMoodAngryFilled, IconBedFilled, IconMoonFilled, IconCameraFilled, IconCalendarWeek, IconPhotoPlus } from '@tabler/icons-react';
 import { Camera, Leaf, Robot } from "@phosphor-icons/react";
 
 /* ============================================================
@@ -815,6 +815,10 @@ const CSS = `
   display: inline-flex;
   flex-direction: column;
   gap: 2px;
+  max-width: 100%;
+  min-width: 0;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 #nomad-routine .food-chip-tag {
   font-size: 9px;
@@ -1509,34 +1513,6 @@ const todayKey = (d = new Date()) => {
 };
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const dayOfWeek = (d = new Date()) => DOW[d.getDay()];
-const isAfterNoon = () => new Date().getHours() >= 12;
-
-/* Per-item habit streak — walk back counting consecutive days where dailyChecks[itemId] is true.
-   Today counts if checked; otherwise streak walks back from yesterday. */
-const habitStreak = (itemId, allData) => {
-    if (!itemId || !allData) return 0;
-    const d = new Date(); d.setHours(12, 0, 0, 0);
-    let s = 0;
-    if (allData[todayKey(d)]?.dailyChecks?.[itemId]) s = 1;
-    d.setDate(d.getDate() - 1);
-    let safety = 0;
-    while (safety < 5000) {
-        if (allData[todayKey(d)]?.dailyChecks?.[itemId]) { s++; d.setDate(d.getDate() - 1); safety++; } else break;
-    }
-    return s;
-};
-
-/* Days in last `windowDays` where item was checked */
-const habitWeekDone = (itemId, allData, windowDays = 7) => {
-    if (!itemId || !allData) return 0;
-    const d = new Date(); d.setHours(12, 0, 0, 0);
-    let n = 0;
-    for (let i = 0; i < windowDays; i++) {
-        if (allData[todayKey(d)]?.dailyChecks?.[itemId]) n++;
-        d.setDate(d.getDate() - 1);
-    }
-    return n;
-};
 
 /* Parse morning water amount string → litres */
 const parseMorningWater = (s) => {
@@ -1634,14 +1610,12 @@ const DEFAULT_DAY = {
     morningWater: false,
     morningWaterAmount: '500ml',
     water: 0,
-    eggs: 0,
-    snack: '',
     curd: false,
     dailyChecks: {},
     amSkinDone: false,
     pmSkinDone: false,
     freeFoodLog: [],
-    moodChip: '',       // kept in model for old export compat, not rendered
+    moodChip: '',
     skinFeelChip: '',
     energyChip: '',
     skinTodayChip: '',
@@ -1656,31 +1630,17 @@ const DEFAULT_DAY = {
     sleepQuality: '',
     skinPhoto: '',
     hairPhoto: '',
-    meditationMin: 0,
-    workout: null,    // { type, durationMin, notes } | null
 };
 
 const DEFAULT_CONFIG = {
     waterTarget: 3.5,
-    eggsTarget: 2,
-    retinolPhase: 1,
     calGoal: 2000,
     proteinGoal: 80,
     carbsGoal: 250,
     fatGoal: 65,
     darkMode: false,
     showProductNames: true,
-    snackRotation: {
-        Mon: 'Banana',
-        Tue: 'Cucumber + rock salt',
-        Wed: 'Carrot',
-        Thu: 'Banana',
-        Fri: 'Carrot + Cucumber',
-        Sat: 'Guava or Apple',
-        Sun: 'Whatever looks fresh',
-    },
     customProducts: DEFAULT_CUSTOM_PRODUCTS,
-    customDailyItems: [],
     routines: DEFAULT_ROUTINES,
 };
 
@@ -1703,15 +1663,11 @@ const sanitizeConfig = (value) => {
         ...DEFAULT_CONFIG,
         ...c,
         waterTarget: clamp(Number(c.waterTarget ?? DEFAULT_CONFIG.waterTarget) || DEFAULT_CONFIG.waterTarget, 0.5, 5),
-        eggsTarget: clamp(Number(c.eggsTarget ?? DEFAULT_CONFIG.eggsTarget) || DEFAULT_CONFIG.eggsTarget, 1, 4),
-        retinolPhase: clamp(Number(c.retinolPhase ?? DEFAULT_CONFIG.retinolPhase) || DEFAULT_CONFIG.retinolPhase, 1, 3),
         calGoal: clamp(Number(c.calGoal ?? DEFAULT_CONFIG.calGoal) || DEFAULT_CONFIG.calGoal, 800, 5000),
         proteinGoal: clamp(Number(c.proteinGoal ?? DEFAULT_CONFIG.proteinGoal) || DEFAULT_CONFIG.proteinGoal, 20, 300),
         carbsGoal: clamp(Number(c.carbsGoal ?? DEFAULT_CONFIG.carbsGoal) || DEFAULT_CONFIG.carbsGoal, 50, 600),
         fatGoal: clamp(Number(c.fatGoal ?? DEFAULT_CONFIG.fatGoal) || DEFAULT_CONFIG.fatGoal, 20, 200),
         customProducts,
-        customDailyItems: Array.isArray(c.customDailyItems) ? c.customDailyItems : DEFAULT_CONFIG.customDailyItems,
-        snackRotation: { ...DEFAULT_CONFIG.snackRotation, ...(c.snackRotation || {}) },
         routines: Object.fromEntries(
             Object.entries(DEFAULT_ROUTINES).map(([day, def]) => [
                 day,
@@ -1723,25 +1679,7 @@ const sanitizeConfig = (value) => {
         ),
     };
 };
-const sanitizeConfigWithData = (config, allData) => {
-    // Re-add any customDailyItem definitions that exist in past data but were deleted from config
-    if (!allData || typeof allData !== 'object') return config;
-    const existingIds = new Set((config.customDailyItems || []).map(it => it.id));
-    const orphaned = new Set();
-    for (const k in allData) {
-        const checks = allData[k]?.dailyChecks;
-        if (!checks) continue;
-        for (const id in checks) {
-            if (!existingIds.has(id)) orphaned.add(id);
-        }
-    }
-    if (orphaned.size === 0) return config;
-    const restored = [...(config.customDailyItems || [])];
-    orphaned.forEach(id => {
-        restored.push({ id, label: id, emoji: '✓', archived: true });
-    });
-    return { ...config, customDailyItems: restored };
-};
+const sanitizeConfigWithData = (config) => config;
 
 const sanitizeDayRecord = (record) => {
     const merged = { ...DEFAULT_DAY, ...(record || {}), freeFoodLog: migrateFreeFoodLog(record?.freeFoodLog) };
@@ -1826,12 +1764,9 @@ const Icon = ({ name }) => {
 /* ---------- Panda messages ---------- */
 const getPandaFoodMessage = (day, config) => {
     if (!day.morningWater) return "Start with morning water. Before anything else.";
-    if (day.eggs < config.eggsTarget && isAfterNoon()) return "Eggs. Don't skip them.";
     const mwL = effectiveMorningWater(day);
     const total = mwL + day.water;
-    const allDailyDone = (config.customDailyItems || []).every(it => day.dailyChecks?.[it.id]);
-    if (total >= config.waterTarget && day.eggs >= config.eggsTarget && allDailyDone)
-        return "Clean day. That's the standard.";
+    if (total >= config.waterTarget) return "Clean day. That's the standard.";
     if (total >= config.waterTarget * 0.7) return "Water on track. Keep the pattern.";
     return "Ritual in progress.";
 };
@@ -1895,7 +1830,6 @@ const ProgressDots = ({ day, config, mode }) => {
     const waterTotal = mwL + day.water;
     const waterOk = waterTotal >= config.waterTarget;
     const waterPct = Math.min(100, Math.round((waterTotal / config.waterTarget) * 100));
-    const eggsOk = day.eggs >= config.eggsTarget;
 
     if (mode === 'food') return (
         <div className="prog-dots">
@@ -1909,28 +1843,6 @@ const ProgressDots = ({ day, config, mode }) => {
                 <div className={`dot ${waterOk ? 'on amber' : ''}`} />
                 <div className="dot-lbl">Water</div>
                 <div className="dot-val">{waterPct}%</div>
-            </div>
-            <div className="prog-dot-sep" />
-            <div className="prog-dot">
-                <div className={`dot ${eggsOk ? 'on' : ''}`} />
-                <div className="dot-lbl">Eggs</div>
-                <div className="dot-val">{day.eggs}/{config.eggsTarget}</div>
-            </div>
-            {(config.customDailyItems || []).filter(it => !it.archived).map(it => (
-                <React.Fragment key={it.id}>
-                    <div className="prog-dot-sep" />
-                    <div className="prog-dot">
-                        <div className={`dot ${day.dailyChecks?.[it.id] ? 'on' : ''}`} />
-                        <div className="dot-lbl">{it.label}</div>
-                        <div className="dot-val">{day.dailyChecks?.[it.id] ? '✓' : '—'}</div>
-                    </div>
-                </React.Fragment>
-            ))}
-            <div className="prog-dot-sep" />
-            <div className="prog-dot">
-                <div className={`dot ${day.snack ? 'on' : ''}`} />
-                <div className="dot-lbl">Snack</div>
-                <div className="dot-val">{day.snack ? '✓' : '—'}</div>
             </div>
         </div>
     );
@@ -1969,158 +1881,20 @@ const EodCard = ({ day, config }) => {
     const mwL = effectiveMorningWater(day);
     const waterTotal = (mwL + day.water).toFixed(1);
     const waterOk = (mwL + day.water) >= config.waterTarget;
-    const eggsOk = day.eggs >= config.eggsTarget;
 
     return (
         <div className="eod-card">
             <div className="eod-title">Today at a glance</div>
             <div className="eod-row">
                 <div className="eod-item">
+                    <span className={day.morningWater ? 'eod-ok' : 'eod-miss'}>🌅</span>
+                    <span>{day.morningWater ? 'Morning ✓' : 'No morning water'}</span>
+                </div>
+                <div className="eod-item">
                     <span className={waterOk ? 'eod-ok' : 'eod-miss'}>💧</span>
                     <span>{waterTotal}L</span>
                 </div>
-                <div className="eod-item">
-                    <span className={eggsOk ? 'eod-ok' : 'eod-miss'}>🥚</span>
-                    <span>{day.eggs}/{config.eggsTarget}</span>
-                </div>
-                {(config.customDailyItems || []).filter(it => !it.archived).map(it => (
-                    <div key={it.id} className="eod-item">
-                        <span className={day.dailyChecks?.[it.id] ? 'eod-ok' : 'eod-miss'}>{it.emoji}</span>
-                        <span>{day.dailyChecks?.[it.id] ? it.label + ' ✓' : 'No ' + it.label.toLowerCase()}</span>
-                    </div>
-                ))}
-                <div className="eod-item">
-                    <span className={day.snack ? 'eod-ok' : 'eod-miss'}>🍌</span>
-                    <span>{day.snack || 'No snack'}</span>
-                </div>
             </div>
-        </div>
-    );
-};
-
-/* ============================================================
-   MEDITATION CARD — countdown timer w/ presets
-   On finish: logs minutes to day.meditationMin (cumulative) + sets dailyChecks.meditation=true
-   so habitStreak('meditation', allData) works without parallel state.
-   ============================================================ */
-const MeditationCard = ({ day, update, showToast = () => {} }) => {
-    const [mins, setMins] = useState(10);
-    const [remaining, setRemaining] = useState(0); // seconds
-    const [active, setActive] = useState(false);
-    const intervalRef = useRef(null);
-    const presets = [5, 10, 15, 20];
-    const done = (day.meditationMin || 0) > 0;
-
-    // Capture mutable values via refs so the countdown effect can read fresh data
-    // without re-subscribing each parent render. Earlier impl listed `update`,
-    // `showToast`, `day.meditationMin`, `day.dailyChecks` in deps — each parent
-    // re-render produced new function references for `update`/`showToast` and
-    // tore down + recreated the setInterval, causing skipped or duplicate ticks.
-    const dayRef = useRef(day);
-    const updateRef = useRef(update);
-    const showToastRef = useRef(showToast);
-    const minsRef = useRef(mins);
-    useEffect(() => { dayRef.current = day; }, [day]);
-    useEffect(() => { updateRef.current = update; }, [update]);
-    useEffect(() => { showToastRef.current = showToast; }, [showToast]);
-    useEffect(() => { minsRef.current = mins; }, [mins]);
-
-    useEffect(() => {
-        if (!active) return;
-        intervalRef.current = setInterval(() => {
-            setRemaining(r => {
-                if (r <= 1) {
-                    clearInterval(intervalRef.current);
-                    setActive(false);
-                    const curDay = dayRef.current;
-                    const m = minsRef.current;
-                    const newTotal = (curDay?.meditationMin || 0) + m;
-                    updateRef.current?.({ meditationMin: newTotal, dailyChecks: { ...(curDay?.dailyChecks || {}), meditation: true } });
-                    try { if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate([200, 100, 200]); } catch { /* ignore */ }
-                    showToastRef.current?.(`Meditation done · ${m} min logged`, 'success');
-                    return 0;
-                }
-                return r - 1;
-            });
-        }, 1000);
-        return () => clearInterval(intervalRef.current);
-        // Only `active` in deps — countdown should NOT restart when day data changes mid-session.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [active]);
-
-    const start = () => { setRemaining(mins * 60); setActive(true); };
-    const stop = () => { setActive(false); clearInterval(intervalRef.current); setRemaining(0); };
-    const fmtTime = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-
-    return (
-        <div className="card" style={{ marginBottom: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                <PhosphorIcon name="sparkle" size={18} color="#A78BFA" opacity={0.9} />
-                <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--txm)' }}>Meditation</span>
-                {done && <span style={{ marginLeft: 'auto', fontSize: 11, color: '#A78BFA', fontWeight: 700, background: 'rgba(167,139,250,0.13)', borderRadius: 8, padding: '2px 8px' }}>{day.meditationMin}m today</span>}
-            </div>
-            {active ? (
-                <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: 38, fontWeight: 800, fontFamily: 'var(--mono)', color: '#A78BFA', marginBottom: 10 }}>{fmtTime(remaining)}</div>
-                    <button onClick={stop} style={{ padding: '8px 24px', borderRadius: 10, border: '1.5px solid #E07A5F', background: 'rgba(224,122,95,0.13)', color: '#E07A5F', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Stop</button>
-                </div>
-            ) : (
-                <>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 10 }}>
-                        {presets.map(m => (
-                            <div key={m} onClick={() => setMins(m)} style={{ textAlign: 'center', padding: '8px 4px', borderRadius: 10, background: mins === m ? 'rgba(167,139,250,0.18)' : 'var(--sf)', border: `1.5px solid ${mins === m ? '#A78BFA' : 'var(--bd)'}`, cursor: 'pointer' }}>
-                                <span style={{ fontSize: 13, fontWeight: 700, color: mins === m ? '#A78BFA' : 'var(--txm)' }}>{m}m</span>
-                            </div>
-                        ))}
-                    </div>
-                    <button onClick={start} style={{ width: '100%', padding: '10px', borderRadius: 10, border: 'none', background: '#A78BFA', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>Start {mins}-min session</button>
-                </>
-            )}
-        </div>
-    );
-};
-
-/* ============================================================
-   WORKOUT CARD — type + duration log
-   ============================================================ */
-const WorkoutCard = ({ day, update }) => {
-    const w = day.workout || {};
-    const types = [
-        { id: 'cardio', label: 'Cardio', color: '#E07A5F' },
-        { id: 'strength', label: 'Strength', color: '#7B8CDE' },
-        { id: 'yoga', label: 'Yoga', color: '#6BAA75' },
-        { id: 'other', label: 'Other', color: 'var(--amber)' },
-    ];
-    const setField = (field, val) => update({ workout: { ...w, [field]: val } });
-    const clear = () => update({ workout: null });
-    return (
-        <div className="card" style={{ marginBottom: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                <PhosphorIcon name="run" size={18} color="#E07A5F" opacity={0.9} />
-                <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--txm)' }}>Workout</span>
-                {w.type && w.durationMin > 0 && <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--tx)', fontWeight: 700, background: 'var(--sf)', borderRadius: 8, padding: '2px 8px' }}>{w.durationMin}m · {w.type}</span>}
-                {w.type && <button onClick={clear} style={{ marginLeft: w.durationMin > 0 ? 6 : 'auto', background: 'none', border: 'none', color: 'var(--txd)', fontSize: 14, cursor: 'pointer' }}>×</button>}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 10 }}>
-                {types.map(({ id, label, color }) => (
-                    <div key={id} onClick={() => setField('type', w.type === id ? '' : id)} style={{ textAlign: 'center', padding: '7px 4px', borderRadius: 10, background: w.type === id ? `${color}22` : 'var(--sf)', border: `1.5px solid ${w.type === id ? color : 'var(--bd)'}`, cursor: 'pointer' }}>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: w.type === id ? color : 'var(--txm)' }}>{label}</span>
-                    </div>
-                ))}
-            </div>
-            {w.type && (
-                <>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--txm)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Duration</span>
-                        <div className="stepper" style={{ marginLeft: 'auto' }}>
-                            <button onClick={() => setField('durationMin', Math.max(0, (Number(w.durationMin) || 0) - 5))}>−</button>
-                            <div className="val">{Number(w.durationMin) || 0}m</div>
-                            <button onClick={() => setField('durationMin', Math.min(300, (Number(w.durationMin) || 0) + 5))}>+</button>
-                        </div>
-                    </div>
-                    <input className="inp" placeholder="Notes (sets/reps/route…)" value={w.notes || ''} onChange={e => setField('notes', e.target.value)} style={{ width: '100%' }} />
-                </>
-            )}
         </div>
     );
 };
@@ -2129,18 +1903,16 @@ const WorkoutCard = ({ day, update }) => {
    FOOD SCREEN
    ============================================================ */
 const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () => {} }) => {
-    const suggested = config.snackRotation[dayOfWeek()] || 'Banana';
     const waterPts = Array.from({ length: Math.round(config.waterTarget / 0.5) }, (_, i) => (i + 1) * 0.5);
     const mwL = effectiveMorningWater(day);
     const foodLog = migrateFreeFoodLog(day.freeFoodLog);
-    const isEvening = new Date().getHours() >= 20;
 
     const prevComplete = useRef(false);
     useEffect(() => {
-        const complete = day.morningWater && day.eggs >= config.eggsTarget && (config.customDailyItems || []).every(it => day.dailyChecks?.[it.id]);
+        const complete = !!day.morningWater;
         if (complete && !prevComplete.current) onComplete('food');
         prevComplete.current = complete;
-    }, [day.morningWater, day.eggs, day.dailyChecks, config.eggsTarget, config.customDailyItems]);
+    }, [day.morningWater]);
 
     const [logInput, setLogInput] = useState('');
     const [logTag, setLogTag] = useState('breakfast');
@@ -2172,28 +1944,23 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
         if (!t) return;
         haptic();
         const entry = aiMacros ? { text: t, tag: logTag, ...aiMacros } : { text: t, tag: logTag };
-        update({ freeFoodLog: [...foodLog, entry] });
+        update(d => ({ freeFoodLog: [...migrateFreeFoodLog(d.freeFoodLog), entry] }));
         setLogInput('');
         setAiMacros(null);
     };
 
     const removeEntry = (i) => {
         haptic(4);
-        update({ freeFoodLog: foodLog.filter((_, idx) => idx !== i) });
+        update(d => ({ freeFoodLog: migrateFreeFoodLog(d.freeFoodLog).filter((_, idx) => idx !== i) }));
     };
 
     const dailyCals = useMemo(() => foodLog.reduce((s, e) => s + (e.calories || 0), 0), [foodLog]);
 
     const totalWater = mwL + day.water;
 
-    const foodItems = [
-        day.morningWater,
-        day.eggs >= config.eggsTarget,
-        ...(config.customDailyItems || []).filter(it => !it.archived).map(it => day.dailyChecks?.[it.id]),
-    ];
-    const doneCount = foodItems.filter(Boolean).length;
-    const totalCount = foodItems.length || 1;
-    const pct = Math.round((doneCount / totalCount) * 100);
+    const doneCount = day.morningWater ? 1 : 0;
+    const totalCount = 1;
+    const pct = doneCount * 100;
 
     const dow = dayOfWeek();
     const dateLabel = new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
@@ -2243,127 +2010,25 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
 
             {/* Body */}
             <div className="body-pad">
-                <div className="sec-lbl">Today's rituals</div>
 
-                {/* Eggs counter bar */}
-                <div className="card" style={{ marginBottom: 10, padding: '14px 16px', background: '#2a4f12', boxShadow: '0px 6px 16px rgba(0,0,0,0.20)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                        <div className="hc-icon ic-done" style={{ flexShrink: 0, background: 'rgba(255,255,255,0.15)' }}>
-                            <IconEggFilled size={24} color="#B7E778" />
+                {/* Morning Water tile — single */}
+                <div
+                    className={`hcard ${day.morningWater ? 'hc-amber' : 'hc-amber-idle'}`}
+                    style={{ marginBottom: 10 }}
+                    onClick={() => { haptic(); update(d => ({ morningWater: !d.morningWater })); }}
+                >
+                    <div className="hc-top">
+                        <div className="hc-icon ic-done">
+                            <PhosphorIcon name="drop" size={24} color={day.morningWater ? 'rgba(0,0,0,0.5)' : '#c8820a'} opacity={0.35} />
                         </div>
-                        <div style={{ flex: 1 }}>
-                            <div style={{ fontSize: 14, fontWeight: 800, color: '#FFFFFF' }}>Eggs</div>
-                            <div style={{ fontSize: 11, fontWeight: 600, color: '#A0A7B5', marginTop: 1 }}>{day.eggs >= config.eggsTarget ? 'target hit!' : `${config.eggsTarget - day.eggs} more to go`}</div>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                            <button onClick={() => { haptic(); update({ eggs: Math.max(0, day.eggs - 1) }); }} disabled={day.eggs <= 0} style={{ width: 32, height: 32, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.10)', color: '#A0A7B5', fontSize: 20, fontWeight: 300, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>−</button>
-                            <span style={{ fontSize: 28, fontWeight: 800, minWidth: 28, textAlign: 'center', color: '#B7E778' }}>{day.eggs}</span>
-                            <button onClick={() => { haptic(); update({ eggs: Math.min(config.eggsTarget, day.eggs + 1) }); }} disabled={day.eggs >= config.eggsTarget} style={{ width: 32, height: 32, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.10)', color: '#A0A7B5', fontSize: 20, fontWeight: 300, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>+</button>
-                        </div>
+                        {day.morningWater
+                            ? <div className="hc-check-done"><svg width="9" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1" stroke="rgba(0,0,0,0.45)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" /></svg></div>
+                            : <div className="hc-check-idle" />
+                        }
                     </div>
-                    <div style={{ display: 'flex', gap: 4, marginTop: 10 }}>
-                        {Array.from({ length: config.eggsTarget }, (_, i) => (
-                            <div key={i} style={{ flex: 1, height: 5, borderRadius: 3, background: i < day.eggs ? 'rgba(183,231,120,0.4)' : 'rgba(255,255,255,0.08)', transition: 'background 0.2s' }} />
-                        ))}
-                    </div>
-                </div>
-
-                {/* Habit Grid */}
-                <div className="habit-grid">
-
-                    {/* Morning Water tile */}
-                    <div
-                        className={`hcard ${day.morningWater ? 'hc-amber' : 'hc-amber-idle'}`}
-                        onClick={() => { haptic(); update({ morningWater: !day.morningWater }); }}
-                    >
-                        <div className="hc-top">
-                            <div className="hc-icon ic-done">
-                                <PhosphorIcon name="drop" size={24} color={day.morningWater ? 'rgba(0,0,0,0.5)' : '#c8820a'} opacity={0.35} />
-                            </div>
-                            {day.morningWater
-                                ? <div className="hc-check-done"><svg width="9" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1" stroke="rgba(0,0,0,0.45)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" /></svg></div>
-                                : <div className="hc-check-idle" />
-                            }
-                        </div>
-                        <div className="hc-body">
-                            <div className="hc-name" style={{ color: day.morningWater ? 'rgba(0,0,0,0.62)' : 'var(--tx)' }}>Morning Water</div>
-                            <div className="hc-meta" style={{ color: day.morningWater ? 'rgba(0,0,0,0.32)' : 'var(--txm)' }}>{day.morningWater ? `${day.morningWaterAmount || '500ml'} · done` : 'tap to log'}</div>
-                        </div>
-                    </div>
-
-                    {/* Snack tile */}
-                    <div
-                        className={`hcard ${day.snack ? 'hc-sage' : 'hc-sage-idle'}`}
-                        onClick={() => { haptic(); if (!day.snack) update({ snack: suggested }); else update({ snack: '' }); }}
-                    >
-                        <div className="hc-top">
-                            <div className="hc-icon ic-done">
-                                <PhosphorIcon name="leaf" size={24} color={day.snack ? 'rgba(0,0,0,0.45)' : '#3b6d11'} opacity={0.35} />
-                            </div>
-                            {day.snack
-                                ? <div className="hc-check-done"><svg width="9" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1" stroke="rgba(0,0,0,0.45)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" /></svg></div>
-                                : <div className="hc-check-idle" />
-                            }
-                        </div>
-                        <div className="hc-body">
-                            <div className="hc-name" style={{ color: day.snack ? 'rgba(0,0,0,0.62)' : 'var(--tx)' }}>Snack</div>
-                            <div className="hc-meta" style={{ color: day.snack ? 'rgba(0,0,0,0.32)' : 'var(--txm)' }}>{day.snack ? `${day.snack} · done` : `${suggested} suggested`}</div>
-                        </div>
-                    </div>
-
-                    {/* Custom daily items as tiles — skip archived */}
-                    {(config.customDailyItems || []).filter(it => !it.archived).map((it, idx) => {
-                        const done = !!day.dailyChecks?.[it.id];
-                        const doneColors = ['hc-purple', 'hc-pink', 'hc-green', 'hc-amber', 'hc-teal', 'hc-sage'];
-                        const idleColors = ['hc-purple-idle', 'hc-pink-idle', 'hc-green-idle', 'hc-amber-idle', 'hc-teal-idle', 'hc-sage-idle'];
-                        const cls = done ? doneColors[idx % doneColors.length] : idleColors[idx % idleColors.length];
-                        const streak = habitStreak(it.id, allData);
-                        const target = Number(it.target) > 0 ? Number(it.target) : null;
-                        const weekDone = target ? habitWeekDone(it.id, allData, 7) : 0;
-                        const meta = done
-                            ? (streak >= 2 ? `done · ${streak}d streak` : 'done')
-                            : target
-                                ? `${weekDone}/${target} this week`
-                                : (streak >= 2 ? `tap · ${streak}d streak` : 'tap to log');
-                        return (
-                            <div
-                                key={it.id}
-                                className={`hcard ${cls}`}
-                                onClick={() => { haptic(); update({ dailyChecks: { ...day.dailyChecks, [it.id]: !done } }); }}
-                            >
-                                <div className="hc-top">
-                                    <div className="hc-icon ic-done">
-                                        <ItemIcon name={it.emoji} size={22} color={done ? 'rgba(0,0,0,0.45)' : 'rgba(0,0,0,0.45)'} opacity={0.35} />
-                                    </div>
-                                    {done
-                                        ? <div className="hc-check-done"><svg width="9" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1" stroke="rgba(0,0,0,0.45)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" /></svg></div>
-                                        : <div className="hc-check-idle" />
-                                    }
-                                </div>
-                                <div className="hc-body">
-                                    <div className="hc-name" style={{ color: done ? 'rgba(0,0,0,0.62)' : 'var(--tx)' }}>{it.label}{streak >= 7 && <span style={{ marginLeft: 4 }}>🔥</span>}</div>
-                                    <div className="hc-meta" style={{ color: done ? 'rgba(0,0,0,0.32)' : 'var(--txm)' }}>{meta}</div>
-                                </div>
-                            </div>
-                        );
-                    })}
-
-                </div>
-
-                {/* Mood card */}
-                <div className="card" style={{ marginBottom: 10 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                        <IconMoodHappyFilled size={18} color="var(--amber)" />
-                        <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--txm)' }}>Mood</span>
-                        {day.moodChip && <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--tx)', fontWeight: 600, background: 'var(--sf)', borderRadius: 8, padding: '2px 8px' }}>{day.moodChip}</span>}
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-                        {[{ key: 'great', IC: IconMoodHappyFilled, color: '#6BAA75', label: 'Great', bg: 'rgba(107,170,117,0.13)' }, { key: 'okay', IC: IconMoodNeutralFilled, color: '#7B8CDE', label: 'Okay', bg: 'rgba(123,140,222,0.13)' }, { key: 'low', IC: IconMoodSadFilled, color: '#E07A5F', label: 'Low', bg: 'rgba(224,122,95,0.13)' }, { key: 'stressed', IC: IconMoodAngryFilled, color: '#c25b4c', label: 'Stressed', bg: 'rgba(194,91,76,0.13)' }].map(({ key, IC, color, label, bg }) => (
-                            <div key={key} onClick={() => { haptic(); update({ moodChip: day.moodChip === key ? '' : key }); }} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '10px 4px', borderRadius: 12, background: day.moodChip === key ? bg : 'var(--sf)', border: `1.5px solid ${day.moodChip === key ? color : 'var(--bd)'}`, cursor: 'pointer', transition: 'all 0.15s' }}>
-                                <IC size={22} color={day.moodChip === key ? color : 'var(--txm)'} />
-                                <span style={{ fontSize: 10, fontWeight: 700, color: day.moodChip === key ? color : 'var(--txm)', letterSpacing: '0.02em' }}>{label}</span>
-                            </div>
-                        ))}
+                    <div className="hc-body">
+                        <div className="hc-name" style={{ color: day.morningWater ? 'rgba(0,0,0,0.62)' : 'var(--tx)' }}>Morning Water</div>
+                        <div className="hc-meta" style={{ color: day.morningWater ? 'rgba(0,0,0,0.32)' : 'var(--txm)' }}>{day.morningWater ? `${day.morningWaterAmount || '500ml'} · done` : 'tap to log'}</div>
                     </div>
                 </div>
 
@@ -2393,18 +2058,12 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                     <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--txm)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Quality</div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
                         {[{ key: 'deep', label: 'Deep', color: '#6BAA75' }, { key: 'okay', label: 'Okay', color: '#7B8CDE' }, { key: 'light', label: 'Light', color: 'var(--amber)' }, { key: 'poor', label: 'Poor', color: '#E07A5F' }].map(({ key, label, color }) => (
-                            <div key={key} onClick={() => { haptic(); update({ sleepQuality: day.sleepQuality === key ? '' : key }); }} style={{ textAlign: 'center', padding: '7px 4px', borderRadius: 10, background: day.sleepQuality === key ? `${color}22` : 'var(--sf)', border: `1.5px solid ${day.sleepQuality === key ? color : 'var(--bd)'}`, cursor: 'pointer', transition: 'all 0.15s' }}>
+                            <div key={key} onClick={() => { haptic(); update(d => ({ sleepQuality: d.sleepQuality === key ? '' : key })); }} style={{ textAlign: 'center', padding: '7px 4px', borderRadius: 10, background: day.sleepQuality === key ? `${color}22` : 'var(--sf)', border: `1.5px solid ${day.sleepQuality === key ? color : 'var(--bd)'}`, cursor: 'pointer', transition: 'all 0.15s' }}>
                                 <div style={{ fontSize: 11, fontWeight: 700, color: day.sleepQuality === key ? color : 'var(--txm)' }}>{label}</div>
                             </div>
                         ))}
                     </div>
                 </div>
-
-                {/* Meditation card */}
-                <MeditationCard day={day} update={update} showToast={showToast} />
-
-                {/* Workout card */}
-                <WorkoutCard day={day} update={update} />
 
                 {/* Water total card */}
                 <div className="card" style={{ marginBottom: 10 }}>
@@ -2420,8 +2079,8 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                             <div className="water-big">{(totalWater).toFixed(1)}<span className="u">L</span></div>
                             <div className="water-target">of {config.waterTarget}L</div>
                             <div className="stepper" style={{ marginTop: 8, justifyContent: 'flex-end' }}>
-                                <button onClick={() => { haptic(); update({ water: Math.max(0, day.water - 0.5) }); }} disabled={day.water <= 0}>−</button>
-                                <button onClick={() => { haptic(); update({ water: day.water + 0.5 }); }} disabled={totalWater >= config.waterTarget}>+</button>
+                                <button onClick={() => { haptic(); update(d => ({ water: Math.max(0, (d.water || 0) - 0.5) })); }} disabled={day.water <= 0}>−</button>
+                                <button onClick={() => { haptic(); update(d => ({ water: (d.water || 0) + 0.5 })); }} disabled={totalWater >= config.waterTarget}>+</button>
                             </div>
                         </div>
                     </div>
@@ -2434,7 +2093,7 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                                 <div
                                     key={p}
                                     className={`track-pt ${isOn ? 'on' : isSoft ? 'soft' : ''}`}
-                                    onClick={() => { haptic(); const newWater = Math.max(0, p - mwL); update({ water: newWater }); }}
+                                    onClick={() => { haptic(); update(d => ({ water: Math.max(0, p - effectiveMorningWater(d)) })); }}
                                 />
                             );
                         })}
@@ -2514,6 +2173,23 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                     )}
                 </div>
 
+                {/* Mood card */}
+                <div className="card" style={{ marginBottom: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                        <IconMoodHappyFilled size={18} color="var(--amber)" />
+                        <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--txm)' }}>Mood</span>
+                        {day.moodChip && <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--tx)', fontWeight: 600, background: 'var(--sf)', borderRadius: 8, padding: '2px 8px' }}>{day.moodChip}</span>}
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+                        {[{ key: 'great', IC: IconMoodHappyFilled, color: '#6BAA75', label: 'Great', bg: 'rgba(107,170,117,0.13)' }, { key: 'okay', IC: IconMoodNeutralFilled, color: '#7B8CDE', label: 'Okay', bg: 'rgba(123,140,222,0.13)' }, { key: 'low', IC: IconMoodSadFilled, color: '#E07A5F', label: 'Low', bg: 'rgba(224,122,95,0.13)' }, { key: 'stressed', IC: IconMoodAngryFilled, color: '#c25b4c', label: 'Stressed', bg: 'rgba(194,91,76,0.13)' }].map(({ key, IC, color, label, bg }) => (
+                            <div key={key} onClick={() => { haptic(); update(d => ({ moodChip: d.moodChip === key ? '' : key })); }} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '10px 4px', borderRadius: 12, background: day.moodChip === key ? bg : 'var(--sf)', border: `1.5px solid ${day.moodChip === key ? color : 'var(--bd)'}`, cursor: 'pointer', transition: 'all 0.15s' }}>
+                                <IC size={22} color={day.moodChip === key ? color : 'var(--txm)'} />
+                                <span style={{ fontSize: 10, fontWeight: 700, color: day.moodChip === key ? color : 'var(--txm)', letterSpacing: '0.02em' }}>{label}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
                 {/* Notes card */}
                 <div className={`card ${day.notesConfirmed ? 'confirmed' : ''}`} style={{ marginBottom: 24 }}>
                     <div className="label">Notes</div>
@@ -2521,7 +2197,7 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                     <div className="pills" style={{ marginBottom: 10, opacity: day.notesConfirmed ? 0.6 : 1 }}>
                         {['light', 'normal', 'heavy'].map((k) => (
                             <div key={k} className={`pill ${day.skinFeelChip === k ? 'on' : ''}`}
-                                onClick={() => !day.notesConfirmed && update({ skinFeelChip: day.skinFeelChip === k ? '' : k })}>
+                                onClick={() => !day.notesConfirmed && update(d => ({ skinFeelChip: d.skinFeelChip === k ? '' : k }))}>
                                 {k[0].toUpperCase() + k.slice(1)}
                             </div>
                         ))}
@@ -2530,7 +2206,7 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                     <div className="pills" style={{ marginBottom: 12, opacity: day.notesConfirmed ? 0.6 : 1 }}>
                         {['high', 'medium', 'low'].map((k) => (
                             <div key={k} className={`pill ${day.energyChip === k ? 'on' : ''}`}
-                                onClick={() => !day.notesConfirmed && update({ energyChip: day.energyChip === k ? '' : k })}>
+                                onClick={() => !day.notesConfirmed && update(d => ({ energyChip: d.energyChip === k ? '' : k }))}>
                                 {k[0].toUpperCase() + k.slice(1)}
                             </div>
                         ))}
@@ -2559,8 +2235,6 @@ const SkinScreen = ({ day, update, config, onComplete, streak }) => {
     const amSteps = day.amSteps || [];
     const pmSteps = day.pmSteps || [];
 
-    const phaseLabel = { 1: 'Phase 1 · 2×/wk', 2: 'Phase 2 · 3×/wk', 3: 'Phase 3 · nightly' }[config.retinolPhase];
-
     const amStepList = routine.am.map(id => { const p = resolveProduct(id, config.customProducts); return { key: id, name: p.name, kind: p.kind }; });
     const pmStepList = routine.pm.map(id => { const p = resolveProduct(id, config.customProducts); return { key: id, name: p.name, kind: p.kind }; });
 
@@ -2583,16 +2257,20 @@ const SkinScreen = ({ day, update, config, onComplete, streak }) => {
     }, [day.pmSkinDone]);
 
     const toggleAmStep = (i) => {
-        const next = [...(day.amSteps || [])];
-        next[i] = !next[i];
-        const allDone = amStepList.every((_, idx) => !!next[idx]);
-        update({ amSteps: next, amSkinDone: allDone });
+        update(d => {
+            const next = [...(d.amSteps || [])];
+            next[i] = !next[i];
+            const allDone = amStepList.every((_, idx) => !!next[idx]);
+            return { amSteps: next, amSkinDone: allDone };
+        });
     };
     const togglePmStep = (i) => {
-        const next = [...(day.pmSteps || [])];
-        next[i] = !next[i];
-        const allDone = pmStepList.every((_, idx) => !!next[idx]);
-        update({ pmSteps: next, pmSkinDone: allDone });
+        update(d => {
+            const next = [...(d.pmSteps || [])];
+            next[i] = !next[i];
+            const allDone = pmStepList.every((_, idx) => !!next[idx]);
+            return { pmSteps: next, pmSkinDone: allDone };
+        });
     };
 
     return (
@@ -2609,7 +2287,6 @@ const SkinScreen = ({ day, update, config, onComplete, streak }) => {
                             <div className="sky-date-big">{dow} · {new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}</div>
                             <div className="sky-date-sub">Skin ritual</div>
                         </div>
-                        <div className="phase-badge">{phaseLabel}</div>
                     </div>
                     <div className="sky-panda-row" style={{ marginTop: '-8px' }}>
                         <div className="sky-panda-av">
@@ -2686,7 +2363,7 @@ const SkinScreen = ({ day, update, config, onComplete, streak }) => {
                     <div className="pills" style={{ marginBottom: 10, opacity: day.skinNotesConfirmed ? 0.6 : 1 }}>
                         {['clear', 'breakouts', 'purging', 'oily', 'dry'].map((k) => (
                             <div key={k} className={`pill ${day.skinTodayChip === k ? 'on teal' : ''}`}
-                                onClick={() => !day.skinNotesConfirmed && update({ skinTodayChip: day.skinTodayChip === k ? '' : k })}>
+                                onClick={() => !day.skinNotesConfirmed && update(d => ({ skinTodayChip: d.skinTodayChip === k ? '' : k }))}>
                                 {k[0].toUpperCase() + k.slice(1)}
                             </div>
                         ))}
@@ -2695,7 +2372,7 @@ const SkinScreen = ({ day, update, config, onComplete, streak }) => {
                     <div className="pills" style={{ marginBottom: 12, opacity: day.skinNotesConfirmed ? 0.6 : 1 }}>
                         {[['none', 'None'], ['mild', 'Mild dryness'], ['irritation', 'Irritation']].map(([k, l]) => (
                             <div key={k} className={`pill ${day.reactionChip === k ? 'on teal' : ''}`}
-                                onClick={() => !day.skinNotesConfirmed && update({ reactionChip: day.reactionChip === k ? '' : k })}>{l}</div>
+                                onClick={() => !day.skinNotesConfirmed && update(d => ({ reactionChip: d.reactionChip === k ? '' : k }))}>{l}</div>
                         ))}
                     </div>
                     <textarea
@@ -2780,15 +2457,14 @@ const LogScreen = ({ allData, config }) => {
         if (d.morningWater) pts++;
         const mwL = effectiveMorningWater(d);
         if ((mwL + (d.water || 0)) >= config.waterTarget) pts++;
-        if ((d.eggs || 0) >= config.eggsTarget) pts++;
         if (d.amSkinDone) pts++;
         if (d.pmSkinDone) pts++;
-        if (pts >= 5) return 4;
-        if (pts >= 4) return 3;
+        if (pts >= 4) return 4;
+        if (pts >= 3) return 3;
         if (pts >= 2) return 2;
         if (pts >= 1) return 1;
         const log = migrateFreeFoodLog(d.freeFoodLog);
-        if (d.snack || log.length || d.notes || d.skinNotes) return 1;
+        if (log.length || d.notes || d.skinNotes) return 1;
         return 0;
     };
 
@@ -2879,7 +2555,7 @@ const LogScreen = ({ allData, config }) => {
             const wb = XLSX.utils.book_new();
 
             // Daily sheet (cap at 10 years = ~3650 days for safety on low-RAM devices)
-            const hdr = ['Date', 'Day', 'Water (L)', 'Water target', 'Morning water', 'Eggs', 'Eggs target', 'Snack', 'Breakfast', 'Lunch', 'Dinner', 'Other food', 'Skin feel', 'Energy', 'AM skin', 'PM skin', 'AM products', 'PM products', 'Skin today', 'Retinol reaction', 'Notes', 'Skin notes'];
+            const hdr = ['Date', 'Day', 'Water (L)', 'Water target', 'Morning water', 'Breakfast', 'Lunch', 'Dinner', 'Other food', 'Skin feel', 'Energy', 'AM skin', 'PM skin', 'AM products', 'PM products', 'Skin today', 'Skin reaction', 'Notes', 'Skin notes'];
             const rows = [hdr];
             const allKeys = Object.keys(allData).sort();
             const exportKeys = allKeys.length > 3650 ? allKeys.slice(-3650) : allKeys;
@@ -2894,8 +2570,6 @@ const LogScreen = ({ allData, config }) => {
                     parseFloat((mwL + (d.water || 0)).toFixed(2)),
                     config.waterTarget,
                     d.morningWaterAmount || '',
-                    d.eggs || 0, config.eggsTarget,
-                    d.snack || '',
                     log.filter(e => e.tag === 'breakfast').map(e => e.text).join('; '),
                     log.filter(e => e.tag === 'lunch').map(e => e.text).join('; '),
                     log.filter(e => e.tag === 'dinner').map(e => e.text).join('; '),
@@ -2912,9 +2586,8 @@ const LogScreen = ({ allData, config }) => {
 
             // Config sheet
             const cfgRows = [['Key', 'Value']];
-            cfgRows.push(['waterTarget', config.waterTarget], ['eggsTarget', config.eggsTarget], ['retinolPhase', config.retinolPhase], ['showProductNames', config.showProductNames]);
+            cfgRows.push(['waterTarget', config.waterTarget], ['showProductNames', config.showProductNames]);
             (config.customProducts || []).forEach(p => cfgRows.push([`product.${p.id}`, `${p.kind} | ${p.name} | ${p.slot}${p.archived ? ' | archived' : ''}`]));
-            Object.entries(config.snackRotation || {}).forEach(([k, v]) => cfgRows.push([`snack.${k}`, v]));
             Object.entries(config.routines || {}).forEach(([day, r]) => {
                 cfgRows.push([`routine.${day}.am`, r.am.join(', ')]);
                 cfgRows.push([`routine.${day}.pm`, r.pm.join(', ')]);
@@ -2947,7 +2620,6 @@ const LogScreen = ({ allData, config }) => {
         const amLoggedCount = (rec.amSteps || []).filter(Boolean).length;
         const pmLoggedCount = (rec.pmSteps || []).filter(Boolean).length;
         const waterOk = (mwL + (rec.water || 0)) >= config.waterTarget;
-        const eggsOk = (rec.eggs || 0) >= config.eggsTarget;
 
         return (
             <>
@@ -2959,25 +2631,13 @@ const LogScreen = ({ allData, config }) => {
                     </div>
                     <div className="dl-card">
                         <div className="dl-row">
-                            <div className="dl-row-left"><div className="dl-ph-icon"><PhosphorIcon name="drop" size={16} color="var(--txm)" opacity={0.8} /></div><span className="dl-key">Water</span></div>
-                            <span className={`dl-val ${waterOk ? 'dl-ok' : ''}`}>{totalW} / {config.waterTarget}L</span>
+                            <div className="dl-row-left"><div className="dl-ph-icon"><PhosphorIcon name="drop" size={16} color="var(--txm)" opacity={0.8} /></div><span className="dl-key">Morning water</span></div>
+                            <span className={`dl-val ${rec.morningWater ? 'dl-ok' : 'dl-miss'}`}>{rec.morningWater ? '✓' : '—'}</span>
                         </div>
                         <div className="dl-row">
-                            <div className="dl-row-left"><div className="dl-ph-icon"><PhosphorIcon name="egg" size={16} color="var(--txm)" opacity={0.8} /></div><span className="dl-key">Eggs</span></div>
-                            <span className={`dl-val ${eggsOk ? 'dl-ok' : ''}`}>{rec.eggs || 0} / {config.eggsTarget}</span>
+                            <div className="dl-row-left"><div className="dl-ph-icon"><PhosphorIcon name="bottle" size={16} color="var(--txm)" opacity={0.8} /></div><span className="dl-key">Water</span></div>
+                            <span className={`dl-val ${waterOk ? 'dl-ok' : ''}`}>{totalW} / {config.waterTarget}L</span>
                         </div>
-                        {rec.snack && (
-                            <div className="dl-row">
-                                <div className="dl-row-left"><div className="dl-ph-icon"><PhosphorIcon name="leaf" size={16} color="var(--txm)" opacity={0.8} /></div><span className="dl-key">Snack</span></div>
-                                <span className="dl-val" style={{ color: 'var(--tx)' }}>{rec.snack}</span>
-                            </div>
-                        )}
-                        {(config.customDailyItems || []).filter(it => !it.archived).map(it => (
-                            <div key={it.id} className="dl-row">
-                                <div className="dl-row-left"><div className="dl-ph-icon"><ItemIcon name={it.emoji} size={16} color="var(--txm)" opacity={0.8} /></div><span className="dl-key">{it.label}</span></div>
-                                <span className={`dl-val ${rec.dailyChecks?.[it.id] ? 'dl-ok' : 'dl-miss'}`}>{rec.dailyChecks?.[it.id] ? '✓' : '—'}</span>
-                            </div>
-                        ))}
                     </div>
                     {log.length > 0 && (
                         <div className="dl-log">
@@ -3180,7 +2840,7 @@ const LogScreen = ({ allData, config }) => {
                                 {days7w.map(({ k, rec, label, dateNum, isToday, lvl }) => {
                                     const bg = lvl === 0 ? 'var(--bd)' : lvl >= 4 ? 'var(--green)' : lvl >= 2 ? 'var(--amber)' : 'rgba(183,231,120,0.45)';
                                     const slpH = rec ? calcSleepDuration(rec.sleepTime, rec.wakeTime) : null;
-                                    const foodDone = rec && (rec.morningWater || (rec.eggs >= config.eggsTarget));
+                                    const foodDone = rec && !!rec.morningWater;
                                     const skinDone = rec && (rec.amSkinDone || rec.pmSkinDone);
                                     return (
                                         <div key={k} onClick={() => rec && setActiveDay({ key: k, rec })} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, padding: '8px 2px', borderRadius: 10, background: isToday ? 'rgba(var(--teal-rgb, 0,139,131), 0.07)' : 'transparent', border: isToday ? '1.5px solid var(--teal)' : '1.5px solid transparent', cursor: rec ? 'pointer' : 'default' }}>
@@ -3334,16 +2994,15 @@ const RoutineEditor = ({ config, setConfig }) => {
    SETTINGS SCREEN
    ============================================================ */
 const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = () => { }, localModRef, configModRef, prevAllDataRef }) => {
-    const update = (patch) => setConfig(sanitizeConfig({ ...config, ...patch }));
-    const updateRotation = (day, val) => setConfig(sanitizeConfig({ ...config, snackRotation: { ...config.snackRotation, [day]: val } }));
+    const update = (patchOrFn) => setConfig(prev => {
+        const cur = sanitizeConfig(prev);
+        const patch = typeof patchOrFn === 'function' ? patchOrFn(cur) : patchOrFn;
+        return sanitizeConfig({ ...cur, ...patch });
+    });
 
-    const [newSnack, setNewSnack] = useState('');
     const [restoreMode, setRestoreMode] = useState('both'); // 'both' | 'data' | 'config'
-    const [open, setOpen] = useState({ targets: true, dailyitems: false, skincare: false, routine: false, snackrot: false, data: true });
+    const [open, setOpen] = useState({ targets: true, skincare: false, routine: false, data: true });
     const [newProduct, setNewProduct] = useState({ kind: '', name: '', slot: 'both' });
-    const [newDailyItem, setNewDailyItem] = useState({ label: '', emoji: '' });
-    const [iconPickerFor, setIconPickerFor] = useState(null); // item id or 'new'
-    const PRESET_ICONS = ['leaf', 'drop', 'bowl', 'bottle', 'egg', 'sparkle', 'heart', 'flame', 'cup', 'pill', 'book', 'star', 'run', 'sun', 'moon', 'notepad'];
 
     const toggle = (k) => setOpen(o => ({ ...o, [k]: !o[k] }));
     const SecHd = ({ label, k }) => (
@@ -3460,22 +3119,9 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                                     <div className="desc">Daily goal in litres</div>
                                 </div>
                                 <div className="stepper">
-                                    <button onClick={() => update({ waterTarget: Math.max(1.5, config.waterTarget - 0.5) })}>−</button>
+                                    <button onClick={() => update(c => ({ waterTarget: Math.max(1.5, c.waterTarget - 0.5) }))}>−</button>
                                     <div className="val">{config.waterTarget}L</div>
-                                    <button onClick={() => update({ waterTarget: Math.min(5, config.waterTarget + 0.5) })}>+</button>
-                                </div>
-                            </div>
-                        </div>
-                        <div className="set-row">
-                            <div className="r">
-                                <div>
-                                    <div className="lbl">Egg target</div>
-                                    <div className="desc">Daily count</div>
-                                </div>
-                                <div className="stepper">
-                                    <button onClick={() => update({ eggsTarget: Math.max(1, config.eggsTarget - 1) })}>−</button>
-                                    <div className="val">{config.eggsTarget}</div>
-                                    <button onClick={() => update({ eggsTarget: Math.min(4, config.eggsTarget + 1) })}>+</button>
+                                    <button onClick={() => update(c => ({ waterTarget: Math.min(5, c.waterTarget + 0.5) }))}>+</button>
                                 </div>
                             </div>
                         </div>
@@ -3486,9 +3132,9 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                                     <div className="desc">Daily kcal</div>
                                 </div>
                                 <div className="stepper">
-                                    <button onClick={() => update({ calGoal: Math.max(800, (config.calGoal || 2000) - 100) })}>−</button>
+                                    <button onClick={() => update(c => ({ calGoal: Math.max(800, (c.calGoal || 2000) - 100) }))}>−</button>
                                     <div className="val">{config.calGoal || 2000}</div>
-                                    <button onClick={() => update({ calGoal: Math.min(5000, (config.calGoal || 2000) + 100) })}>+</button>
+                                    <button onClick={() => update(c => ({ calGoal: Math.min(5000, (c.calGoal || 2000) + 100) }))}>+</button>
                                 </div>
                             </div>
                         </div>
@@ -3499,9 +3145,9 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                                     <div className="desc">Daily grams</div>
                                 </div>
                                 <div className="stepper">
-                                    <button onClick={() => update({ proteinGoal: Math.max(20, (config.proteinGoal || 80) - 5) })}>−</button>
+                                    <button onClick={() => update(c => ({ proteinGoal: Math.max(20, (c.proteinGoal || 80) - 5) }))}>−</button>
                                     <div className="val">{config.proteinGoal || 80}g</div>
-                                    <button onClick={() => update({ proteinGoal: Math.min(300, (config.proteinGoal || 80) + 5) })}>+</button>
+                                    <button onClick={() => update(c => ({ proteinGoal: Math.min(300, (c.proteinGoal || 80) + 5) }))}>+</button>
                                 </div>
                             </div>
                         </div>
@@ -3512,9 +3158,9 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                                     <div className="desc">Daily grams</div>
                                 </div>
                                 <div className="stepper">
-                                    <button onClick={() => update({ carbsGoal: Math.max(50, (config.carbsGoal || 250) - 10) })}>−</button>
+                                    <button onClick={() => update(c => ({ carbsGoal: Math.max(50, (c.carbsGoal || 250) - 10) }))}>−</button>
                                     <div className="val">{config.carbsGoal || 250}g</div>
-                                    <button onClick={() => update({ carbsGoal: Math.min(600, (config.carbsGoal || 250) + 10) })}>+</button>
+                                    <button onClick={() => update(c => ({ carbsGoal: Math.min(600, (c.carbsGoal || 250) + 10) }))}>+</button>
                                 </div>
                             </div>
                         </div>
@@ -3525,85 +3171,11 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                                     <div className="desc">Daily grams</div>
                                 </div>
                                 <div className="stepper">
-                                    <button onClick={() => update({ fatGoal: Math.max(20, (config.fatGoal || 65) - 5) })}>−</button>
+                                    <button onClick={() => update(c => ({ fatGoal: Math.max(20, (c.fatGoal || 65) - 5) }))}>−</button>
                                     <div className="val">{config.fatGoal || 65}g</div>
-                                    <button onClick={() => update({ fatGoal: Math.min(200, (config.fatGoal || 65) + 5) })}>+</button>
+                                    <button onClick={() => update(c => ({ fatGoal: Math.min(200, (c.fatGoal || 65) + 5) }))}>+</button>
                                 </div>
                             </div>
-                        </div>
-                    </>}
-                </div>
-
-                {/* Daily items */}
-                <div className="sec">
-                    <SecHd label="Daily items" k="dailyitems" />
-                    {open.dailyitems && <>
-                        {(config.customDailyItems || []).filter(it => !it.archived).map((it) => (
-                            <div key={it.id} className="set-row" style={{ background: 'var(--bg2)', borderRadius: 12, marginBottom: 8, padding: '10px 12px' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                                    <button
-                                        onClick={() => setIconPickerFor(iconPickerFor === it.id ? null : it.id)}
-                                        style={{ width: 40, height: 40, borderRadius: 12, border: '1.5px solid var(--bd)', background: 'var(--bg)', cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                                    ><ItemIcon name={it.emoji || 'sparkle'} size={20} color="var(--txm)" opacity={0.8} /></button>
-                                    <input className="inp" style={{ flex: 1 }} value={it.label}
-                                        onChange={(e) => update({ customDailyItems: config.customDailyItems.map(x => x.id === it.id ? { ...x, label: e.target.value } : x) })} />
-                                    <button style={{ background: 'none', border: 'none', color: 'var(--txd)', fontSize: 20, cursor: 'pointer', flexShrink: 0, padding: '0 2px' }}
-                                        onClick={() => {
-                                            update({ customDailyItems: config.customDailyItems.filter(x => x.id !== it.id) });
-                                            showToast(`${it.label} removed`, 'info');
-                                        }}>×</button>
-                                </div>
-                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 8, paddingTop: 8, borderTop: '1px dashed var(--bd)' }}>
-                                    <div>
-                                        <div className="lbl" style={{ fontSize: 11 }}>Weekly goal</div>
-                                        <div className="desc" style={{ fontSize: 10 }}>Days/week (0 = no goal)</div>
-                                    </div>
-                                    <div className="stepper">
-                                        <button onClick={() => update({ customDailyItems: config.customDailyItems.map(x => x.id === it.id ? { ...x, target: Math.max(0, (Number(x.target) || 0) - 1) } : x) })}>−</button>
-                                        <div className="val">{Number(it.target) > 0 ? `${it.target}/7` : 'off'}</div>
-                                        <button onClick={() => update({ customDailyItems: config.customDailyItems.map(x => x.id === it.id ? { ...x, target: Math.min(7, (Number(x.target) || 0) + 1) } : x) })}>+</button>
-                                    </div>
-                                </div>
-                                {iconPickerFor === it.id && (
-                                    <div className="icon-picker-grid">
-                                        {PRESET_ICONS.map(ic => (
-                                            <button key={ic} className={`icon-picker-btn ${it.emoji === ic ? 'sel' : ''}`}
-                                                onClick={() => {
-                                                    update({ customDailyItems: config.customDailyItems.map(x => x.id === it.id ? { ...x, emoji: ic } : x) });
-                                                    setIconPickerFor(null);
-                                                }}><PhosphorIcon name={ic} size={18} color="var(--txm)" opacity={0.8} /></button>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-                        ))}
-                        <div className="set-row" style={{ padding: '12px 12px', background: 'var(--bg2)', borderRadius: 12, marginBottom: 8 }}>
-                            <div className="lbl" style={{ marginBottom: 10 }}>Add item</div>
-                            <div style={{ display: 'flex', gap: 8, marginBottom: iconPickerFor === 'new' ? 0 : 8 }}>
-                                <button
-                                    onClick={() => setIconPickerFor(iconPickerFor === 'new' ? null : 'new')}
-                                    style={{ width: 44, height: 44, borderRadius: 12, border: '1.5px solid var(--bd)', background: 'var(--bg)', cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                                >{newDailyItem.emoji ? <PhosphorIcon name={newDailyItem.emoji} size={22} color="var(--txm)" opacity={0.8} /> : <span style={{ fontSize: 22, color: 'var(--txd)' }}>+</span>}</button>
-                                <input className="inp" style={{ flex: 1 }} placeholder="Label (e.g. Dry fruits)" value={newDailyItem.label}
-                                    onChange={(e) => setNewDailyItem(p => ({ ...p, label: e.target.value }))} />
-                            </div>
-                            {iconPickerFor === 'new' && (
-                                <div className="icon-picker-grid">
-                                    {PRESET_ICONS.map(ic => (
-                                        <button key={ic} className={`icon-picker-btn ${newDailyItem.emoji === ic ? 'sel' : ''}`}
-                                            onClick={() => { setNewDailyItem(p => ({ ...p, emoji: ic })); setIconPickerFor(null); }}><PhosphorIcon name={ic} size={18} color="var(--txm)" opacity={0.8} /></button>
-                                    ))}
-                                </div>
-                            )}
-                            <button className="btn" style={{ marginTop: 10 }} onClick={() => {
-                                const label = newDailyItem.label.trim();
-                                if (!label) { showToast('Enter a label first', 'error'); return; }
-                                const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
-                                update({ customDailyItems: [...(config.customDailyItems || []), { id, label, emoji: newDailyItem.emoji || '✅' }] });
-                                setNewDailyItem({ label: '', emoji: '' });
-                                setIconPickerFor(null);
-                                showToast(`${label} added`, 'success');
-                            }}>Add item</button>
                         </div>
                     </>}
                 </div>
@@ -3612,16 +3184,6 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                 <div className="sec">
                     <SecHd label="Skincare" k="skincare" />
                     {open.skincare && <>
-                        <div className="set-row">
-                            <div className="lbl" style={{ marginBottom: 10 }}>Retinol phase</div>
-                            <div className="seg">
-                                {[1, 2, 3].map((p) => (
-                                    <button key={p} className={config.retinolPhase === p ? 'on' : ''} onClick={() => update({ retinolPhase: p })}>
-                                        {p === 1 ? '2×/wk' : p === 2 ? '3×/wk' : 'Nightly'}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
                         {/* Product list */}
                         {(config.customProducts || []).filter(p => !p.archived).map((p) => (
                             <div key={p.id} className="set-row" style={{ marginBottom: 10, padding: '10px 12px', background: 'var(--bg2)', borderRadius: 10 }}>
@@ -3705,19 +3267,6 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                 <div className="sec">
                     <SecHd label="Skin routine" k="routine" />
                     {open.routine && <RoutineEditor config={config} setConfig={setConfig} />}
-                </div>
-
-                {/* Snack rotation */}
-                <div className="sec">
-                    <SecHd label="Snack rotation" k="snackrot" />
-                    {open.snackrot && ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => (
-                        <div key={d} className="set-row">
-                            <div className="r">
-                                <div className="lbl" style={{ width: 42 }}>{d}</div>
-                                <input className="inp" value={config.snackRotation[d] || ''} onChange={(e) => updateRotation(d, e.target.value)} />
-                            </div>
-                        </div>
-                    ))}
                 </div>
 
                 {/* Data */}
@@ -3919,13 +3468,17 @@ export default function RoutineApp({ darkMode = false, onTabChange }) {
     const key = todayKey();
     const rawDay = allData[key] || {};
     const day = sanitizeDayRecord(rawDay);
-    const updateDay = (patch) => setAllData(prev => ({ ...prev, [key]: { ...day, ...patch } }));
+    const updateDay = (patchOrFn) => setAllData(prev => {
+        const cur = { ...DEFAULT_DAY, ...(prev[key] || {}) };
+        const patch = typeof patchOrFn === 'function' ? patchOrFn(cur) : patchOrFn;
+        return { ...prev, [key]: { ...cur, ...patch } };
+    });
 
     const { foodStreak, skinStreak } = useMemo(() => {
-        const foodDayLevel = (d) => { if (!d) return 0; let pts = 0; if (d.morningWater) pts++; const mwL = effectiveMorningWater(d); if ((mwL + (d.water || 0)) >= config.waterTarget) pts++; if ((d.eggs || 0) >= config.eggsTarget) pts++; return pts; };
+        const foodDayLevel = (d) => { if (!d) return 0; let pts = 0; if (d.morningWater) pts++; const mwL = effectiveMorningWater(d); if ((mwL + (d.water || 0)) >= config.waterTarget) pts++; return pts; };
         const skinDayLevel = (d) => { if (!d) return 0; return (d.amSkinDone ? 1 : 0) + (d.pmSkinDone ? 1 : 0); };
-        const countStreak = (levelFn) => { let s = 0; const d = new Date(); const todayK = todayKey(d); if (allData[todayK] && levelFn(allData[todayK]) >= 1) s = 1; d.setDate(d.getDate() - 1); let safety = 0; while (safety < 5000) { const rec = allData[todayKey(d)]; if (rec && levelFn(rec) >= 2) { s++; d.setDate(d.getDate() - 1); safety++; } else break; } return s; };
-        return { foodStreak: countStreak(foodDayLevel), skinStreak: countStreak(skinDayLevel) };
+        const countStreak = (levelFn, pastThreshold = 2) => { let s = 0; const d = new Date(); const todayK = todayKey(d); if (allData[todayK] && levelFn(allData[todayK]) >= 1) s = 1; d.setDate(d.getDate() - 1); let safety = 0; while (safety < 5000) { const rec = allData[todayKey(d)]; if (rec && levelFn(rec) >= pastThreshold) { s++; d.setDate(d.getDate() - 1); safety++; } else break; } return s; };
+        return { foodStreak: countStreak(foodDayLevel, 1), skinStreak: countStreak(skinDayLevel, 2) };
     }, [allData, config]);
 
     const onComplete = (type) => {

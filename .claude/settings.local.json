@@ -43,7 +43,11 @@
       "Bash(grep -v \"context\\\\|---\\\\|^>$\")",
       "Bash(gh pr create --title 'Routine + finance expansion: voice/OCR/streaks/macro/workout/meditation/push scheduler/weekly email' --body ' *)",
       "Bash(cd .. && npm run build 2>&1 | tail -5)",
-      "Bash(git merge *)"
+      "Bash(git merge *)",
+      "Bash(awk 'NR==1853 || NR==1854' src/App.jsx)",
+      "Bash(awk '/src.App\\\\.jsx$|src.Routine\\\\.jsx$/{flag=1; print; next} /^C:/{flag=0} flag && /error|warning/')",
+      "Bash(awk '/src.Routine\\\\.jsx$/{flag=1; next} /^C:/{flag=0} flag')",
+      "Bash(awk 'NR==1869' src/App.jsx)"
     ]
   }
 }
