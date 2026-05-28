@@ -48,7 +48,9 @@
       "Bash(awk '/src.App\\\\.jsx$|src.Routine\\\\.jsx$/{flag=1; print; next} /^C:/{flag=0} flag && /error|warning/')",
       "Bash(awk '/src.Routine\\\\.jsx$/{flag=1; next} /^C:/{flag=0} flag')",
       "Bash(awk 'NR==1869' src/App.jsx)",
-      "Bash(grep -A 200 \"expensetracker\\\\\\\\\\\\\\\\src\\\\\\\\\\\\\\\\App\\\\.jsx$\")"
+      "Bash(grep -A 200 \"expensetracker\\\\\\\\\\\\\\\\src\\\\\\\\\\\\\\\\App\\\\.jsx$\")",
+      "Bash(grep -A 200 \"src.App\\\\.jsx$\")",
+      "Bash(grep -E \"^ {2,}8[0-9]{2}:|^ {2,}9[0-5][0-9]:\")"
     ]
   }
 }
