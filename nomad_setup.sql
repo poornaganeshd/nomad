@@ -101,6 +101,13 @@ ALTER TABLE recurring       DISABLE ROW LEVEL SECURITY;
 ALTER TABLE events          DISABLE ROW LEVEL SECURITY;
 ALTER TABLE wallet_balances DISABLE ROW LEVEL SECURITY;
 
+-- Categorized splits + settlements (B.31). Splits gain a categoryId so per-person IOUs
+-- can roll up into category totals; settlements snapshot categoryId + note so the
+-- spending-by-category aggregation works without joining back to the parent split.
+ALTER TABLE splits      ADD COLUMN IF NOT EXISTS "categoryId" TEXT;
+ALTER TABLE settlements ADD COLUMN IF NOT EXISTS "categoryId" TEXT;
+ALTER TABLE settlements ADD COLUMN IF NOT EXISTS note         TEXT;
+
 ALTER TABLE expenses        REPLICA IDENTITY DEFAULT;
 ALTER TABLE incomes         REPLICA IDENTITY DEFAULT;
 ALTER TABLE transfers       REPLICA IDENTITY DEFAULT;
