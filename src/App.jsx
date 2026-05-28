@@ -1978,7 +1978,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#A78BFA" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
                 </button>
                 {/* active toggle */}
-                <div onClick={() => { const updated = rec.map(x => x.id === r.id ? { ...x, active: !x.active } : x); sRec(updated); sbUpsert("recurring", [toSB(updated.find(x => x.id === r.id), COLS.recurring)]); }} style={{ width: 36, height: 20, borderRadius: 10, background: r.active ? "#A78BFA" : "var(--border)", cursor: "pointer", position: "relative", flexShrink: 0 }}>
+                <div onClick={() => { let updatedRow = null; sRec(prev => { const next = prev.map(x => x.id === r.id ? { ...x, active: !x.active } : x); updatedRow = next.find(x => x.id === r.id); return next; }); if (updatedRow) sbUpsert("recurring", [toSB(updatedRow, COLS.recurring)]); }} style={{ width: 36, height: 20, borderRadius: 10, background: r.active ? "#A78BFA" : "var(--border)", cursor: "pointer", position: "relative", flexShrink: 0 }}>
                   <div style={{ width: 14, height: 14, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: r.active ? 19 : 3, transition: "left 0.2s" }} />
                 </div>
                 {recDelConfirm === r.id

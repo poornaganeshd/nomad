@@ -10,6 +10,7 @@ const dropListeners = new Set();
 
 let consecutiveFlushFailures = 0;
 let nextFlushAllowedAt = 0;
+let flushInFlight = null;
 
 const canUseStorage = () => typeof window !== "undefined" && typeof localStorage !== "undefined";
 
@@ -268,6 +269,8 @@ export const flushSyncQueue = async () => {
   if (Date.now() < nextFlushAllowedAt) {
     return { synced: 0, pending: getPendingSyncCount() };
   }
+  // Coalesce concurrent flush calls — same in-flight promise wins.
+  if (flushInFlight) return flushInFlight;
 
   const queue = readQueue();
   if (!queue.length) {
@@ -275,6 +278,8 @@ export const flushSyncQueue = async () => {
     nextFlushAllowedAt = 0;
     return { synced: 0, pending: 0 };
   }
+
+  const work = (async () => {
 
   const remaining = [];
   let synced = 0;
@@ -363,6 +368,9 @@ export const flushSyncQueue = async () => {
   }
 
   return { synced, pending: remaining.length };
+  })();
+  flushInFlight = work.finally(() => { flushInFlight = null; });
+  return flushInFlight;
 };
 
 let syncInitialized = false;
