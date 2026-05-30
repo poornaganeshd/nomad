@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { getExchangeRate, saveCurrencyMeta, getCurrencyMeta } from '../currencyConverter.js';
 
 const RATE_CACHE_KEY = 'nomad-fx-rates';

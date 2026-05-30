@@ -11,7 +11,6 @@ test("settings tab opens", async ({ page }) => {
 test("dark mode toggle works", async ({ page }) => {
   await seedDemoMode(page);
   await page.click("text=Settings");
-  const toggleBefore = await page.evaluate(() => document.documentElement.style.colorScheme);
   await page.click("text=Dark Mode");
   // Just assert the toggle didn't crash
   await expect(page.locator("text=Settings")).toBeVisible();

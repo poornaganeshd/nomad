@@ -9,14 +9,13 @@ import { getExchangeRate, saveCurrencyMeta, getCurrencyMeta } from "./currencyCo
 import ReceiptPicker from "./ReceiptPicker";
 import CredentialSetup from "./CredentialSetup";
 import { getCredentials } from "./credentials";
-import { uploadReceipt, isLocalReceipt } from "./receiptUpload";
+import { uploadReceipt } from "./receiptUpload";
 import { COLS } from "./dbCols";
 import { mergeRemote, isRecentRow } from "./syncMerge";
 import { computeFinanceScore, scoreLabel } from "./financeScore";
 import { redactTransactions } from "./redactor";
 import {
-  roundMoney, localDateKey, fullMonthsBetween, fullYearsBetween,
-  getRecurringAnchorDate, getRecurringDueDate, isRecurringDueToday,
+  roundMoney, localDateKey, getRecurringDueDate, isRecurringDueToday,
   recurringDaysOverdue, distributeAmount, historySortCompare, itemTimestamp,
 } from "./financeUtils";
 const APP = "NOMAD", CUR = "₹";
@@ -37,10 +36,6 @@ const sbH = SB_ENABLED ? { "Content-Type": "application/json", "apikey": SB_KEY,
 const localMode = !_creds.sbUrl;
 const needsSetup = false;
 const FETCH_TIMEOUT_MS = 8000;
-const isoDate = (date) => localDateKey(date);
-const dateOnly = (value) => new Date(`${value}T00:00:00`);
-const lastDayOfMonth = (year, monthIndex) => new Date(year, monthIndex + 1, 0).getDate();
-const withClampedDay = (year, monthIndex, desiredDay) => new Date(year, monthIndex, Math.min(Math.max(1, desiredDay || 1), lastDayOfMonth(year, monthIndex)));
 const fetchWithTimeout = async (url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) => {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -220,7 +215,6 @@ function Chart({ expenses: ex, incomes: inc, settlements: stl, months: ms, perio
   const sumAmt = arr => arr.reduce((s, x) => s + Number(x.amount || 0), 0);
   const addDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
   const startOfWeek = (date) => { const d = new Date(date); d.setDate(d.getDate() - d.getDay()); return d; };
-  const monthKey = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
   const allDates = [...ex, ...inc, ...stl].map(x => x.date).filter(Boolean).sort();
   let buckets = [];
 
@@ -510,7 +504,6 @@ function Splits({ splits: sp, settlements: stl, categories: cats = [], onAdd, on
 
 const CURRENCIES = ["INR", "USD", "EUR", "GBP", "AED", "SGD", "JPY", "AUD", "CAD", "CHF", "CNY", "HKD", "NZD", "MYR", "THB", "PHP", "IDR", "KRW", "TWD", "SAR", "KWD", "QAR", "BHD", "OMR", "EGP", "ZAR", "NGN", "SEK", "NOK", "DKK", "PLN", "TRY", "RUB", "PKR", "BDT", "LKR", "NPR", "MXN", "BRL", "ARS"];
 const CURRENCY_COUNTRIES = { INR: "India", USD: "United States", EUR: "Eurozone", GBP: "United Kingdom", AED: "UAE", SGD: "Singapore", JPY: "Japan", AUD: "Australia", CAD: "Canada", CHF: "Switzerland", CNY: "China", HKD: "Hong Kong", NZD: "New Zealand", MYR: "Malaysia", THB: "Thailand", PHP: "Philippines", IDR: "Indonesia", KRW: "South Korea", TWD: "Taiwan", SAR: "Saudi Arabia", KWD: "Kuwait", QAR: "Qatar", BHD: "Bahrain", OMR: "Oman", EGP: "Egypt", ZAR: "South Africa", NGN: "Nigeria", SEK: "Sweden", NOK: "Norway", DKK: "Denmark", PLN: "Poland", TRY: "Turkey", RUB: "Russia", PKR: "Pakistan", BDT: "Bangladesh", LKR: "Sri Lanka", NPR: "Nepal", MXN: "Mexico", BRL: "Brazil", ARS: "Argentina" };
-const getCurrencyFlag = c => { if (c === "EUR") return "🇪🇺"; try { return String.fromCodePoint(...[...c.slice(0, 2).toUpperCase()].map(x => 127397 + x.charCodeAt(0))); } catch { return "🏳"; } };
 
 // Extract the most useful keyword from a note for autoRule storage.
 // Skips generic words, prefers first meaningful token (usually merchant/brand).
@@ -570,7 +563,7 @@ function VoiceAdd({ onParsed, accent = "#E07A5F", compact = false }) {
   return <div style={{ marginBottom: 14 }}><button onClick={listening ? stop : start} style={{ width: "100%", padding: "10px 14px", border: `1.5px dashed ${listening ? "#E07A5F" : accent}`, borderRadius: 10, background: listening ? "#E07A5F12" : "var(--card)", color: listening ? "#E07A5F" : accent, fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}><Microphone size={14} weight={listening ? "fill" : "regular"} />{listening ? "Listening… tap to stop" : "Voice add — say e.g. \"300 coffee bank\""}</button>{error && <div style={{ fontSize: 11, color: "#E07A5F", marginTop: 4, fontFamily: "var(--font-h)" }}>{error}</div>}</div>;
 }
 
-function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], autoRules = [], onLearnRule = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false, onLocalReceipt }) {
+function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], autoRules = [], onLearnRule = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false }) {
   const _AD = (() => { try { return JSON.parse(sessionStorage.getItem("nomad-add-draft") || "{}"); } catch { return {}; } })();
   const [type, sType] = useState(_AD.type || "expense"), [amt, sAmt] = useState(_AD.amt || "0"), [catId, sCat] = useState(_AD.catId || cats[0]?.id || ""), [srcId, sSrc] = useState(isrc[0]?.id || ""), [wid, sW] = useState(_AD.wid || "bank"), [iwid, sIW] = useState("bank"), [tFrom, sTF] = useState("bank"), [tTo, sTT] = useState("upi_lite"), [date, sDate] = useState(_AD.date || localDateKey()), [note, sNote] = useState(_AD.note || "");
   const [rName, sRN] = useState(""), [rAmt, sRA] = useState(""), [rCat, sRC] = useState("rent"), [rWal, sRW] = useState("bank"), [rFreq, sRF] = useState("monthly"), [rDay, sRD] = useState(1), [rInt, sRI] = useState(30), [rStart, sRS] = useState(localDateKey()), [rOther, sRO] = useState(""), [rYM, sRYM] = useState(1), [rYD, sRYD] = useState(1);
@@ -604,7 +597,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
   };
   useEffect(() => { const c = fxCur.trim().toUpperCase(); if (c.length !== 3 || c === "INR") { setFxRate(null); return; } setFxFetching(true); getExchangeRate(c).then(r => { setFxRate(r); setFxFetching(false); }).catch(() => { setFxRate(null); setFxFetching(false); }); }, [fxCur]);
   useEffect(() => { try { sessionStorage.setItem("nomad-add-draft", JSON.stringify({ type, amt, catId, wid, date, note })); } catch { /* ignore storage errors */ } }, [type, amt, catId, wid, date, note]);
-  const ts = useRef(null), tc = type === "expense" ? "#E07A5F" : type === "income" ? "#6BAA75" : type === "transfer" ? "#7B8CDE" : "#A78BFA";
+  const tc = type === "expense" ? "#E07A5F" : type === "income" ? "#6BAA75" : type === "transfer" ? "#7B8CDE" : "#A78BFA";
   const submit = async () => {
     if (submitting) return;
     const a = parseAmount(amt);
@@ -1071,7 +1064,6 @@ const cc = { background: "var(--card)", border: "1px solid var(--border)", borde
 export default function Nomad() {
   const [module, setModule] = useState("finance");
   const [showSetup, setShowSetup] = useState(needsSetup);
-  const [routineTab, setRoutineTab] = useState("food");
   const [backendOpen, sBackendOpen] = useState(false);
   const [reportOpen, sReportOpen] = useState(false);
   const [reportEmail, sReportEmail] = useState("");
@@ -1745,7 +1737,15 @@ export default function Nomad() {
     if (lines.length < 2) return [];
     const parseRow = line => { const cells = []; let cur = "", inQ = false; for (const ch of line) { if (ch === '"') { inQ = !inQ; } else if (ch === ',' && !inQ) { cells.push(cur.trim()); cur = ""; } else { cur += ch; } } cells.push(cur.trim()); return cells.map(c => c.replace(/^"|"$/g, "").trim()); };
     const headers = parseRow(lines[0]).map(h => h.toLowerCase());
-    const colIdx = (keywords) => headers.findIndex(h => keywords.some(k => h.includes(k)));
+    // Exact header match first so short abbreviations like "dr"/"cr" (debit/credit
+    // columns in Indian statements) work. Substring matching skips ≤2-char keywords —
+    // otherwise "cr" matches "des(cr)iption" and mis-detects the credit column on
+    // SBI/generic CSVs that put Description before the Credit column.
+    const colIdx = (keywords) => {
+      const exact = headers.findIndex(h => keywords.includes(h));
+      if (exact >= 0) return exact;
+      return headers.findIndex(h => keywords.some(k => k.length > 2 && h.includes(k)));
+    };
     const dateCol = colIdx(["date", "txn date", "trans date", "transaction date", "value date"]);
     const debitCol = colIdx(["debit", "withdrawal", "dr", "debit amount", "withdrawal amt"]);
     const creditCol = colIdx(["credit", "deposit", "cr", "credit amount", "deposit amt"]);
@@ -1955,8 +1955,6 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
 
 
     {(() => {
-      const isRoutine = module === "routine";
-      const routineLabel = routineTab.charAt(0).toUpperCase() + routineTab.slice(1);
       if (module === "finance" && tab !== "dashboard") return null;
       return <div style={{ position: "sticky", top: 0, zIndex: 100, backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)", background: dm ? "rgba(0,0,0,0.92)" : "rgba(242,240,235,0.92)", borderBottom: `1px solid ${dm ? "#1F1F1F" : "rgba(0,0,0,0.06)"}`, padding: "12px 20px 10px", transition: "padding 0.2s" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
@@ -1965,12 +1963,12 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => { setModule("finance") }} style={{ flex: 1, padding: "7px 0", borderRadius: 100, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, border: `1.5px solid ${module === "finance" ? "#E07A5F" : dm ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.1)"}`, cursor: "pointer", background: module === "finance" ? "#E07A5F" : "transparent", color: module === "finance" ? "#fff" : dm ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.35)", letterSpacing: "0.5px", transition: "all 0.2s" }}>Finance</button>
-          <button onClick={() => { setModule("routine"); setRoutineTab("food") }} style={{ flex: 1, padding: "7px 0", borderRadius: 100, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, border: `1.5px solid ${module === "routine" ? "#EF9F27" : dm ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.1)"}`, cursor: "pointer", background: module === "routine" ? "#EF9F27" : "transparent", color: module === "routine" ? "#fff" : dm ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.35)", letterSpacing: "0.5px", transition: "all 0.2s" }}>Routine</button>
+          <button onClick={() => setModule("routine")} style={{ flex: 1, padding: "7px 0", borderRadius: 100, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, border: `1.5px solid ${module === "routine" ? "#EF9F27" : dm ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.1)"}`, cursor: "pointer", background: module === "routine" ? "#EF9F27" : "transparent", color: module === "routine" ? "#fff" : dm ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.35)", letterSpacing: "0.5px", transition: "all 0.2s" }}>Routine</button>
         </div>
       </div>
     })()}
 
-    {module === "routine" && <RoutineApp darkMode={dm} onTabChange={setRoutineTab} />}
+    {module === "routine" && <RoutineApp darkMode={dm} />}
     {module === "finance" && <div style={{ padding: "0 16px" }}>
 
       {(tab === "dashboard" || tab === "history") && <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "12px 0 16px", scrollbarWidth: "none" }}><button onClick={() => sFm("all")} style={{ padding: "7px 16px", borderRadius: 20, fontSize: 12, fontFamily: "var(--font-h)", border: `1.5px solid ${fm === "all" ? "#E07A5F" : "var(--border)"}`, background: fm === "all" ? "#E07A5F" : "var(--card)", color: fm === "all" ? "#fff" : "var(--muted)", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 500 }}>All</button>{allM.map(m => <button key={m} onClick={() => sFm(m)} style={{ padding: "7px 16px", borderRadius: 20, fontSize: 12, fontFamily: "var(--font-h)", border: `1.5px solid ${fm === m ? "#6BAA75" : "var(--border)"}`, background: fm === m ? "#6BAA75" : "var(--card)", color: fm === m ? "#fff" : "var(--muted)", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 500 }}>{ml(m)}</button>)}</div>}

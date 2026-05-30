@@ -257,7 +257,7 @@ describe('sendSupabaseRequest', () => {
   });
 
   it('queues when fetch throws (network failure)', async () => {
-    const { sendSupabaseRequest, getPendingSyncCount } = await import('../offlineSync.js');
+    const { sendSupabaseRequest } = await import('../offlineSync.js');
     global.fetch = vi.fn().mockRejectedValueOnce(new Error('Failed to fetch'));
 
     const result = await sendSupabaseRequest(makeItem());
