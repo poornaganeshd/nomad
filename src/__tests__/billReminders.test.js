@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { checkBillReminders } from '../billReminders.js';
 
 // localStorage is provided by jsdom in the test environment.
@@ -47,7 +47,6 @@ describe('checkBillReminders — recurring bills', () => {
   it('returns an "upcoming" info reminder when bill is due within 3 days', () => {
     const r = makeRec({ id: 'r2' });
     const today = '2024-04-15';
-    const in3Days = '2024-04-18';
     // Due date falls within today+1 to today+3
     const getDue = () => '2024-04-17';
     const result = checkBillReminders([r], [], today, getDue, notDueToday);

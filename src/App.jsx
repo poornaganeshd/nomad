@@ -9,16 +9,16 @@ import { getExchangeRate, saveCurrencyMeta, getCurrencyMeta } from "./currencyCo
 import ReceiptPicker from "./ReceiptPicker";
 import CredentialSetup from "./CredentialSetup";
 import { getCredentials } from "./credentials";
-import { uploadReceipt, isLocalReceipt } from "./receiptUpload";
+import { uploadReceipt } from "./receiptUpload";
 import { COLS } from "./dbCols";
 import { mergeRemote, isRecentRow } from "./syncMerge";
 import { computeFinanceScore, scoreLabel } from "./financeScore";
 import { redactTransactions } from "./redactor";
 import {
-  roundMoney, localDateKey, fullMonthsBetween, fullYearsBetween,
-  getRecurringAnchorDate, getRecurringDueDate, isRecurringDueToday,
+  roundMoney, localDateKey, getRecurringDueDate, isRecurringDueToday,
   recurringDaysOverdue, distributeAmount, historySortCompare, itemTimestamp,
 } from "./financeUtils";
+import { parseAmount, parseVoiceTx, parseBankCsv } from "./txParsers";
 const APP = "NOMAD", CUR = "₹";
 // Use crypto.randomUUID() when available (all modern browsers + Node 14.17+).
 // Falls back to a longer random suffix than the previous 4 chars to keep
@@ -37,10 +37,6 @@ const sbH = SB_ENABLED ? { "Content-Type": "application/json", "apikey": SB_KEY,
 const localMode = !_creds.sbUrl;
 const needsSetup = false;
 const FETCH_TIMEOUT_MS = 8000;
-const isoDate = (date) => localDateKey(date);
-const dateOnly = (value) => new Date(`${value}T00:00:00`);
-const lastDayOfMonth = (year, monthIndex) => new Date(year, monthIndex + 1, 0).getDate();
-const withClampedDay = (year, monthIndex, desiredDay) => new Date(year, monthIndex, Math.min(Math.max(1, desiredDay || 1), lastDayOfMonth(year, monthIndex)));
 const fetchWithTimeout = async (url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) => {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -133,19 +129,6 @@ const ls = { fontSize: 11, color: "var(--muted)", textTransform: "uppercase", le
 const is = { background: "var(--card)", border: "1.5px solid var(--border)", borderRadius: 10, padding: "11px 14px", color: "var(--text)", fontSize: 14, fontFamily: "var(--font-b)", outline: "none", width: "100%", boxSizing: "border-box" };
 const isFix = e => !!(e.recurring === true || (e.note && e.note.endsWith(" (recurring)")));
 
-// Locale-aware amount parser. Accepts "3.24", "3,24" (EU decimal), "1,234.56" (US thousands), "1,23,456.78" (Indian).
-// Returns NaN for empty / unparseable input — callers should guard with Number.isFinite.
-const parseAmount = (s) => {
-  if (typeof s === "number") return s;
-  if (s == null) return NaN;
-  const str = String(s).trim();
-  if (!str) return NaN;
-  const hasComma = str.includes(",");
-  const hasPeriod = str.includes(".");
-  if (hasComma && !hasPeriod && str.split(",").length === 2 && /,\d{1,2}$/.test(str)) return Number(str.replace(",", "."));
-  return Number(str.replace(/,/g, ""));
-};
-
 // True if a wallet (object) or wallet id imposes UPI Lite-style restrictions:
 // spend-only, ₹5000 daily / ₹1L monthly cap, max ₹5000 balance.
 const isUpiLite = (walletOrId, walletList) => {
@@ -220,7 +203,6 @@ function Chart({ expenses: ex, incomes: inc, settlements: stl, months: ms, perio
   const sumAmt = arr => arr.reduce((s, x) => s + Number(x.amount || 0), 0);
   const addDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
   const startOfWeek = (date) => { const d = new Date(date); d.setDate(d.getDate() - d.getDay()); return d; };
-  const monthKey = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
   const allDates = [...ex, ...inc, ...stl].map(x => x.date).filter(Boolean).sort();
   let buckets = [];
 
@@ -510,7 +492,6 @@ function Splits({ splits: sp, settlements: stl, categories: cats = [], onAdd, on
 
 const CURRENCIES = ["INR", "USD", "EUR", "GBP", "AED", "SGD", "JPY", "AUD", "CAD", "CHF", "CNY", "HKD", "NZD", "MYR", "THB", "PHP", "IDR", "KRW", "TWD", "SAR", "KWD", "QAR", "BHD", "OMR", "EGP", "ZAR", "NGN", "SEK", "NOK", "DKK", "PLN", "TRY", "RUB", "PKR", "BDT", "LKR", "NPR", "MXN", "BRL", "ARS"];
 const CURRENCY_COUNTRIES = { INR: "India", USD: "United States", EUR: "Eurozone", GBP: "United Kingdom", AED: "UAE", SGD: "Singapore", JPY: "Japan", AUD: "Australia", CAD: "Canada", CHF: "Switzerland", CNY: "China", HKD: "Hong Kong", NZD: "New Zealand", MYR: "Malaysia", THB: "Thailand", PHP: "Philippines", IDR: "Indonesia", KRW: "South Korea", TWD: "Taiwan", SAR: "Saudi Arabia", KWD: "Kuwait", QAR: "Qatar", BHD: "Bahrain", OMR: "Oman", EGP: "Egypt", ZAR: "South Africa", NGN: "Nigeria", SEK: "Sweden", NOK: "Norway", DKK: "Denmark", PLN: "Poland", TRY: "Turkey", RUB: "Russia", PKR: "Pakistan", BDT: "Bangladesh", LKR: "Sri Lanka", NPR: "Nepal", MXN: "Mexico", BRL: "Brazil", ARS: "Argentina" };
-const getCurrencyFlag = c => { if (c === "EUR") return "🇪🇺"; try { return String.fromCodePoint(...[...c.slice(0, 2).toUpperCase()].map(x => 127397 + x.charCodeAt(0))); } catch { return "🏳"; } };
 
 // Extract the most useful keyword from a note for autoRule storage.
 // Skips generic words, prefers first meaningful token (usually merchant/brand).
@@ -518,29 +499,6 @@ function extractKeyword(note) {
   const skip = new Set(["paid","for","at","the","to","from","in","on","a","an","rs","inr","and","or","by","with","via","of","per","my","via","recharge","payment","pay","bill"]);
   const words = note.toLowerCase().replace(/[₹,]/g, " ").split(/\s+/).filter(w => w.length > 2 && !skip.has(w) && !/^\d+$/.test(w));
   return words[0] || note.toLowerCase().trim().slice(0, 20);
-}
-
-function parseVoiceTx(transcript, { wallets = [], categories = [] } = {}) {
-  if (!transcript) return {};
-  const txt = String(transcript).toLowerCase().replace(/[,.!?]/g, " ").replace(/\s+/g, " ").trim();
-  const amtMatch = txt.match(/(?:rs\.?|rupees?|₹)?\s*(\d+(?:\.\d+)?)\s*(?:rs\.?|rupees?|₹|bucks?)?/);
-  const amount = amtMatch ? parseFloat(amtMatch[1]) : null;
-  let wid = null;
-  const walletAliases = { upi_lite: ["upi lite", "upi", "lite"], bank: ["bank", "account", "debit"], cash: ["cash"] };
-  for (const w of wallets) {
-    const aliases = walletAliases[w.id] || [w.name.toLowerCase()];
-    if (aliases.some(a => txt.includes(a))) { wid = w.id; break; }
-  }
-  let cid = null;
-  for (const c of categories) {
-    if (txt.includes(c.name.toLowerCase())) { cid = c.id; break; }
-  }
-  let note = txt;
-  if (amtMatch) note = note.replace(amtMatch[0], " ");
-  note = note.replace(/\b(rs|rupees?|bucks?|paid|spent|got|received|added)\b/g, " ");
-  if (wid) (walletAliases[wid] || []).forEach(a => { note = note.replace(new RegExp("\\b" + a + "\\b", "g"), " "); });
-  note = note.replace(/\s+/g, " ").trim();
-  return { amount, walletId: wid, categoryId: cid, note: note || null };
 }
 
 function VoiceAdd({ onParsed, accent = "#E07A5F", compact = false }) {
@@ -570,7 +528,7 @@ function VoiceAdd({ onParsed, accent = "#E07A5F", compact = false }) {
   return <div style={{ marginBottom: 14 }}><button onClick={listening ? stop : start} style={{ width: "100%", padding: "10px 14px", border: `1.5px dashed ${listening ? "#E07A5F" : accent}`, borderRadius: 10, background: listening ? "#E07A5F12" : "var(--card)", color: listening ? "#E07A5F" : accent, fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}><Microphone size={14} weight={listening ? "fill" : "regular"} />{listening ? "Listening… tap to stop" : "Voice add — say e.g. \"300 coffee bank\""}</button>{error && <div style={{ fontSize: 11, color: "#E07A5F", marginTop: 4, fontFamily: "var(--font-h)" }}>{error}</div>}</div>;
 }
 
-function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], autoRules = [], onLearnRule = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false, onLocalReceipt }) {
+function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], autoRules = [], onLearnRule = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false }) {
   const _AD = (() => { try { return JSON.parse(sessionStorage.getItem("nomad-add-draft") || "{}"); } catch { return {}; } })();
   const [type, sType] = useState(_AD.type || "expense"), [amt, sAmt] = useState(_AD.amt || "0"), [catId, sCat] = useState(_AD.catId || cats[0]?.id || ""), [srcId, sSrc] = useState(isrc[0]?.id || ""), [wid, sW] = useState(_AD.wid || "bank"), [iwid, sIW] = useState("bank"), [tFrom, sTF] = useState("bank"), [tTo, sTT] = useState("upi_lite"), [date, sDate] = useState(_AD.date || localDateKey()), [note, sNote] = useState(_AD.note || "");
   const [rName, sRN] = useState(""), [rAmt, sRA] = useState(""), [rCat, sRC] = useState("rent"), [rWal, sRW] = useState("bank"), [rFreq, sRF] = useState("monthly"), [rDay, sRD] = useState(1), [rInt, sRI] = useState(30), [rStart, sRS] = useState(localDateKey()), [rOther, sRO] = useState(""), [rYM, sRYM] = useState(1), [rYD, sRYD] = useState(1);
@@ -604,7 +562,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
   };
   useEffect(() => { const c = fxCur.trim().toUpperCase(); if (c.length !== 3 || c === "INR") { setFxRate(null); return; } setFxFetching(true); getExchangeRate(c).then(r => { setFxRate(r); setFxFetching(false); }).catch(() => { setFxRate(null); setFxFetching(false); }); }, [fxCur]);
   useEffect(() => { try { sessionStorage.setItem("nomad-add-draft", JSON.stringify({ type, amt, catId, wid, date, note })); } catch { /* ignore storage errors */ } }, [type, amt, catId, wid, date, note]);
-  const ts = useRef(null), tc = type === "expense" ? "#E07A5F" : type === "income" ? "#6BAA75" : type === "transfer" ? "#7B8CDE" : "#A78BFA";
+  const tc = type === "expense" ? "#E07A5F" : type === "income" ? "#6BAA75" : type === "transfer" ? "#7B8CDE" : "#A78BFA";
   const submit = async () => {
     if (submitting) return;
     const a = parseAmount(amt);
@@ -1071,7 +1029,6 @@ const cc = { background: "var(--card)", border: "1px solid var(--border)", borde
 export default function Nomad() {
   const [module, setModule] = useState("finance");
   const [showSetup, setShowSetup] = useState(needsSetup);
-  const [routineTab, setRoutineTab] = useState("food");
   const [backendOpen, sBackendOpen] = useState(false);
   const [reportOpen, sReportOpen] = useState(false);
   const [reportEmail, sReportEmail] = useState("");
@@ -1737,39 +1694,6 @@ export default function Nomad() {
     else if (migrated > 0) showT(`Migrated ${migrated} of ${total} · ${failed} failed: ${firstError || "unknown error"}`, "info");
     else showT(`All ${failed} migration attempt${failed === 1 ? "" : "s"} failed: ${firstError || "unknown error"}`, "error");
   };
-  // Parse CSV text into array of {date, amount, note, type} rows.
-  // Handles HDFC/ICICI/SBI/generic bank statement formats.
-  // Debit columns → expense, Credit columns → income.
-  const parseBankCsv = (text) => {
-    const lines = text.split(/\r?\n/).filter(l => l.trim());
-    if (lines.length < 2) return [];
-    const parseRow = line => { const cells = []; let cur = "", inQ = false; for (const ch of line) { if (ch === '"') { inQ = !inQ; } else if (ch === ',' && !inQ) { cells.push(cur.trim()); cur = ""; } else { cur += ch; } } cells.push(cur.trim()); return cells.map(c => c.replace(/^"|"$/g, "").trim()); };
-    const headers = parseRow(lines[0]).map(h => h.toLowerCase());
-    const colIdx = (keywords) => headers.findIndex(h => keywords.some(k => h.includes(k)));
-    const dateCol = colIdx(["date", "txn date", "trans date", "transaction date", "value date"]);
-    const debitCol = colIdx(["debit", "withdrawal", "dr", "debit amount", "withdrawal amt"]);
-    const creditCol = colIdx(["credit", "deposit", "cr", "credit amount", "deposit amt"]);
-    const amtCol = colIdx(["amount", "amt"]);
-    const descCol = colIdx(["narration", "description", "particulars", "details", "remarks", "payee", "note", "transaction description"]);
-    const rows = [];
-    for (let i = 1; i < lines.length; i++) {
-      const cells = parseRow(lines[i]);
-      if (cells.length < 2) continue;
-      const rawDate = dateCol >= 0 ? cells[dateCol] : null;
-      if (!rawDate) continue;
-      const parsedDate = (() => { const d = new Date(rawDate); if (!Number.isNaN(d.getTime())) return localDateKey(d); const m = rawDate.match(/^(\d{2})[/-](\d{2})[/-](\d{2,4})$/); if (m) { const y = m[3].length === 2 ? "20" + m[3] : m[3]; return `${y}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`; } return null; })();
-      if (!parsedDate) continue;
-      const cleanAmt = v => parseFloat((v || "").replace(/[^0-9.]/g, "")) || 0;
-      const debit = debitCol >= 0 ? cleanAmt(cells[debitCol]) : 0;
-      const credit = creditCol >= 0 ? cleanAmt(cells[creditCol]) : 0;
-      const generic = amtCol >= 0 ? cleanAmt(cells[amtCol]) : 0;
-      const note = descCol >= 0 ? cells[descCol] : "";
-      if (debit > 0) rows.push({ date: parsedDate, amount: debit, note, type: "expense" });
-      else if (credit > 0) rows.push({ date: parsedDate, amount: credit, note, type: "income" });
-      else if (generic > 0) rows.push({ date: parsedDate, amount: generic, note, type: "expense" });
-    }
-    return rows;
-  };
   const impCsv = (file) => { const r = new FileReader(); r.onerror = () => showT("Failed to read CSV file", "error"); r.onload = e => { const rows = parseBankCsv(e.target.result); if (rows.length === 0) { showT("No valid rows found — check CSV format", "error"); return; } sCsvPreview(rows); showT(`Parsed ${rows.length} rows — review and confirm import`, "info"); }; r.readAsText(file); };
   const confirmCsvImport = () => { if (!csvPreview?.length) return; let imported = 0; csvPreview.forEach(row => { const ok = row.type === "income" ? addI({ id: uid(), amount: row.amount, sourceId: "allowance", walletId: "bank", date: row.date, note: (row.note || "").slice(0, 500) }) : addE({ id: uid(), amount: row.amount, categoryId: "food", walletId: "bank", date: row.date, note: (row.note || "").slice(0, 500) }); if (ok !== false) imported++; }); sCsvPreview(null); showT(`Imported ${imported} transactions — recategorize as needed`, "success"); };
   const loadRecentlyDeleted = async () => { sRecDelLoading(true); const [dEx, dInc, dTr, dRec, dEvs, dSp] = await Promise.all([sbGetDeleted("expenses"), sbGetDeleted("incomes"), sbGetDeleted("transfers"), sbGetDeleted("recurring"), sbGetDeleted("events"), sbGetDeleted("splits")]); const all = [...(dEx || []).map(i => ({ ...i, _tbl: "expenses" })), ...(dInc || []).map(i => ({ ...i, _tbl: "incomes" })), ...(dTr || []).map(i => ({ ...i, _tbl: "transfers" })), ...(dRec || []).map(i => ({ ...i, _tbl: "recurring" })), ...(dEvs || []).map(i => ({ ...i, _tbl: "events" })), ...(dSp || []).map(i => ({ ...i, _tbl: "splits" }))].sort((a, b) => (b.deleted_at || "").localeCompare(a.deleted_at || "")); sRecDelItems(all); sRecDelLoading(false); };
@@ -1955,8 +1879,6 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
 
 
     {(() => {
-      const isRoutine = module === "routine";
-      const routineLabel = routineTab.charAt(0).toUpperCase() + routineTab.slice(1);
       if (module === "finance" && tab !== "dashboard") return null;
       return <div style={{ position: "sticky", top: 0, zIndex: 100, backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)", background: dm ? "rgba(0,0,0,0.92)" : "rgba(242,240,235,0.92)", borderBottom: `1px solid ${dm ? "#1F1F1F" : "rgba(0,0,0,0.06)"}`, padding: "12px 20px 10px", transition: "padding 0.2s" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
@@ -1965,12 +1887,12 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => { setModule("finance") }} style={{ flex: 1, padding: "7px 0", borderRadius: 100, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, border: `1.5px solid ${module === "finance" ? "#E07A5F" : dm ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.1)"}`, cursor: "pointer", background: module === "finance" ? "#E07A5F" : "transparent", color: module === "finance" ? "#fff" : dm ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.35)", letterSpacing: "0.5px", transition: "all 0.2s" }}>Finance</button>
-          <button onClick={() => { setModule("routine"); setRoutineTab("food") }} style={{ flex: 1, padding: "7px 0", borderRadius: 100, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, border: `1.5px solid ${module === "routine" ? "#EF9F27" : dm ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.1)"}`, cursor: "pointer", background: module === "routine" ? "#EF9F27" : "transparent", color: module === "routine" ? "#fff" : dm ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.35)", letterSpacing: "0.5px", transition: "all 0.2s" }}>Routine</button>
+          <button onClick={() => setModule("routine")} style={{ flex: 1, padding: "7px 0", borderRadius: 100, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, border: `1.5px solid ${module === "routine" ? "#EF9F27" : dm ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.1)"}`, cursor: "pointer", background: module === "routine" ? "#EF9F27" : "transparent", color: module === "routine" ? "#fff" : dm ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.35)", letterSpacing: "0.5px", transition: "all 0.2s" }}>Routine</button>
         </div>
       </div>
     })()}
 
-    {module === "routine" && <RoutineApp darkMode={dm} onTabChange={setRoutineTab} />}
+    {module === "routine" && <RoutineApp darkMode={dm} />}
     {module === "finance" && <div style={{ padding: "0 16px" }}>
 
       {(tab === "dashboard" || tab === "history") && <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "12px 0 16px", scrollbarWidth: "none" }}><button onClick={() => sFm("all")} style={{ padding: "7px 16px", borderRadius: 20, fontSize: 12, fontFamily: "var(--font-h)", border: `1.5px solid ${fm === "all" ? "#E07A5F" : "var(--border)"}`, background: fm === "all" ? "#E07A5F" : "var(--card)", color: fm === "all" ? "#fff" : "var(--muted)", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 500 }}>All</button>{allM.map(m => <button key={m} onClick={() => sFm(m)} style={{ padding: "7px 16px", borderRadius: 20, fontSize: 12, fontFamily: "var(--font-h)", border: `1.5px solid ${fm === m ? "#6BAA75" : "var(--border)"}`, background: fm === m ? "#6BAA75" : "var(--card)", color: fm === m ? "#fff" : "var(--muted)", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 500 }}>{ml(m)}</button>)}</div>}

@@ -1821,7 +1821,7 @@ const haptic = (ms = 8) => {
         const off = localStorage.getItem('form_haptic_off');
         if (off === '1') return;
         navigator.vibrate && navigator.vibrate(ms);
-    } catch (_) { }
+    } catch { }
 };
 
 /* ---------- Progress dots ---------- */
@@ -2226,7 +2226,7 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
 /* ============================================================
    SKIN SCREEN
    ============================================================ */
-const SkinScreen = ({ day, update, config, onComplete, streak }) => {
+const SkinScreen = ({ day, update, config, onComplete }) => {
     const dow = dayOfWeek();
     const routine = (config.routines && config.routines[dow]) || { am: ['cleanser', 'niacinamide', 'sunscreen'], pm: ['cleanser'] };
 
@@ -3358,7 +3358,6 @@ export default function RoutineApp({ darkMode = false, onTabChange }) {
     }, [darkMode]);
 
     const [sbLoaded, setSbLoaded] = useState(false);
-    const [syncStatus, setSyncStatus] = useState(''); // '', 'syncing', 'synced', 'conflict'
     const localModRef = useRef(parseInt(localStorage.getItem('form_data_modified') || '0', 10));
     const configModRef = useRef(parseInt(localStorage.getItem('form_config_modified') || '0', 10));
     const dataDebounceRef = useRef(null);
@@ -3388,10 +3387,9 @@ export default function RoutineApp({ darkMode = false, onTabChange }) {
                     localStorage.setItem('form_data_modified', String(remoteMod || Date.now()));
                     localModRef.current = remoteMod || Date.now();
                     resolvedData = merged;
-                } else {
-                    setSyncStatus('conflict');
-                    setTimeout(() => setSyncStatus(''), 4000);
                 }
+                // else: local data is newer than remote — keep local; the
+                // save-effect below pushes it up to Supabase after mount.
             } else if (oldBlob?.data) {
                 // Migrate: old single-blob table has data, new table is empty
                 const remoteMod = parseInt(oldBlob.last_modified_at || '0', 10);
@@ -3409,10 +3407,8 @@ export default function RoutineApp({ darkMode = false, onTabChange }) {
                     Object.entries(cleanData).forEach(([day, dayData]) => {
                         sbUpsertR("routine_daily_logs", { log_date: day, data: dayData, modified_at: migTs }, `routine:day:${day}`);
                     });
-                } else {
-                    setSyncStatus('conflict');
-                    setTimeout(() => setSyncStatus(''), 4000);
                 }
+                // else: local data is newer than remote — keep local.
             }
             if (dbConfig?.data) {
                 try {

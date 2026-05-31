@@ -54,7 +54,31 @@
       "Bash(gh pr *)",
       "Bash(python _replace_addpage.py)",
       "Bash(grep -E \"^C:\\\\\\\\\\\\\\\\Users.*expensetracker\\\\\\\\\\\\\\\\src\")",
-      "Bash(cd C:\\\\\\\\Users\\\\\\\\poorn\\\\\\\\Desktop\\\\\\\\vscode\\\\\\\\expensetracker)"
+      "Bash(cd C:\\\\\\\\Users\\\\\\\\poorn\\\\\\\\Desktop\\\\\\\\vscode\\\\\\\\expensetracker)",
+      "Bash(grep -n \"expensetracker\\\\\\\\\\\\\\\\\" \"C:\\\\Users\\\\poorn\\\\.claude\\\\projects\\\\C--Users-poorn-Desktop-vscode-expensetracker\\\\5d5cded3-880d-4bc8-8f6b-50353af3dae5\\\\tool-results\\\\bowzvrf59.txt\")",
+      "Bash(node -e \"let d='';process.stdin.on\\('data',c=>d+=c\\).on\\('end',\\(\\)=>{const r=JSON.parse\\(d\\);for\\(const f of r\\){if\\(!f.messages.length\\)continue;const rel=f.filePath.split\\('expensetracker\\\\\\\\\\\\\\\\'\\)[1]||f.filePath;for\\(const m of f.messages\\){if\\(m.ruleId==='no-unused-vars'||m.ruleId==='no-empty'||m.ruleId==='no-useless-escape'\\){console.log\\(rel+':'+m.line+':'+m.column+'  '+m.ruleId+'  '+m.message.slice\\(0,70\\)\\)}}}}\\)\")",
+      "Bash(node -e \"const r=require\\('./lint.json'\\);for\\(const f of r\\){if\\(!f.messages.length\\)continue;const rel=f.filePath.replace\\(/.*expensetracker./,''\\);for\\(const m of f.messages\\){if\\(['no-unused-vars','no-empty','no-useless-escape'].includes\\(m.ruleId\\)\\){console.log\\(rel+':'+m.line+'  '+m.ruleId+'  '+m.message.slice\\(0,75\\)\\)}}}\")",
+      "Bash(node -e \"const fs=require\\('fs'\\);const t=fs.readFileSync\\('lint2.txt','utf8'\\);console.log\\(t.split\\('\\\\n'\\).filter\\(l=>/problems|^[A-Z]:\\\\\\\\\\\\\\\\/.test\\(l\\)||/error|warning/.test\\(l\\)\\).filter\\(l=>!/^\\\\s*$/.test\\(l\\)\\).join\\('\\\\n'\\)\\)\")",
+      "Bash(node -e \"const r=require\\('/tmp/l.json'\\);for\\(const f of r\\){const rel=f.filePath.replace\\(/.*expensetracker./,''\\);for\\(const m of f.messages\\){if\\(m.ruleId==='no-unused-vars'\\)console.log\\(rel+':'+m.line+' '+m.message.slice\\(0,60\\)\\)}}\")",
+      "Bash(rm -f /tmp/l.json)",
+      "Bash(node -e \"const r=require\\('./l.json'\\);for\\(const f of r\\){const rel=f.filePath.replace\\(/.*expensetracker./,''\\);for\\(const m of f.messages\\){if\\(m.ruleId==='no-unused-vars'\\)console.log\\(rel+':'+m.line+'  '+m.message.slice\\(0,65\\)\\)}}\")",
+      "Bash(sed -n '1p' src/__tests__/billReminders.test.js)",
+      "Bash(sed -n '48,52p' src/__tests__/billReminders.test.js)",
+      "Bash(sed -n '1p' src/__tests__/currencyConverter.test.js)",
+      "Bash(sed -n '260p' src/__tests__/offlineSync.test.js)",
+      "Bash(sed -n '12,16p' e2e/04-settings.spec.js)",
+      "Bash(Out-String)",
+      "PowerShell(npm run lint 2>&1)",
+      "PowerShell(npm run lint 2>&1 | Select-String -Pattern \"error|warning|disable\" | ForEach-Object { $_.Line.Trim\\(\\) } | Select-Object -First 40)",
+      "PowerShell(foreach \\($b in @\\('claude/find-fix-bugs-JuAjM','claude/fix-sip-recurring-logic-w3OEb','claude/fix-chip-sync-issue-wj2FS','claude/nomad-features-1-4-kfUkO','claude/fervent-davinci','fix/local-mode-flag-cleanup','claude/add-claude-documentation-tKBrn'\\)\\) { Write-Output \"===== $b =====\"; git log --oneline origin/main..origin/$b 2>&1 | Out-String })",
+      "Bash(Select-Object -First 1)",
+      "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\(JSON.stringify\\(p.scripts,null,1\\)\\)\")",
+      "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\('typescript:', \\(p.devDependencies||{}\\).typescript||\\(p.dependencies||{}\\).typescript\\); console.log\\('@playwright/test:', \\(p.devDependencies||{}\\)['@playwright/test']\\); console.log\\('@vercel/node:', \\(p.devDependencies||{}\\)['@vercel/node']||\\(p.dependencies||{}\\)['@vercel/node']\\)\")",
+      "Bash(echo \"---EXIT:$?---\")",
+      "Bash(grep -oE \"[a-z-]+/[a-z-]+$\")",
+      "Bash(node -e \"let s='';process.stdin.on\\('data',d=>s+=d\\).on\\('end',\\(\\)=>{const r=JSON.parse\\(s\\);for\\(const f of r\\){for\\(const m of f.messages\\){if\\(m.severity===2\\)console.log\\(f.filePath.split\\(/[\\\\\\\\\\\\\\\\/]/\\).slice\\(-2\\).join\\('/'\\),'|',m.ruleId\\)}}}\\)\")",
+      "Bash(npx playwright *)",
+      "mcp__Claude_Preview__preview_start"
     ]
   }
 }

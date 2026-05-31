@@ -1,26 +1,22 @@
 import { test, expect } from "@playwright/test";
-import { seedDemoMode } from "./helpers.js";
+import { gotoLocal, dismissBanner, makeExpense } from "./helpers.js";
 
 test("delete transaction shows undo toast", async ({ page }) => {
-  await seedDemoMode(page);
-  await page.click("text=History");
-  // Click the delete button on the first transaction card
-  const deleteBtn = page.locator("button:has-text('✕')").first();
-  await deleteBtn.click();
-  // Undo toast should appear
-  await expect(page.locator("text=deleted").first()).toBeVisible({ timeout: 5000 });
+  await gotoLocal(page, { expenses: [makeExpense({ note: "Delete me" })] });
+  await page.getByRole("button", { name: "History", exact: true }).click();
+  await dismissBanner(page);
+  await page.getByRole("button", { name: "✕", exact: true }).click();
+  await expect(page.getByText("Expense deleted")).toBeVisible({ timeout: 5000 });
+  await expect(page.getByRole("button", { name: "UNDO", exact: true })).toBeVisible();
 });
 
-test("undo restores transaction in memory", async ({ page }) => {
-  await seedDemoMode(page);
-  await page.click("text=History");
-  // Count items before delete
-  const before = await page.locator("[style*='marginBottom: 10']").count();
-  // Delete first item
-  await page.locator("button:has-text('✕')").first().click();
-  // Click Undo
-  await page.click("button:has-text('Undo')");
-  // Count should be back
-  const after = await page.locator("[style*='marginBottom: 10']").count();
-  expect(after).toBeGreaterThanOrEqual(before - 1);
+test("undo restores the deleted transaction", async ({ page }) => {
+  await gotoLocal(page, { expenses: [makeExpense({ note: "Bring me back" })] });
+  await page.getByRole("button", { name: "History", exact: true }).click();
+  await dismissBanner(page);
+  await expect(page.getByText("Bring me back")).toBeVisible();
+  await page.getByRole("button", { name: "✕", exact: true }).click();
+  await expect(page.getByText("Bring me back")).toHaveCount(0);
+  await page.getByRole("button", { name: "UNDO", exact: true }).click();
+  await expect(page.getByText("Bring me back")).toBeVisible({ timeout: 5000 });
 });

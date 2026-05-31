@@ -1,25 +1,22 @@
 import { test, expect } from "@playwright/test";
-import { seedDemoMode } from "./helpers.js";
+import { gotoLocal, makeExpense } from "./helpers.js";
 
-test("history tab shows transactions", async ({ page }) => {
-  await seedDemoMode(page);
-  await page.click("text=History");
-  // Demo data has transactions
-  await expect(page.locator("[style*='marginBottom: 10']").first()).toBeVisible({ timeout: 5000 });
+test("history tab shows seeded transactions", async ({ page }) => {
+  await gotoLocal(page, { expenses: [makeExpense({ note: "Groceries" })] });
+  await page.getByRole("button", { name: "History", exact: true }).click();
+  await expect(page.getByText("Groceries")).toBeVisible({ timeout: 5000 });
 });
 
-test("search filters transactions", async ({ page }) => {
-  await seedDemoMode(page);
-  await page.click("text=History");
-  // Type in search box
-  await page.fill("input[placeholder*='Search']", "zzznotfound");
-  await expect(page.locator("text=No results match your filters.")).toBeVisible({ timeout: 3000 });
+test("search with no match shows empty-filter message", async ({ page }) => {
+  await gotoLocal(page, { expenses: [makeExpense({ note: "Groceries" })] });
+  await page.getByRole("button", { name: "History", exact: true }).click();
+  await page.locator("input[placeholder*='Search']").fill("zzznotfound");
+  await expect(page.getByText("No results match your filters.")).toBeVisible({ timeout: 5000 });
 });
 
-test("filter panel toggles", async ({ page }) => {
-  await seedDemoMode(page);
-  await page.click("text=History");
-  await page.click("button:has-text('Filter')");
-  // Type buttons should appear
-  await expect(page.locator("button:has-text('Expense')").first()).toBeVisible();
+test("filter panel reveals type buttons", async ({ page }) => {
+  await gotoLocal(page, { expenses: [makeExpense({ note: "Groceries" })] });
+  await page.getByRole("button", { name: "History", exact: true }).click();
+  await page.getByRole("button", { name: "Filter", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Expense", exact: true })).toBeVisible();
 });

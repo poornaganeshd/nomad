@@ -8,6 +8,9 @@ export default defineConfig({
     baseURL: "http://localhost:5173",
     viewport: { width: 390, height: 844 }, // iPhone 14 Pro
     trace: "on-first-retry",
+    // The PWA service worker reloads the page on `controllerchange` (main.jsx),
+    // which destroys the test's execution context mid-run. Block SW in e2e.
+    serviceWorkers: "block",
   },
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },

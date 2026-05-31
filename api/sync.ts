@@ -1,7 +1,9 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
-// Matches the real Supabase project-ref format so arbitrary URLs can't be proxied.
-const SUPABASE_URL_RE = /^https:\/\/[a-z0-9]{20}\.supabase\.co/;
+// Matches the real Supabase project-ref host. Anchored end-to-end ($) so a
+// look-alike like "<ref>.supabase.co.attacker.com" can't pass and turn this
+// public endpoint into an open relay / SSRF pivot.
+const SUPABASE_HOST_RE = /^[a-z0-9]{20}\.supabase\.co$/;
 const UPSTREAM_TIMEOUT_MS = 20_000;
 const KEY_TTL_DAYS = 30;
 
@@ -22,14 +24,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(400).json({ error: "method and path are required" });
   }
 
-  // Security: only forward to valid Supabase project URLs.
-  if (!SUPABASE_URL_RE.test(path)) {
+  // Security: only forward to valid Supabase project URLs. Parse the URL and
+  // validate the HOST exactly — an unanchored prefix match would let
+  // "<ref>.supabase.co.attacker.com" through and proxy the caller's headers
+  // (incl. anon key) to an attacker-controlled host.
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(path);
+  } catch {
+    return res.status(400).json({ error: "path must be a valid URL" });
+  }
+  if (parsedUrl.protocol !== "https:" || !SUPABASE_HOST_RE.test(parsedUrl.hostname)) {
     return res.status(400).json({ error: "path must be a Supabase REST URL" });
   }
 
-  // Extract base URL and anon key so we can query nomad_sync_keys.
-  const baseMatch = path.match(/^(https:\/\/[a-z0-9]{20}\.supabase\.co)/);
-  const baseUrl = baseMatch?.[1];
+  // Base URL (origin) and anon key so we can query nomad_sync_keys.
+  const baseUrl = parsedUrl.origin;
   const anonKey =
     headers?.["apikey"] ??
     headers?.["Authorization"]?.replace(/^Bearer\s+/i, "") ??
