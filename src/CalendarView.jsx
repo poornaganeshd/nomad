@@ -142,7 +142,7 @@ export default function CalendarView({
     const ex = expenses.filter(e => e.date === sel).map(e => ({ ...e, _type: "expense" }));
     const inc = incomes.filter(i => i.date === sel).map(i => ({ ...i, _type: "income" }));
     const tr = transfers.filter(t => t.date === sel).map(t => ({ ...t, _type: "transfer" }));
-    return [...ex, ...inc, ...tr].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+    return [...ex, ...inc, ...tr].sort((a, b) => (b.created_at || b.createdAt || "").localeCompare(a.created_at || a.createdAt || ""));
   }, [sel, expenses, incomes, transfers]);
 
   const catName = id => categories.find(c => c.id === id)?.name || id || "Unknown";

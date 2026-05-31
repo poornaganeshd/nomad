@@ -178,6 +178,13 @@ const performRequest = (item) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          // idempotencyKey identifies this *specific* operation and is stable
+          // across retries of the same queued item (item.id survives requeue),
+          // but unique per logical write — so two distinct operations on the
+          // same record (e.g. wallet recalibration, split settle→unsettle,
+          // delete→undo→delete) are never collapsed by the server-side cache.
+          // dedupeKey stays for the client-side queue coalescing only.
+          idempotencyKey: item.id ?? null,
           dedupeKey: item.dedupeKey ?? null,
           method: item.method,
           path: item.path,

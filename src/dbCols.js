@@ -7,7 +7,7 @@ export const COLS = {
   incomes:     ["id", "amount", "sourceId", "walletId", "note", "date", "receipt_url", "balBefore"],
   transfers:   ["id", "amount", "fromWallet", "toWallet", "note", "date", "fromBalBefore", "toBalBefore"],
   settlements: ["id", "amount", "splitName", "splitId", "direction", "walletId", "date", "groupId", "eventId", "categoryId", "note"],
-  splits:      ["id", "name", "amount", "direction", "settled", "eventId", "groupId", "note", "categoryId"],
+  splits:      ["id", "name", "amount", "direction", "settled", "eventId", "groupId", "note", "categoryId", "skipped"],
   recurring:   ["id", "name", "amount", "categoryId", "categoryName", "walletId", "frequency", "dayOfMonth", "intervalDays", "yearMonth", "yearDay", "startDate", "active", "lastPaidDate", "lastSkippedDate"],
   events:      ["id", "name", "emoji", "date", "status", "type", "participants"],
 };
