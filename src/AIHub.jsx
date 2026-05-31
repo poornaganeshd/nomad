@@ -4,13 +4,6 @@ import { localDateKey } from "./financeUtils";
 
 const fmt = n => "₹" + (Number(n) || 0).toLocaleString("en-IN");
 
-// Indian financial year (Apr–Mar) as e.g. "2025-26" for the current date.
-const indianFY = () => {
-  const d = new Date(), y = d.getFullYear();
-  const start = d.getMonth() < 3 ? y - 1 : y; // Jan–Mar belongs to the prior FY
-  return `${start}-${String((start + 1) % 100).padStart(2, "0")}`;
-};
-
 async function callAnalyze(mode, body) {
   const r = await fetch("/api/ai-analyze", {
     method: "POST",
@@ -321,7 +314,7 @@ export default function AIHub({
       const yearEx = expenses.filter(e => String(e.date || "") >= c);
       const data = await callAnalyze("tax", {
         expenses: redactTransactions(yearEx),
-        fy: indianFY(),
+        fy: new Date().getFullYear().toString(),
       });
       sTaxResult(data);
     } catch (e) { showT(e.message, "error"); }
@@ -447,7 +440,7 @@ export default function AIHub({
       <Card title="Subscription Detector" desc="Find suspected recurring charges (Netflix, gym, SaaS) in your 90-day log." color="#7B8CDE" busy={subBusy} onRun={runSubs}>
         {subResult && (
           <ResultBox>
-            {!subResult.subscriptions?.length ? "No recurring patterns detected." : subResult.subscriptions.map((s, i) => (
+            {subResult.subscriptions?.length === 0 ? "No recurring patterns detected." : subResult.subscriptions.map((s, i) => (
               <div key={i} style={{ display: "flex", gap: 8, padding: "6px 0", borderBottom: i < subResult.subscriptions.length - 1 ? "1px dashed var(--border)" : "none" }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 700, fontFamily: "var(--font-h)" }}>{s.merchant}</div>
@@ -463,7 +456,7 @@ export default function AIHub({
       <Card title="Anomaly Scanner" desc="Scan last 30 days and flag transactions that look out of pattern." color="#E07A5F" busy={anomBusy} onRun={runAnom} runLabel="Scan last 30 days">
         {anomResults && (
           <ResultBox>
-            {!anomResults.flagged?.length ? "All clear — no significant outliers." : anomResults.flagged.map((a, i) => (
+            {anomResults.flagged.length === 0 ? "All clear — no significant outliers." : anomResults.flagged.map((a, i) => (
               <div key={i} style={{ padding: "8px 0", borderBottom: i < anomResults.flagged.length - 1 ? "1px dashed var(--border)" : "none" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
                   <span style={{ fontFamily: "var(--font-h)", fontWeight: 700 }}>{fmt(a.tx.amount)} {catName(a.tx.categoryId)}</span>
@@ -479,7 +472,7 @@ export default function AIHub({
       <Card title="Duplicate Detector" desc="Find probable double-logged transactions (same amount + merchant close in time)." color="#FBBF24" busy={dupBusy} onRun={runDups}>
         {dupResult && (
           <ResultBox>
-            {!dupResult.duplicates?.length ? "No duplicates found." : dupResult.duplicates.map((d, i) => (
+            {dupResult.duplicates?.length === 0 ? "No duplicates found." : dupResult.duplicates.map((d, i) => (
               <div key={i} style={{ padding: "6px 0", borderBottom: i < dupResult.duplicates.length - 1 ? "1px dashed var(--border)" : "none" }}>
                 <div style={{ fontFamily: "var(--font-h)", fontWeight: 700, fontSize: 11 }}>{d.confidence.toUpperCase()} · {d.reason}</div>
                 <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>IDs: {(d.ids || []).join(", ")}</div>
@@ -492,7 +485,7 @@ export default function AIHub({
       <Card title="Merchant Cleanup" desc="Normalize messy notes ('strbcks', 'Starbucks Koramangala') to canonical names." color="#6BAA75" busy={merchBusy} onRun={runMerch}>
         {merchResult && (
           <ResultBox>
-            {!merchResult.mappings?.length ? "No mappings produced." : (
+            {merchResult.mappings?.length === 0 ? "No mappings produced." : (
               <>
                 {merchResult.mappings.slice(0, 12).map((m, i) => (
                   <div key={i} style={{ display: "flex", gap: 8, padding: "4px 0", fontSize: 11 }}>
@@ -589,7 +582,7 @@ export default function AIHub({
       <Card title="Budget Recommender" desc="Suggest realistic monthly limits per category from your 90-day data." color="#7B8CDE" busy={budBusy} onRun={runBud}>
         {budResult && (
           <ResultBox>
-            {!budResult.suggestions?.length ? "Not enough data." : (
+            {budResult.suggestions?.length === 0 ? "Not enough data." : (
               <>
                 {budResult.suggestions.map((s, i) => (
                   <div key={i} style={{ display: "flex", gap: 8, padding: "6px 0", fontSize: 11, alignItems: "center" }}>
@@ -647,7 +640,7 @@ export default function AIHub({
       <Card title="Smart Reminders" desc="Predict what you usually log today based on past patterns." color="#A78BFA" busy={remBusy} onRun={runRem}>
         {remResult && (
           <ResultBox>
-            {!remResult.reminders?.length ? "No patterns strong enough yet." : remResult.reminders.map((r, i) => (
+            {remResult.reminders?.length === 0 ? "No patterns strong enough yet." : remResult.reminders.map((r, i) => (
               <div key={i} style={{ padding: "8px 0", borderBottom: i < remResult.reminders.length - 1 ? "1px dashed var(--border)" : "none" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
                   <span style={{ fontFamily: "var(--font-h)", fontWeight: 700 }}>{r.title}</span>

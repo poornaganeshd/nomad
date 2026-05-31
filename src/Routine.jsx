@@ -1563,11 +1563,10 @@ const compressPhoto = (file, maxPx = 480) => new Promise((resolve, reject) => {
 /* Migrate freeFoodLog to flat [{text, tag}] format */
 const migrateFreeFoodLog = (log) => {
     if (!log) return [];
-    // Already new format: array of objects (guard against a leading null —
-    // typeof null === 'object' would otherwise pass a corrupt array through).
-    if (Array.isArray(log) && (log.length === 0 || (log[0] && typeof log[0] === 'object'))) return log;
-    // Old format: array of strings (coerce defensively in case of mixed entries)
-    if (Array.isArray(log)) return log.map(t => (t && typeof t === 'object') ? t : { text: String(t ?? ''), tag: 'other' });
+    // Already new format: array of objects
+    if (Array.isArray(log) && (log.length === 0 || typeof log[0] === 'object')) return log;
+    // Old format: array of strings
+    if (Array.isArray(log)) return log.map(t => ({ text: t, tag: 'other' }));
     // v2 categorized object format
     if (typeof log === 'object') {
         const result = [];
@@ -3051,11 +3050,7 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                 let summary = [];
                 if (restoreMode === 'data' || restoreMode === 'both') {
                     const cleanData = sanitizeRestoredData(parsed.data);
-                    // Seed prev-ref with the restored data so the save-effect's
-                    // diff is empty — the explicit upserts below already sync it.
-                    // Resetting to {} would re-flag every day as changed and
-                    // double-write (with a fresh timestamp).
-                    if (prevAllDataRef) prevAllDataRef.current = cleanData;
+                    if (prevAllDataRef) prevAllDataRef.current = {};
                     setAllData(cleanData);
                     localStorage.setItem('form_data_modified', String(now));
                     if (localModRef) localModRef.current = now;
@@ -3196,20 +3191,20 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                                     <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 0.4, padding: '2px 8px', borderRadius: 100, background: p.slot === 'am' ? 'var(--amber-sf)' : p.slot === 'pm' ? 'var(--teal-sf)' : 'var(--green-sf)', color: p.slot === 'am' ? 'var(--amber-deep)' : p.slot === 'pm' ? 'var(--teal-deep)' : 'var(--green-deep)', cursor: 'pointer', userSelect: 'none' }}
                                         onClick={() => {
                                             const next = p.slot === 'am' ? 'pm' : p.slot === 'pm' ? 'both' : 'am';
-                                            update(c => ({ customProducts: (c.customProducts || []).map(cp => cp.id === p.id ? { ...cp, slot: next } : cp) }));
+                                            update({ customProducts: config.customProducts.map(cp => cp.id === p.id ? { ...cp, slot: next } : cp) });
                                         }}>
                                         {p.slot === 'both' ? 'AM+PM' : p.slot.toUpperCase()}
                                     </span>
                                     <button style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--txd)', fontSize: 18, cursor: 'pointer', padding: '0 2px', lineHeight: 1 }}
                                         onClick={() => {
-                                            update(c => ({ customProducts: (c.customProducts || []).map(cp => cp.id === p.id ? { ...cp, archived: true } : cp) }));
+                                            update({ customProducts: config.customProducts.map(cp => cp.id === p.id ? { ...cp, archived: true } : cp) });
                                             showToast(`${p.name || p.kind} archived`, 'info');
                                         }}>×</button>
                                 </div>
                                 <input className="inp" style={{ marginBottom: 6 }} placeholder="Type (e.g. Retinol)" value={p.kind}
-                                    onChange={(e) => update(c => ({ customProducts: (c.customProducts || []).map(cp => cp.id === p.id ? { ...cp, kind: e.target.value } : cp) }))} />
+                                    onChange={(e) => update({ customProducts: config.customProducts.map(cp => cp.id === p.id ? { ...cp, kind: e.target.value } : cp) })} />
                                 <input className="inp" placeholder="Brand name" value={p.name}
-                                    onChange={(e) => update(c => ({ customProducts: (c.customProducts || []).map(cp => cp.id === p.id ? { ...cp, name: e.target.value } : cp) }))} />
+                                    onChange={(e) => update({ customProducts: config.customProducts.map(cp => cp.id === p.id ? { ...cp, name: e.target.value } : cp) })} />
                             </div>
                         ))}
 
@@ -3233,7 +3228,7 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                                 if (!kind) { showToast('Enter a product type first', 'error'); return; }
                                 const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
                                 const finalName = newProduct.name.trim() || kind;
-                                update(c => ({ customProducts: [...(c.customProducts || []), { id, kind, name: finalName, slot: newProduct.slot }] }));
+                                update({ customProducts: [...(config.customProducts || []), { id, kind, name: finalName, slot: newProduct.slot }] });
                                 setNewProduct({ kind: '', name: '', slot: 'both' });
                                 showToast(`${finalName} added`, 'success');
                             }}>Add product</button>
@@ -3368,7 +3363,6 @@ export default function RoutineApp({ darkMode = false, onTabChange }) {
     const dataDebounceRef = useRef(null);
     const configDebounceRef = useRef(null);
     const prevAllDataRef = useRef({});
-    const prevConfigRef = useRef(null);
 
     // Load from Supabase on mount, fall back to localStorage. Conflict-aware.
     useEffect(() => {
@@ -3438,17 +3432,14 @@ export default function RoutineApp({ darkMode = false, onTabChange }) {
     useEffect(() => {
         if (!sbLoaded) return;
         const cleanData = sanitizeAllData(allData);
+        const now = Date.now();
         localStorage.setItem('form_data', JSON.stringify(cleanData));
+        localStorage.setItem('form_data_modified', String(now));
+        localModRef.current = now;
         const prevData = prevAllDataRef.current;
         const changedDays = Object.keys(cleanData).filter(k => JSON.stringify(cleanData[k]) !== JSON.stringify(prevData[k]));
         prevAllDataRef.current = cleanData;
         if (changedDays.length === 0) return;
-        // Stamp the modified clock only on a real edit so localMod stays a true
-        // "last edit" time — not "last app open". Bumping it on every load/no-op
-        // re-render would let the local side wrongly win last-write-wins merges.
-        const now = Date.now();
-        localStorage.setItem('form_data_modified', String(now));
-        localModRef.current = now;
         if (dataDebounceRef.current) clearTimeout(dataDebounceRef.current);
         dataDebounceRef.current = setTimeout(() => {
             changedDays.forEach(day => {
@@ -3460,15 +3451,8 @@ export default function RoutineApp({ darkMode = false, onTabChange }) {
     useEffect(() => {
         if (!sbLoaded) return;
         const cleanConfig = sanitizeConfig(config);
-        const serialized = JSON.stringify(cleanConfig);
-        localStorage.setItem('form_config', serialized);
-        // Skip no-op runs and the first post-load run so configMod stays a true
-        // "last edit" time (same rationale as the data effect above).
-        if (prevConfigRef.current === serialized) return;
-        const firstRun = prevConfigRef.current === null;
-        prevConfigRef.current = serialized;
-        if (firstRun) return;
         const now = Date.now();
+        localStorage.setItem('form_config', JSON.stringify(cleanConfig));
         localStorage.setItem('form_config_modified', String(now));
         configModRef.current = now;
         if (configDebounceRef.current) clearTimeout(configDebounceRef.current);

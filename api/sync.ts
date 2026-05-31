@@ -12,23 +12,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { idempotencyKey, dedupeKey, method, path, body, headers } = (req.body ?? {}) as {
-    idempotencyKey?: string;
+  const { dedupeKey, method, path, body, headers } = (req.body ?? {}) as {
     dedupeKey?: string;
     method?: string;
     path?: string;
     body?: string | null;
     headers?: Record<string, string>;
   };
-
-  // Idempotency must dedupe *retries of one operation*, never two distinct
-  // operations that happen to target the same record. idempotencyKey is a
-  // per-operation token (stable across requeue/retry, unique per logical
-  // write); dedupeKey is the client's record-level queue-coalescing key and is
-  // deliberately reused across writes, so keying the cache on it would silently
-  // drop legitimate follow-up writes (the cause of "data not syncing"). Prefer
-  // the per-operation token; fall back to dedupeKey only for older clients.
-  const cacheKey = idempotencyKey ?? dedupeKey ?? null;
 
   if (!method || !path || typeof path !== "string") {
     return res.status(400).json({ error: "method and path are required" });
@@ -56,12 +46,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     null;
 
   // ── Idempotency check ────────────────────────────────────────────────────
-  // If we have a cacheKey and can identify the Supabase instance, check
-  // whether this exact operation was already successfully applied.
-  if (cacheKey && baseUrl && anonKey) {
+  // If we have a dedupeKey and can identify the Supabase instance, check
+  // whether this operation was already successfully applied.
+  if (dedupeKey && baseUrl && anonKey) {
     try {
       const checkRes = await fetch(
-        `${baseUrl}/rest/v1/nomad_sync_keys?key=eq.${encodeURIComponent(cacheKey)}&select=result&limit=1`,
+        `${baseUrl}/rest/v1/nomad_sync_keys?key=eq.${encodeURIComponent(dedupeKey)}&select=result&limit=1`,
         {
           headers: {
             "Content-Type": "application/json",
@@ -110,7 +100,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   // ── Store idempotency key on success ─────────────────────────────────────
-  if (upstreamRes.ok && cacheKey && baseUrl && anonKey) {
+  if (upstreamRes.ok && dedupeKey && baseUrl && anonKey) {
     let resultJson: unknown = null;
     try { resultJson = JSON.parse(responseText); } catch { /* non-JSON body — store null */ }
 
@@ -123,9 +113,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           "Content-Type": "application/json",
           apikey: anonKey,
           Authorization: `Bearer ${anonKey}`,
-          Prefer: "resolution=merge-duplicates,return=minimal",
+          Prefer: "return=minimal",
         },
-        body: JSON.stringify({ key: cacheKey, result: resultJson }),
+        body: JSON.stringify({ key: dedupeKey, result: resultJson }),
       }),
       // Prune keys older than TTL so the table doesn't grow unbounded.
       fetch(
