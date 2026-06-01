@@ -15,26 +15,6 @@ async function callAnalyze(mode, body) {
   return data;
 }
 
-async function callVision(type, file) {
-  const reader = new FileReader();
-  const dataUrl = await new Promise((resolve, reject) => {
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-  const [meta, base64] = String(dataUrl).split(",");
-  const mimeMatch = meta.match(/data:([^;]+)/);
-  const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
-  const r = await fetch("/api/food-vision", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type, imageBase64: base64, mimeType }),
-  });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.error || "AI failed");
-  return data;
-}
-
 function Card({ title, desc, color = "#7B8CDE", children, busy, onRun, runLabel = "Run" }) {
   const [open, sOpen] = useState(false);
   return (
@@ -83,15 +63,6 @@ function Card({ title, desc, color = "#7B8CDE", children, busy, onRun, runLabel 
   );
 }
 
-function Row({ k, v }) {
-  return (
-    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
-      <span style={{ color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600 }}>{k}</span>
-      <span style={{ fontFamily: "var(--font-h)", fontWeight: 700, color: "var(--text)" }}>{v}</span>
-    </div>
-  );
-}
-
 function ResultBox({ children }) {
   return (
     <div style={{
@@ -111,10 +82,8 @@ export default function AIHub({
   expenses = [],
   incomes = [],
   categories = [],
-  wallets = [],
   budgets = {},
   recurring = [],
-  onAddTransactions,
   onApplyBudgets,
   onApplyMerchantRules,
   onShowToast,
@@ -357,72 +326,6 @@ export default function AIHub({
     finally { sCoachBusy(false); }
   };
 
-  // ---- 12. Voice parse demo ----
-  const [voiceInput, sVoiceInput] = useState("");
-  const [voiceResult, sVoiceResult] = useState(null);
-  const [voiceBusy, sVoiceBusy] = useState(false);
-  const runVoice = async () => {
-    if (!voiceInput.trim()) { showT("Type or paste a transcript", "info"); return; }
-    sVoiceBusy(true); sVoiceResult(null);
-    try {
-      const data = await callAnalyze("voice-parse", {
-        transcript: redact(voiceInput.trim()),
-        wallets: wallets.map(w => ({ id: w.id, name: w.name })),
-        categories: categories.map(c => ({ id: c.id, name: c.name })),
-      });
-      sVoiceResult(data);
-    } catch (e) { showT(e.message, "error"); }
-    finally { sVoiceBusy(false); }
-  };
-
-  // ---- 13. Split categories ----
-  const [splitNote, sSplitNote] = useState("");
-  const [splitAmt, sSplitAmt] = useState("");
-  const [splitCat, sSplitCat] = useState("");
-  const [splitResult, sSplitResult] = useState(null);
-  const [splitBusy, sSplitBusy] = useState(false);
-  const runSplit = async () => {
-    const amt = parseFloat(splitAmt);
-    if (!amt || !splitNote.trim()) { showT("Enter amount and note", "info"); return; }
-    sSplitBusy(true); sSplitResult(null);
-    try {
-      const data = await callAnalyze("split-cats", {
-        expense: { amount: amt, note: redact(splitNote.trim()), categoryId: splitCat },
-        categories: categories.map(c => ({ id: c.id, name: c.name })),
-      });
-      sSplitResult(data);
-    } catch (e) { showT(e.message, "error"); }
-    finally { sSplitBusy(false); }
-  };
-
-  // ---- 14. Receipt line items ----
-  const [itemsResult, sItemsResult] = useState(null);
-  const [itemsBusy, sItemsBusy] = useState(false);
-  const onItemsUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    sItemsBusy(true); sItemsResult(null);
-    try {
-      const data = await callVision("receipt-items", file);
-      sItemsResult(data);
-    } catch (err) { showT(err.message, "error"); }
-    finally { sItemsBusy(false); e.target.value = ""; }
-  };
-
-  // ---- 15. Ledger OCR ----
-  const [ledgerResult, sLedgerResult] = useState(null);
-  const [ledgerBusy, sLedgerBusy] = useState(false);
-  const onLedgerUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    sLedgerBusy(true); sLedgerResult(null);
-    try {
-      const data = await callVision("ledger", file);
-      sLedgerResult(data);
-    } catch (err) { showT(err.message, "error"); }
-    finally { sLedgerBusy(false); e.target.value = ""; }
-  };
-
   const catName = id => categories.find(c => c.id === id)?.name || id;
 
   return (
@@ -434,7 +337,7 @@ export default function AIHub({
         marginBottom: 14,
       }}>
         <div style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>AI Toolbox</div>
-        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>15 AI features grounded in your data. Tap any card to expand.</div>
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>11 insight tools grounded in your data. Tap any card to expand.</div>
       </div>
 
       <Card title="Subscription Detector" desc="Find suspected recurring charges (Netflix, gym, SaaS) in your 90-day log." color="#7B8CDE" busy={subBusy} onRun={runSubs}>
@@ -676,129 +579,12 @@ export default function AIHub({
         )}
       </Card>
 
-      <Card title="Voice Parser (AI)" desc="Paste/dictate any phrasing; AI extracts amount, wallet, category, note." color="#7B8CDE" busy={voiceBusy} onRun={runVoice} runLabel="Parse">
-        <textarea
-          value={voiceInput}
-          onChange={e => sVoiceInput(e.target.value)}
-          placeholder="e.g. paid 2k for groceries from bank, split with roomie"
-          rows={2}
-          style={{
-            width: "100%",
-            padding: "9px 12px",
-            borderRadius: 10,
-            border: "1.5px solid var(--border)",
-            background: "var(--bg)",
-            color: "var(--text)",
-            fontSize: 13,
-            fontFamily: "var(--font-b)",
-            outline: "none",
-            boxSizing: "border-box",
-            resize: "vertical",
-          }}
-        />
-        {voiceResult && (
-          <ResultBox>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <Row k="Amount" v={voiceResult.amount != null ? fmt(voiceResult.amount) : "—"} />
-              <Row k="Type" v={voiceResult.type || "—"} />
-              <Row k="Category" v={voiceResult.categoryId ? catName(voiceResult.categoryId) : "—"} />
-              <Row k="Wallet" v={voiceResult.walletId ? (wallets.find(w => w.id === voiceResult.walletId)?.name || voiceResult.walletId) : "—"} />
-              <Row k="Note" v={voiceResult.note || "—"} />
-              <Row k="Confidence" v={voiceResult.confidence || "—"} />
-            </div>
-          </ResultBox>
-        )}
-      </Card>
-
-      <Card title="Category Split Suggester" desc="One expense, multi-category split (Amazon order = groceries + electronics)." color="#A78BFA" busy={splitBusy} onRun={runSplit} runLabel="Suggest split">
-        <div style={{ display: "flex", gap: 6 }}>
-          <input
-            value={splitAmt}
-            onChange={e => sSplitAmt(e.target.value)}
-            placeholder="Amount"
-            type="number"
-            style={{ flex: 1, padding: "9px 12px", borderRadius: 10, border: "1.5px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 13, outline: "none", boxSizing: "border-box" }}
-          />
-          <select
-            value={splitCat}
-            onChange={e => sSplitCat(e.target.value)}
-            style={{ flex: 1, padding: "9px 12px", borderRadius: 10, border: "1.5px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 13, outline: "none" }}
-          >
-            <option value="">Current category</option>
-            {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </div>
-        <input
-          value={splitNote}
-          onChange={e => sSplitNote(e.target.value)}
-          placeholder="Note (e.g. amazon: milk, headphones, soap)"
-          style={{ width: "100%", marginTop: 6, padding: "9px 12px", borderRadius: 10, border: "1.5px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 13, outline: "none", boxSizing: "border-box" }}
-        />
-        {splitResult && (
-          <ResultBox>
-            {(splitResult.splits || []).map((s, i) => (
-              <div key={i} style={{ display: "flex", gap: 8, padding: "4px 0", fontSize: 11 }}>
-                <span style={{ flex: 1, fontFamily: "var(--font-h)", fontWeight: 700 }}>{catName(s.categoryId)}</span>
-                <span style={{ flex: 1, color: "var(--muted)" }}>{s.reason}</span>
-                <span style={{ fontFamily: "var(--font-h)", color: "#A78BFA", fontWeight: 700 }}>{fmt(s.amount)}</span>
-              </div>
-            ))}
-          </ResultBox>
-        )}
-      </Card>
-
-      <Card title="Receipt Line Items" desc="Photo of receipt → each item with qty, amount, category hint." color="#6BAA75">
-        <label style={{ display: "block", width: "100%", padding: "10px", border: "1.5px solid #6BAA75", borderRadius: 10, background: "#6BAA7512", color: "#6BAA75", fontFamily: "var(--font-h)", fontSize: 12, cursor: "pointer", fontWeight: 700, textAlign: "center" }}>
-          {itemsBusy ? "Reading…" : "Upload receipt photo"}
-          <input type="file" accept="image/*" capture="environment" onChange={onItemsUpload} style={{ display: "none" }} disabled={itemsBusy} />
-        </label>
-        {itemsResult && (
-          <ResultBox>
-            <div style={{ fontFamily: "var(--font-h)", fontWeight: 700, marginBottom: 6 }}>{itemsResult.merchant} · {fmt(itemsResult.total)}</div>
-            {(itemsResult.items || []).map((it, i) => (
-              <div key={i} style={{ display: "flex", gap: 8, padding: "4px 0", fontSize: 11, borderBottom: i < itemsResult.items.length - 1 ? "1px dashed var(--border)" : "none" }}>
-                <span style={{ flex: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</span>
-                <span style={{ color: "var(--muted)", flexShrink: 0 }}>×{it.qty}</span>
-                <span style={{ fontSize: 9, color: "var(--muted)", flexShrink: 0 }}>{it.category}</span>
-                <span style={{ fontFamily: "var(--font-h)", color: "#6BAA75", fontWeight: 700, flexShrink: 0 }}>{fmt(it.amount)}</span>
-              </div>
-            ))}
-          </ResultBox>
-        )}
-      </Card>
-
-      <Card title="Ledger OCR" desc="Photo of a handwritten ledger / expense diary → batch import transactions." color="#c9a96e">
-        <label style={{ display: "block", width: "100%", padding: "10px", border: "1.5px solid #c9a96e", borderRadius: 10, background: "#c9a96e12", color: "#c9a96e", fontFamily: "var(--font-h)", fontSize: 12, cursor: "pointer", fontWeight: 700, textAlign: "center" }}>
-          {ledgerBusy ? "Reading…" : "Upload ledger photo"}
-          <input type="file" accept="image/*" capture="environment" onChange={onLedgerUpload} style={{ display: "none" }} disabled={ledgerBusy} />
-        </label>
-        {ledgerResult && (
-          <ResultBox>
-            <div style={{ fontFamily: "var(--font-h)", fontWeight: 700, marginBottom: 6 }}>{(ledgerResult.entries || []).length} entries detected</div>
-            {(ledgerResult.entries || []).slice(0, 10).map((en, i) => (
-              <div key={i} style={{ display: "flex", gap: 8, padding: "4px 0", fontSize: 11 }}>
-                <span style={{ color: "var(--muted)", flexShrink: 0 }}>{en.date || "?"}</span>
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{en.note}</span>
-                <span style={{ fontFamily: "var(--font-h)", color: en.type === "income" ? "#6BAA75" : "#E07A5F", fontWeight: 700 }}>{en.type === "income" ? "+" : "−"}{fmt(en.amount)}</span>
-              </div>
-            ))}
-            {(ledgerResult.entries || []).length > 10 && (
-              <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 4 }}>…and {ledgerResult.entries.length - 10} more</div>
-            )}
-            {onAddTransactions && ledgerResult.entries?.length > 0 && (
-              <button
-                onClick={() => onAddTransactions(ledgerResult.entries)}
-                style={{ width: "100%", marginTop: 8, padding: "8px", border: "1.5px solid #c9a96e", borderRadius: 8, background: "transparent", color: "#c9a96e", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-              >Import all {ledgerResult.entries.length}</button>
-            )}
-          </ResultBox>
-        )}
-      </Card>
-
       <div style={{ textAlign: "center", padding: "20px 8px", color: "var(--muted)", fontSize: 11, lineHeight: 1.6 }}>
         Recurring count: {recurring.length} · Budgets: {Object.keys(budgets).length} · Routine logs: {moodLogs.length}
         <br />
         All data redacted of PII before AI calls.
+        <br />
+        <span style={{ fontStyle: "italic" }}>Voice add, receipt line items, category split, and ledger photo import live inside Add and Settings — not duplicated here.</span>
       </div>
     </div>
   );
