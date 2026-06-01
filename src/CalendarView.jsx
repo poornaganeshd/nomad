@@ -10,17 +10,27 @@ export default function CalendarView({
   categories = [],
   wallets = [],
   onTxClick,
+  compact = false,        // hide internal day-detail panel (use when parent renders its own)
+  selectedDay = null,     // controlled selection — when provided, parent owns selection
+  onDayClick,             // called with day key (or null to clear)
 }) {
   const today = new Date();
-  const [vY, sY] = useState(today.getFullYear());
-  const [vM, sM] = useState(today.getMonth());
-  const [sel, sSel] = useState(localDateKey());
+  const initialMonth = selectedDay ? new Date(`${selectedDay}T00:00:00`) : today;
+  const [vY, sY] = useState(initialMonth.getFullYear());
+  const [vM, sM] = useState(initialMonth.getMonth());
+  const [internalSel, sInternalSel] = useState(localDateKey());
+  const controlled = onDayClick != null;
+  const sel = controlled ? selectedDay : internalSel;
+  const sSel = controlled
+    ? (d) => onDayClick(d)
+    : sInternalSel;
 
   const clampSelToMonth = (yy, mm) => {
+    if (controlled) return;     // parent owns selection
     const last = new Date(yy, mm + 1, 0).getDate();
     const isCur = yy === today.getFullYear() && mm === today.getMonth();
     const day = isCur ? today.getDate() : 1;
-    sSel(`${yy}-${String(mm + 1).padStart(2, "0")}-${String(Math.min(day, last)).padStart(2, "0")}`);
+    sInternalSel(`${yy}-${String(mm + 1).padStart(2, "0")}-${String(Math.min(day, last)).padStart(2, "0")}`);
   };
   const goB = () => {
     const ny = vM === 0 ? vY - 1 : vY;
@@ -76,7 +86,7 @@ export default function CalendarView({
   };
 
   const cells = [];
-  for (let i = 0; i < fd; i++) cells.push(<div key={`e${i}`} style={{ aspectRatio: "1", minHeight: 48 }} />);
+  for (let i = 0; i < fd; i++) cells.push(<div key={`e${i}`} style={{ minHeight: 44 }} />);
   for (let d = 1; d <= dim; d++) {
     const ds = `${pfx}-${String(d).padStart(2, "0")}`;
     const dat = dayMap[ds] || { exp: 0, inc: 0 };
@@ -87,8 +97,8 @@ export default function CalendarView({
         key={d}
         onClick={() => sSel(ds)}
         style={{
-          aspectRatio: "1",
-          minHeight: 48,
+          minHeight: 44,
+          minWidth: 0,
           borderRadius: 10,
           background: isSel ? "#E07A5F" : cellColor(dat.exp),
           border: isSel ? "2px solid #E07A5F" : isT ? "2px solid var(--text)" : "1px solid var(--border)",
@@ -98,6 +108,7 @@ export default function CalendarView({
           flexDirection: "column",
           justifyContent: "space-between",
           transition: "all 0.12s",
+          overflow: "hidden",
         }}
       >
         <div style={{
@@ -196,6 +207,7 @@ export default function CalendarView({
         <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>{cells}</div>
       </div>
 
+      {!compact && (
       <div style={{
         background: "var(--card)",
         border: "1px solid var(--border)",
@@ -307,6 +319,7 @@ export default function CalendarView({
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }
