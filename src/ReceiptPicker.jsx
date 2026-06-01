@@ -3,6 +3,48 @@ import { uploadReceipt } from "./receiptUpload";
 
 const MAX = 5;
 
+// Read any File (PDF, image) as raw base64. Used for sending PDFs to the
+// AI provider as-is — Gemini's OpenAI-compat layer accepts application/pdf.
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const result = String(fr.result || "");
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    fr.onerror = () => reject(new Error("File read failed."));
+    fr.readAsDataURL(file);
+  });
+}
+
+// Compress a File (image) to JPEG base64. Same algorithm previously inlined
+// in getFirstImageData — now shared with getAllItemsData.
+function compressImage(file, maxPx = 800, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        if (!img.width || !img.height) { URL.revokeObjectURL(url); reject(new Error("Image has zero dimensions.")); return; }
+        const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL("image/jpeg", quality);
+        URL.revokeObjectURL(url);
+        const base64 = dataUrl.replace(/^data:image\/jpeg;base64,/, "");
+        resolve({ imageBase64: base64, mimeType: "image/jpeg" });
+      } catch (e) { URL.revokeObjectURL(url); reject(e); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Image load failed.")); };
+    img.src = url;
+  });
+}
+
 const ReceiptPicker = forwardRef(function ReceiptPicker({ cloudinaryEnabled = true }, ref) {
   const [items, setItems]       = useState([]); // { id, file, localUrl }
   const [showMenu, setShowMenu] = useState(false);
@@ -43,27 +85,30 @@ const ReceiptPicker = forwardRef(function ReceiptPicker({ cloudinaryEnabled = tr
     async getFirstImageData(maxPx = 800, quality = 0.7) {
       const it = items.find(x => !x.isPdf);
       if (!it) return null;
-      return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => {
-          if (!img.width || !img.height) { reject(new Error("Image has zero dimensions.")); return; }
-          const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
-          const w = Math.round(img.width * scale);
-          const h = Math.round(img.height * scale);
-          const canvas = document.createElement("canvas");
-          canvas.width = w; canvas.height = h;
-          const ctx = canvas.getContext("2d");
-          ctx.drawImage(img, 0, 0, w, h);
-          const dataUrl = canvas.toDataURL("image/jpeg", quality);
-          const base64 = dataUrl.replace(/^data:image\/jpeg;base64,/, "");
-          resolve({ imageBase64: base64, mimeType: "image/jpeg" });
-        };
-        img.onerror = () => reject(new Error("Image load failed."));
-        img.src = it.localUrl;
-      });
+      return compressImage(it.file, maxPx, quality);
+    },
+    // Returns base64 payloads for EVERY attached item — compressed JPEG for
+    // images, raw base64 for PDFs (vision models that accept PDF, e.g. Gemini,
+    // will handle them; others fail and the waterfall falls through). Each
+    // entry is { imageBase64, mimeType }. Skips items that fail to load.
+    async getAllItemsData(maxPx = 800, quality = 0.7) {
+      const out = [];
+      for (const it of items) {
+        try {
+          if (it.isPdf) {
+            const base64 = await fileToBase64(it.file);
+            if (base64) out.push({ imageBase64: base64, mimeType: "application/pdf" });
+          } else {
+            const data = await compressImage(it.file, maxPx, quality);
+            out.push(data);
+          }
+        } catch { /* skip unreadable item */ }
+      }
+      return out;
     },
     get count() { return items.length; },
     get hasImage() { return items.some(x => !x.isPdf); },
+    get hasAny()   { return items.length > 0; },
   }));
 
   // ── Helpers ────────────────────────────────────────────────────

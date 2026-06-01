@@ -90,10 +90,12 @@ export default function AIHub({
 }) {
   const showT = onShowToast || (() => {});
 
-  // Recent 90 days slice — used by most modes
+  // Recent 90 days slice — used by most modes. Use localDateKey, not
+  // toISOString().slice(0,10): stored dates are local-TZ; UTC slicing drops a
+  // day for users east of UTC in the first hours after midnight.
   const recent90 = useMemo(() => {
     const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 90);
-    const c = cutoff.toISOString().slice(0, 10);
+    const c = localDateKey(cutoff);
     return {
       expenses: expenses.filter(e => String(e.date || "") >= c),
       incomes:  incomes.filter(i => String(i.date || "") >= c),
@@ -131,7 +133,7 @@ export default function AIHub({
     sAnomBusy(true); sAnomResults(null);
     try {
       const month = new Date(); month.setDate(month.getDate() - 30);
-      const monthC = month.toISOString().slice(0, 10);
+      const monthC = localDateKey(month);
       const candidates = recent90.expenses.filter(e => String(e.date || "") >= monthC);
       const history = redactTransactions(recent90.expenses);
 
@@ -211,7 +213,7 @@ export default function AIHub({
     try {
       const days = narPeriod === "week" ? 7 : narPeriod === "month" ? 30 : 90;
       const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - days);
-      const c = cutoff.toISOString().slice(0, 10);
+      const c = localDateKey(cutoff);
       const ex = expenses.filter(e => String(e.date || "") >= c);
       const inc = incomes.filter(i => String(i.date || "") >= c);
       const data = await callAnalyze("narrative", {
@@ -279,7 +281,7 @@ export default function AIHub({
     sTaxBusy(true); sTaxResult(null);
     try {
       const cutoff = new Date(); cutoff.setMonth(cutoff.getMonth() - 12);
-      const c = cutoff.toISOString().slice(0, 10);
+      const c = localDateKey(cutoff);
       const yearEx = expenses.filter(e => String(e.date || "") >= c);
       const data = await callAnalyze("tax", {
         expenses: redactTransactions(yearEx),
@@ -313,7 +315,7 @@ export default function AIHub({
     sCoachBusy(true); sCoachResult(null);
     try {
       const now = new Date();
-      const cm = now.toISOString().slice(0, 7);
+      const cm = localDateKey(now).slice(0, 7);
       const monthExp = expenses.filter(e => (e.date || "").slice(0, 7) === cm);
       const data = await callAnalyze("goal-coach", {
         budgets,
@@ -337,7 +339,7 @@ export default function AIHub({
         marginBottom: 14,
       }}>
         <div style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>AI Toolbox</div>
-        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>11 insight tools grounded in your data. Tap any card to expand.</div>
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>Insight tools grounded in your data. Tap any card to expand.</div>
       </div>
 
       <Card title="Subscription Detector" desc="Find suspected recurring charges (Netflix, gym, SaaS) in your 90-day log." color="#7B8CDE" busy={subBusy} onRun={runSubs}>
@@ -584,7 +586,7 @@ export default function AIHub({
         <br />
         All data redacted of PII before AI calls.
         <br />
-        <span style={{ fontStyle: "italic" }}>Voice add, receipt line items, category split, and ledger photo import live inside Add and Settings — not duplicated here.</span>
+        <span style={{ fontStyle: "italic" }}>Receipt scan, line-item split (editable), and ledger photo import live inside Add and Settings — not duplicated here.</span>
       </div>
     </div>
   );
