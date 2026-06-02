@@ -394,24 +394,28 @@ Suggest a category split.`;
 Return ONLY valid JSON:
 {
   "reminders": [
-    { "title": "Grocery run usually today", "detail": "You logged groceries on the last 4 Saturdays", "priority": "medium", "categoryId": "groceries" }
+    { "title": "Grocery run usually today", "detail": "You logged groceries on the last 4 Tuesdays, avg ₹184", "priority": "medium", "categoryId": "groceries" }
   ]
 }
 
 Rules:
 - priority: low | medium | high.
-- detail: include the supporting pattern (count, weekday, average amount).
+- detail: include the supporting pattern (count, weekday or day-of-month, average amount).
+- CRITICAL: Only include reminders that match TODAY's weekday or day-of-month. If today is Tuesday, only surface patterns that repeat on Tuesdays or on this date. Do NOT surface Saturday patterns on a Tuesday.
 - Only suggest reminders with ≥3 supporting data points.
 - Cap at 5.`,
     buildUser: (b) => {
       const today = String(b.today || "");
+      const dayName = today
+        ? ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][new Date(`${today}T12:00:00`).getDay()]
+        : "";
       const expenses = ((b.expenses as Txn[]) || []).slice(0, 400);
-      return `Today: ${today}
+      return `Today: ${today}${dayName ? ` (${dayName})` : ""}
 
 Expenses (date, amount, category, note):
 ${expenses.map(e => `${e.date} ₹${e.amount} ${e.categoryId} ${e.note || ""}`).join("\n")}
 
-Generate smart reminders for today.`;
+Generate smart reminders relevant to ${dayName || "today"}.`;
     },
     validate: (p) => Boolean(p && typeof p === "object" && Array.isArray((p as Record<string, unknown>).reminders)),
   },

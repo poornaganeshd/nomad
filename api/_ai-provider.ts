@@ -1,7 +1,7 @@
 /**
  * _ai-provider.ts — Shared AI provider waterfall for NOMAD
  *
- * Three providers tried in order: Gemini → Groq → NVIDIA.
+ * Three providers tried in order: Groq → NVIDIA → Gemini.
  * Any provider whose API key is missing is skipped silently.
  * On failure (non-2xx, timeout, bad JSON) the next provider is tried.
  *
@@ -27,14 +27,6 @@ interface Provider {
 function getProviders(): Provider[] {
   const all: Provider[] = [
     {
-      name: "gemini",
-      textUrl:   "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-      visionUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-      textModel:   "gemini-2.0-flash",
-      visionModel: "gemini-2.0-flash",
-      apiKey: process.env.GEMINI_API_KEY ?? "",
-    },
-    {
       name: "groq",
       textUrl:   "https://api.groq.com/openai/v1/chat/completions",
       visionUrl: "https://api.groq.com/openai/v1/chat/completions",
@@ -49,6 +41,14 @@ function getProviders(): Provider[] {
       textModel:   "meta/llama-3.3-70b-instruct",
       visionModel: "meta/llama-3.2-11b-vision-instruct",
       apiKey: process.env.NVIDIA_API_KEY ?? "",
+    },
+    {
+      name: "gemini",
+      textUrl:   "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      visionUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      textModel:   "gemini-2.0-flash",
+      visionModel: "gemini-2.0-flash",
+      apiKey: process.env.GEMINI_API_KEY ?? "",
     },
   ];
   return all.filter(p => p.apiKey.length > 0);
