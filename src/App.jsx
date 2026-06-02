@@ -16,7 +16,7 @@ import { computeFinanceScore, scoreLabel } from "./financeScore";
 import { redactTransactions } from "./redactor";
 import {
   roundMoney, localDateKey, getRecurringDueDate, isRecurringDueToday,
-  recurringDaysOverdue, distributeAmount, historySortCompare, itemTimestamp,
+  recurringDaysOverdue, getNextDueDate, distributeAmount, historySortCompare, itemTimestamp,
 } from "./financeUtils";
 import { parseAmount, parseVoiceTx, parseBankCsv } from "./txParsers";
 import CalendarView from "./CalendarView";
@@ -2177,10 +2177,12 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
             shows with a "due in N days" label. */}
         {(() => {
           const todS = localDateKey();
-          const horizon = localDateKey(new Date(Date.now() + 31 * 864e5));
+          const horizon = localDateKey(new Date(Date.now() + 45 * 864e5));
           const snz = (() => { try { return JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); } catch { return {}; } })();
-          const up = rec.filter(r => r.active).map(r => ({ r, due: getRecurringDueDate(r, todS) }))
-            .filter(({ r, due }) => due && due > todS && due <= horizon && !isRecurringDueToday(r, todS) && !(snz[r.id] && snz[r.id] > todS))
+          // getNextDueDate rolls past already-paid/past cycles, so a bill paid
+          // this month surfaces its NEXT occurrence instead of vanishing.
+          const up = rec.filter(r => r.active).map(r => ({ r, due: getNextDueDate(r, todS) }))
+            .filter(({ r, due }) => due && due <= horizon && !isRecurringDueToday(r, todS) && !(snz[r.id] && snz[r.id] > todS))
             .sort((a, b) => a.due.localeCompare(b.due));
           return up.length > 0 && <div style={{ ...cc, padding: "14px 16px", marginBottom: 14 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}><Timer size={14} color="#7B8CDE" weight="fill" /><span style={{ fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, color: "#7B8CDE", letterSpacing: "0.5px" }}>Upcoming bills</span></div>

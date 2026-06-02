@@ -87,6 +87,48 @@ export const recurringDaysOverdue = (record, todayString) => {
   return Math.floor((today - due) / 86400000);
 };
 
+// True if the period containing dueStr has already been paid or skipped —
+// mirrors the handled-check inside isRecurringDueToday.
+const isCycleHandled = (record, dueStr) => {
+  if (record.frequency === 'monthly') return record.lastPaidDate?.slice(0, 7) === dueStr.slice(0, 7) || record.lastSkippedDate?.slice(0, 7) === dueStr.slice(0, 7);
+  if (record.frequency === 'yearly') return record.lastPaidDate?.slice(0, 4) === dueStr.slice(0, 4) || record.lastSkippedDate?.slice(0, 4) === dueStr.slice(0, 4);
+  const anchor = record.lastPaidDate || record.lastSkippedDate || record.startDate;
+  return anchor === dueStr;
+};
+
+// Advance a due date by exactly one recurrence cycle. dueStr is YYYY-MM-DD.
+const advanceCycle = (record, dueStr) => {
+  const [y, m, d] = dueStr.split('-').map(Number);
+  if (record.frequency === 'monthly') return isoDate(withClampedDay(y, m, record.dayOfMonth || d)); // m (1-based) used as monthIndex = next month
+  if (record.frequency === 'yearly') return isoDate(withClampedDay(y + 1, (record.yearMonth || m) - 1, record.yearDay || d));
+  if (record.frequency === 'custom') {
+    const iv = Number(record.intervalDays) || 0;
+    if (iv <= 0) return null;
+    const dt = dateOnly(dueStr);
+    dt.setDate(dt.getDate() + iv);
+    return isoDate(dt);
+  }
+  return null;
+};
+
+// Next due date strictly AFTER todayString that hasn't been handled yet.
+// Unlike getRecurringDueDate (which returns the current period's date even when
+// it's in the past or already paid), this rolls forward — so a bill you've
+// already paid this cycle shows its NEXT occurrence instead of disappearing.
+// Returns null if not computable.
+export const getNextDueDate = (record, todayString) => {
+  let due = getRecurringDueDate(record, todayString);
+  if (!due) return null;
+  let guard = 0;
+  while ((due <= todayString || isCycleHandled(record, due)) && guard < 500) {
+    const next = advanceCycle(record, due);
+    if (!next || next <= due) return null;
+    due = next;
+    guard += 1;
+  }
+  return due;
+};
+
 export const distributeAmount = (amount, headCount) => {
   const cents = Math.round(Number(amount || 0) * 100);
   if (!headCount || cents <= 0) return Array.from({ length: Math.max(0, headCount) }, () => 0);
