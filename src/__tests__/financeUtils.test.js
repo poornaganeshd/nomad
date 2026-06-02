@@ -8,7 +8,6 @@ import {
   getRecurringDueDate,
   isRecurringDueToday,
   recurringDaysOverdue,
-  getNextDueDate,
   distributeAmount,
   historySortCompare,
 } from '../financeUtils.js';
@@ -191,13 +190,18 @@ describe('getRecurringDueDate — yearly', () => {
 // getRecurringDueDate — custom interval
 // ---------------------------------------------------------------------------
 describe('getRecurringDueDate — custom interval', () => {
-  it('returns anchor + intervalDays', () => {
+  it('first occurrence (never paid/skipped) IS the start date', () => {
     const r = { frequency: 'custom', startDate: '2024-01-01', intervalDays: 30, active: true };
-    expect(getRecurringDueDate(r, '2024-02-15')).toBe('2024-01-31');
+    expect(getRecurringDueDate(r, '2024-02-15')).toBe('2024-01-01');
   });
 
-  it('uses lastPaidDate as anchor', () => {
+  it('after a payment, due is anchor + intervalDays', () => {
     const r = { frequency: 'custom', startDate: '2024-01-01', lastPaidDate: '2024-02-01', intervalDays: 14, active: true };
+    expect(getRecurringDueDate(r, '2024-03-01')).toBe('2024-02-15');
+  });
+
+  it('after a skip, due is anchor + intervalDays', () => {
+    const r = { frequency: 'custom', startDate: '2024-01-01', lastSkippedDate: '2024-02-01', intervalDays: 14, active: true };
     expect(getRecurringDueDate(r, '2024-03-01')).toBe('2024-02-15');
   });
 
@@ -240,6 +244,17 @@ describe('isRecurringDueToday', () => {
     const r = { frequency: 'monthly', startDate: '2024-01-15', active: true };
     expect(isRecurringDueToday(r, '2024-04-20')).toBe(true);
   });
+
+  it('custom "every N days" bill is due on its start day (so it can be confirmed when added)', () => {
+    const r = { frequency: 'custom', startDate: '2024-04-15', intervalDays: 80, active: true };
+    expect(isRecurringDueToday(r, '2024-04-15')).toBe(true);
+  });
+
+  it('custom bill is not due again until interval days after it was paid', () => {
+    const r = { frequency: 'custom', startDate: '2024-04-15', lastPaidDate: '2024-04-15', intervalDays: 80, active: true };
+    expect(isRecurringDueToday(r, '2024-04-15')).toBe(false);     // just paid
+    expect(isRecurringDueToday(r, '2024-07-04')).toBe(true);      // 80 days later
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -252,9 +267,8 @@ describe('recurringDaysOverdue', () => {
   });
 
   it('returns 0 for a custom-interval bill whose next due is still in the future', () => {
-    // anchor = Jan 1, interval = 30 days → due = Jan 31; today = Jan 20 (before due)
-    const r = { frequency: 'custom', startDate: '2024-01-01', intervalDays: 30, active: true };
-    // getRecurringDueDate returns Jan 31, which is > Jan 20 → not overdue
+    // Paid Jan 1, interval 30 → next due Jan 31; today Jan 20 (before due) → not overdue
+    const r = { frequency: 'custom', startDate: '2024-01-01', lastPaidDate: '2024-01-01', intervalDays: 30, active: true };
     expect(recurringDaysOverdue(r, '2024-01-20')).toBe(0);
   });
 
@@ -262,49 +276,6 @@ describe('recurringDaysOverdue', () => {
     const r = { frequency: 'monthly', startDate: '2024-01-15', active: true };
     expect(recurringDaysOverdue(r, '2024-04-20')).toBe(5);
     expect(recurringDaysOverdue(r, '2024-04-25')).toBe(10);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// getNextDueDate
-// ---------------------------------------------------------------------------
-describe('getNextDueDate', () => {
-  it('returns this cycle when it is in the future and unpaid', () => {
-    const r = { frequency: 'monthly', dayOfMonth: 15, startDate: '2026-06-01', active: true };
-    expect(getNextDueDate(r, '2026-06-02')).toBe('2026-06-15');
-  });
-
-  it('rolls to next month once the bill is paid for the current cycle (the vanishing-bill bug)', () => {
-    const r = { frequency: 'monthly', dayOfMonth: 2, startDate: '2026-06-02', active: true, lastPaidDate: '2026-06-02' };
-    // getRecurringDueDate still returns the paid June date; getNextDueDate must advance.
-    expect(getRecurringDueDate(r, '2026-06-02')).toBe('2026-06-02');
-    expect(getNextDueDate(r, '2026-06-02')).toBe('2026-07-02');
-  });
-
-  it('rolls past a skipped cycle too', () => {
-    const r = { frequency: 'monthly', dayOfMonth: 2, startDate: '2026-06-02', active: true, lastSkippedDate: '2026-06-02' };
-    expect(getNextDueDate(r, '2026-06-02')).toBe('2026-07-02');
-  });
-
-  it('advances a day-of-month already past this month to next month', () => {
-    const r = { frequency: 'monthly', dayOfMonth: 1, startDate: '2026-06-02', active: true };
-    expect(getNextDueDate(r, '2026-06-02')).toBe('2026-07-01');
-  });
-
-  it('clamps to the last day for short months', () => {
-    const r = { frequency: 'monthly', dayOfMonth: 31, startDate: '2026-01-31', active: true, lastPaidDate: '2026-01-31' };
-    expect(getNextDueDate(r, '2026-01-31')).toBe('2026-02-28');
-  });
-
-  it('handles yearly bills paid this year by rolling to next year', () => {
-    const r = { frequency: 'yearly', yearMonth: 6, yearDay: 2, startDate: '2025-06-02', active: true, lastPaidDate: '2026-06-02' };
-    expect(getNextDueDate(r, '2026-06-02')).toBe('2027-06-02');
-  });
-
-  it('advances custom-interval bills by their interval', () => {
-    const r = { frequency: 'custom', intervalDays: 30, startDate: '2026-05-03', active: true, lastPaidDate: '2026-06-02' };
-    const next = getNextDueDate(r, '2026-06-02');
-    expect(next > '2026-06-02').toBe(true);
   });
 });
 

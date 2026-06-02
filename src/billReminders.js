@@ -38,6 +38,8 @@ function addDays(dateStr, n) {
 function isNotHandled(r, dueStr) {
   if (r.frequency === "monthly") return !(r.lastPaidDate?.slice(0, 7) === dueStr.slice(0, 7) || r.lastSkippedDate?.slice(0, 7) === dueStr.slice(0, 7));
   if (r.frequency === "yearly") return !(r.lastPaidDate?.slice(0, 4) === dueStr.slice(0, 4) || r.lastSkippedDate?.slice(0, 4) === dueStr.slice(0, 4));
+  // custom: first occurrence (no payment/skip yet) is not yet handled.
+  if (!r.lastPaidDate && !r.lastSkippedDate) return true;
   const anchor = r.lastPaidDate || r.lastSkippedDate || r.startDate;
   return anchor !== dueStr;
 }
