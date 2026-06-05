@@ -1255,6 +1255,12 @@ export default function Nomad() {
   const [pendingSync, sPendingSync] = useState(getPendingSyncCount());
   const [deadLetterCount, sDeadLetterCount] = useState(getDeadLetterCount());
   const [calLog, sCalLog] = useState(() => { try { return JSON.parse(localStorage.getItem("nomad-cal-log") || "[]"); } catch { return []; } });
+  // First-seen timestamp per active split id. `createdAt` is NOT persisted to
+  // Supabase (not in COLS.splits, no DB column), so it's lost on every reload —
+  // which made the "IOU pending 2+ days" banner fire for every synced split.
+  // This local map records when each unsettled split was first observed, giving
+  // a reliable age fallback without a DB migration.
+  const [splitSeen, sSplitSeen] = useState(() => { try { return JSON.parse(localStorage.getItem("nomad-split-seen-v1") || "{}"); } catch { return {}; } });
   const [dlBanner, sDlBanner] = useState(() => getDeadLetterCount() > 0);
   const [localBanner, sLocalBanner] = useState(localMode);
   const [online, sOnline] = useState(typeof navigator === "undefined" ? true : navigator.onLine);
@@ -1645,18 +1651,39 @@ export default function Nomad() {
   const exAll = useMemo(() => [...ex, ...settlementsAsExpenses], [ex, settlementsAsExpenses]);
   const fltExAll = useMemo(() => fm === "all" ? exAll : exAll.filter(e => mk(e.date) === fm), [exAll, fm]);
 
+  // Keep the first-seen map in sync with active splits: backfill new ids, prune
+  // settled/skipped/deleted/removed ones so it can't grow unbounded.
+  useEffect(() => {
+    sSplitSeen(prev => {
+      const now = Date.now();
+      const active = (sp || []).filter(s => s && s.id != null && !s.settled && !s.deleted_at && !s.skipped);
+      const next = {};
+      let changed = false;
+      active.forEach(s => {
+        if (prev[s.id]) { next[s.id] = prev[s.id]; }
+        else { const t = s.createdAt ? new Date(s.createdAt).getTime() : NaN; next[s.id] = Number.isFinite(t) ? t : now; changed = true; }
+      });
+      if (!changed && Object.keys(prev).length === Object.keys(next).length) return prev;
+      try { localStorage.setItem("nomad-split-seen-v1", JSON.stringify(next)); } catch { /* quota */ }
+      return next;
+    });
+  }, [sp]);
   // Stale split detection — IOUs older than 2 days that aren't settled/skipped/deleted.
-  // Uses createdAt when present; falls back to linked event.date for event splits.
-  // Without either, the split is treated as stale (forgotten old IOUs from before this feature).
+  // Age source, in priority: in-memory createdAt → linked event.date → first-seen
+  // timestamp (splitSeen). Unknown age is NOT treated as stale, so a synced split
+  // whose createdAt was dropped on reload can never falsely show "pending 2+ days".
   const staleSplits = useMemo(() => {
     const cutoffMs = Date.now() - 2 * 24 * 60 * 60 * 1000;
     return (sp || []).filter(s => {
       if (s.settled || s.deleted_at || s.skipped) return false;
-      if (s.createdAt) { const t = new Date(s.createdAt).getTime(); return Number.isFinite(t) && t < cutoffMs; }
-      if (s.eventId) { const ev = evs.find(e => e.id === s.eventId); if (ev?.date) { const t = new Date(ev.date + "T00:00:00").getTime(); return Number.isFinite(t) && t < cutoffMs; } }
-      return true;
+      let t = null;
+      if (s.createdAt) { const x = new Date(s.createdAt).getTime(); if (Number.isFinite(x)) t = x; }
+      if (t == null && s.eventId) { const ev = evs.find(e => e.id === s.eventId); if (ev?.date) { const x = new Date(ev.date + "T00:00:00").getTime(); if (Number.isFinite(x)) t = x; } }
+      if (t == null && Number.isFinite(splitSeen[s.id])) t = splitSeen[s.id];
+      if (t == null) return false;
+      return t < cutoffMs;
     });
-  }, [sp, evs]);
+  }, [sp, evs, splitSeen]);
   const stalePersonal = useMemo(() => staleSplits.filter(s => !s.eventId), [staleSplits]);
   const staleByEvent = useMemo(() => { const m = {}; staleSplits.forEach(s => { if (s.eventId) (m[s.eventId] = m[s.eventId] || []).push(s); }); return m; }, [staleSplits]);
 
