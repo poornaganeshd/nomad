@@ -23,9 +23,15 @@
 // The MERGE returns the orphan list separately so the caller can re-queue
 // only those without colliding with rows that are already in flight.
 
-export function mergeRemote({ table, remote, local, isPendingDelete, isPendingUpsert }) {
+export function mergeRemote({ table, remote, local, isPendingDelete, isPendingUpsert, remoteDeletedIds }) {
   const safeRemote = Array.isArray(remote) ? remote : [];
   const safeLocal  = Array.isArray(local)  ? local  : [];
+  // IDs the SERVER has soft-deleted (tombstones). A delete made on another
+  // device lands here; without dropping these, a stale local backup keeps the
+  // row visible forever and re-heals it → permanent cross-device divergence.
+  const deletedSet = remoteDeletedIds instanceof Set
+    ? remoteDeletedIds
+    : new Set(Array.isArray(remoteDeletedIds) ? remoteDeletedIds : []);
 
   // Step 1: drop remote rows that are pending a delete locally.
   const visibleRemote = safeRemote.filter(r => r && r.id != null && !isPendingDelete(table, r.id));
@@ -34,8 +40,13 @@ export function mergeRemote({ table, remote, local, isPendingDelete, isPendingUp
   // Step 2: classify local-only rows.
   const localOnly = safeLocal.filter(r => r && r.id != null && !remoteIds.has(r.id));
 
+  // Drop local-only rows the server has tombstoned (deleted on another device),
+  // UNLESS this device has a pending upsert for it — a genuine local re-add
+  // that should win over the remote delete.
+  const notRemotelyDeleted = localOnly.filter(r => !deletedSet.has(r.id) || isPendingUpsert(table, r.id));
+
   // Pending delete → drop (user explicitly removed it).
-  const localOnlyNotPendingDelete = localOnly.filter(r => !isPendingDelete(table, r.id));
+  const localOnlyNotPendingDelete = notRemotelyDeleted.filter(r => !isPendingDelete(table, r.id));
 
   const queued = localOnlyNotPendingDelete.filter(r => isPendingUpsert(table, r.id));
   const orphans = localOnlyNotPendingDelete.filter(r => !isPendingUpsert(table, r.id));

@@ -180,3 +180,50 @@ describe('isRecentRow', () => {
     expect(isRecentRow(undefined)).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// mergeRemote — server tombstones (cross-device delete propagation).
+// Regression: a row deleted on device A must NOT be resurrected on device B
+// from B's stale local backup. Without remoteDeletedIds the orphan logic kept
+// (and re-healed) it → different totals on different devices.
+// ---------------------------------------------------------------------------
+describe('mergeRemote — server tombstones', () => {
+  it('drops a local-only row the server has soft-deleted (delete propagates)', () => {
+    const result = mergeRemote({
+      table: 'expenses',
+      remote: [row('a')],
+      local: [row('a'), row('gone', { amount: 500 })], // 'gone' deleted on another device
+      ...baseDeps,
+      remoteDeletedIds: new Set(['gone']),
+    });
+    expect(result.next.map(r => r.id)).toEqual(['a']); // 'gone' dropped
+    expect(result.orphans).toEqual([]);                // and NOT re-healed
+  });
+
+  it('keeps a tombstoned row when THIS device has a pending re-add (upsert wins)', () => {
+    const result = mergeRemote({
+      table: 'expenses',
+      remote: [],
+      local: [row('x')],
+      ...depsWith({ pendingUpsert: [{ table: 'expenses', id: 'x' }] }),
+      remoteDeletedIds: new Set(['x']),
+    });
+    expect(result.next.map(r => r.id)).toEqual(['x']);
+  });
+
+  it('accepts a plain array for remoteDeletedIds', () => {
+    const result = mergeRemote({
+      table: 'expenses', remote: [], local: [row('d')], ...baseDeps,
+      remoteDeletedIds: ['d'],
+    });
+    expect(result.next).toEqual([]);
+  });
+
+  it('no tombstones (undefined) keeps the existing orphan-preserving behavior', () => {
+    const result = mergeRemote({
+      table: 'expenses', remote: [], local: [row('keep')], ...baseDeps,
+    });
+    expect(result.next.map(r => r.id)).toEqual(['keep']);
+    expect(result.orphans.map(r => r.id)).toEqual(['keep']);
+  });
+});
