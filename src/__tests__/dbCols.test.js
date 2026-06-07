@@ -70,6 +70,19 @@ describe("COLS — canonical DB column definitions", () => {
     expect(COLS.events).toContain("type");
   });
 
+  it("never writes created_at — it is DB-owned (DEFAULT NOW(), immutable)", () => {
+    // created_at lives only in Postgres (added in nomad_setup.sql §1d). The
+    // client must NOT send it: omitting it from every write list means INSERTs
+    // get DEFAULT NOW() and PostgREST upserts leave it untouched on conflict, so
+    // the original creation time can never be clobbered by an edit or replay.
+    // Reads still see it (sbGet uses select=*), feeding walletVerify/isRecentRow.
+    for (const [table, cols] of Object.entries(COLS)) {
+      expect(cols, `${table} must not write created_at`).not.toContain("created_at");
+      expect(cols, `${table} must not write createdAt`).not.toContain("createdAt");
+      expect(cols, `${table} must not write updated_at`).not.toContain("updated_at");
+    }
+  });
+
   it("all column names are non-empty strings", () => {
     for (const [table, cols] of Object.entries(COLS)) {
       for (const col of cols) {

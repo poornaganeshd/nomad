@@ -163,6 +163,35 @@ BEGIN
   END LOOP;
 END $$;
 
+-- ── 1d. CREATED_AT COLUMNS ──────────────────────────────────
+-- Adds an immutable created_at to the transaction tables so per-row creation
+-- time survives the Supabase round-trip. walletVerify (staleness badge),
+-- isRecentRow (self-heal age guard in syncMerge.js), and future time-based
+-- features need a STABLE creation stamp — updated_at is bumped on every edit by
+-- nomad_touch_updated_at, so it cannot serve as creation time.
+--
+-- created_at is DB-OWNED: the client never sends it (it's intentionally absent
+-- from COLS in src/dbCols.js), so DEFAULT NOW() stamps it on INSERT and, on a
+-- PostgREST upsert (resolution=merge-duplicates), the ON CONFLICT UPDATE only
+-- sets the columns present in the payload — so created_at is preserved across
+-- edits/offline-replays. Idempotent — safe on re-run.
+DO $$
+DECLARE
+  t TEXT;
+BEGIN
+  FOR t IN SELECT unnest(ARRAY[
+    'expenses','incomes','transfers','settlements'
+  ]) LOOP
+    EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()', t);
+    -- Backfill rows that pre-date this migration: their created_at was just
+    -- defaulted to the migration timestamp, but updated_at (added earlier,
+    -- stamped at insert) better approximates true creation. Only rows whose
+    -- freshly-defaulted created_at post-dates updated_at are pre-existing, so
+    -- re-runs and future inserts (where created_at == updated_at) are untouched.
+    EXECUTE format('UPDATE %I SET created_at = updated_at WHERE updated_at IS NOT NULL AND created_at > updated_at', t);
+  END LOOP;
+END $$;
+
 -- ── 2. EMAIL REPORT TABLES ───────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS report_schedules (

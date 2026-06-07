@@ -1689,23 +1689,39 @@ export default function Nomad() {
   const mBal = roundMoney(Object.values(wBal).reduce((s, v) => s + v, 0));
   // Per-wallet verification state. NOMAD can't read your bank, so "verified"
   // means "you recently confirmed the real balance here and nothing has piled
-  // up since". A wallet goes stale after enough new activity (3 txns) OR time
+  // up since". A wallet goes stale on the first new txn OR after time
   // (3 days), and shows "drift" when your LAST reconcile found a non-zero gap
   // (i.e. you'd been missing entries — patch the balance AND add what's missing).
-  const VFY_STALE_TX = 3, VFY_STALE_DAYS = 3, VFY_GAP_TOL = 1;
+  const VFY_STALE_TX = 1, VFY_STALE_DAYS = 3, VFY_GAP_TOL = 1;
   const walletVerify = useMemo(() => {
-    const txTs = (tx) => { const t = tx.created_at || tx.createdAt || tx.updated_at; return t ? new Date(t).getTime() : (tx.date ? new Date(tx.date + "T23:59:59").getTime() : 0); };
     const out = {};
     wallets.forEach(w => {
       const logs = calLog.filter(l => l.wId === w.id).sort((a, b) => b.ts - a.ts);
       const last = logs[0] || null;
-      if (!last) { out[w.id] = { state: "new", last: null, newTx: 0, days: null }; return; }
+      // Count activity since the last reconcile — or all activity when the wallet
+      // was never reconciled. A never-verified wallet shouldn't park in a dead
+      // "Verify" forever: once it has any activity it escalates to "stale"
+      // ("Check") to nudge a first reconcile; only a truly empty wallet stays "new".
+      const sinceTs = last ? last.ts : 0;
+      const sinceDate = last ? last.date : null;
+      // A txn is "new since verify" if it happened after the reconcile. Rows added
+      // this session carry a precise created_at; rows reloaded from Supabase don't
+      // (the core tables have no created_at column), so fall back to the txn DATE
+      // and compare days — NOT a 23:59:59 stamp, which would make a same-day txn
+      // that already existed at reconcile time falsely un-verify the wallet.
+      const isNewSince = (t) => {
+        const precise = t.created_at || t.createdAt || t.updated_at;
+        if (precise) return new Date(precise).getTime() > sinceTs;
+        if (!t.date) return false;
+        return last ? t.date > sinceDate : true;
+      };
       let newTx = 0;
-      const cnt = (arr, hit) => arr.forEach(t => { if (hit(t) && txTs(t) > last.ts) newTx++; });
+      const cnt = (arr, hit) => arr.forEach(t => { if (hit(t) && isNewSince(t)) newTx++; });
       cnt(ex, t => (t.walletId || "upi_lite") === w.id);
       cnt(inc, t => (t.walletId || "bank") === w.id);
       cnt(tr, t => t.fromWallet === w.id || t.toWallet === w.id);
       cnt(stl, t => t.walletId === w.id);
+      if (!last) { out[w.id] = { state: newTx > 0 ? "stale" : "new", last: null, newTx, days: null }; return; }
       const days = Math.floor((Date.now() - last.ts) / 86400000);
       let state;
       if (Math.abs(last.gap || 0) >= VFY_GAP_TOL) state = "drift";
@@ -1931,11 +1947,6 @@ export default function Nomad() {
       const updated = [entry, ...prev].slice(0, 50);
       localStorage.setItem("nomad-cal-log", JSON.stringify(updated));
       sCalLog(updated);
-    } catch { }
-    try {
-      const snaps = JSON.parse(localStorage.getItem("nomad-cal-snaps-v1") || "[]");
-      snaps.push({ walletId: wId, balance: roundMoney(desired), date: localDateKey(), ts: Date.now() });
-      localStorage.setItem("nomad-cal-snaps-v1", JSON.stringify(snaps));
     } catch { }
     showT(gap === 0 ? `✓ ${wName} verified — balance in sync` : `${gap > 0 ? "Added" : "Removed"} ${fmt(Math.abs(gap))} — reconciliation logged`, "success");
   };
@@ -2280,7 +2291,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         {loaded && ex.length === 0 && inc.length === 0 && <div style={{ ...cc, padding: "18px 20px", marginBottom: 14, borderLeft: "3px solid #7B8CDE" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}><HandWaving size={16} weight="fill" />Welcome to NOMAD</div><div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6, marginBottom: 12 }}>Track expenses, income, and recurring bills.<br />Tap <strong>Add</strong> below to log your first transaction.</div><div style={{ display: "flex", gap: 8 }}><button onClick={() => sTab("add")} style={{ flex: 1, padding: "9px", border: "none", borderRadius: 9, background: "#E07A5F", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>+ Add Expense</button><button onClick={() => sTab("settings")} style={{ padding: "9px 14px", border: "1.5px solid var(--border)", borderRadius: 9, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Settings</button></div></div>}
         {(() => { const saved = roundMoney(tI - tE); const savedPct = tI > 0 ? Math.round((saved / tI) * 100) : null; return <div style={{ ...cc, padding: "26px 22px 20px", marginBottom: 16, textAlign: "center" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 11, color: "var(--muted)", letterSpacing: "1.5px", textTransform: "uppercase", fontWeight: 500 }}>Total Balance</div><div style={{ fontSize: 36, fontWeight: 700, fontFamily: "var(--font-h)", color: mBal >= 0 ? "#6BAA75" : "#E07A5F", marginTop: 6, lineHeight: 1.2 }}>{fmt(mBal)}</div><div style={{ borderTop: "1px dashed var(--border)", marginTop: 18, paddingTop: 16 }}><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 4 }}><div><div style={{ fontFamily: "var(--font-h)", fontSize: 9, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600 }}>IN</div><div style={{ fontFamily: "var(--font-h)", fontSize: 13, color: "#6BAA75", marginTop: 3, fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(tI)}</div></div><div style={{ borderLeft: "1px solid var(--border)", borderRight: "1px solid var(--border)", padding: "0 4px" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 9, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600 }}>OUT</div><div style={{ fontFamily: "var(--font-h)", fontSize: 13, color: "#E07A5F", marginTop: 3, fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(tE)}</div></div><div><div style={{ fontFamily: "var(--font-h)", fontSize: 9, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600 }}>{saved >= 0 ? "SAVED" : "OVERSPEND"}</div><div style={{ fontFamily: "var(--font-h)", fontSize: 13, color: saved >= 0 ? "#7B8CDE" : "#D4726A", marginTop: 3, fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(Math.abs(saved))}</div>{savedPct !== null && saved >= 0 && <div style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", marginTop: 1, fontWeight: 600 }}>{savedPct}% of in</div>}</div></div></div></div>; })()}
 
-        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>{wallets.map(w => { const b = roundMoney(wBal[w.id] || 0); return <div key={w.id} onClick={() => sCalW(w)} className="card-hover" style={{ ...cc, flex: 1, minWidth: 0, padding: "12px 10px", cursor: "pointer", borderLeft: `3px solid ${w.color}`, borderRadius: 14 }}><div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 8 }}><DI2 id={w.id} accent={w.neon || w.color} size={14} /><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, flex: 1 }}>{w.name}</span>{w.id === "cash" && <button onClick={e => { e.stopPropagation(); sRecountW(w); }} title="Count cash" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12, padding: "1px 3px", lineHeight: 1, opacity: 0.5, flexShrink: 0 }}>⟳</button>}</div><div style={{ fontSize: 16, fontWeight: 700, fontFamily: "var(--font-h)", color: b >= 0 ? w.color : "#E07A5F" }}>{fmt(b)}</div>{(() => { const v = walletVerify[w.id] || { state: "new" }; const cfg = { ok: { c: "#6BAA75", icon: <IconCheck size={9} stroke={3} />, t: "Verified" }, stale: { c: "#FBBF24", icon: <IconClock size={9} />, t: "Check" }, drift: { c: "#D4726A", icon: <Warning size={9} weight="fill" />, t: "Drift" }, new: { c: "var(--muted)", icon: <Scales size={9} />, t: "Verify" } }[v.state]; return <div title={v.state === "drift" ? `Last check was off by ${fmt(Math.abs(v.last.gap))} — tap to reconcile & find the missing entry` : v.state === "stale" ? `${v.newTx ? v.newTx + " new txns" : v.days + "d"} since last verified — tap to reconcile` : v.state === "ok" ? `Verified ${v.last.date}` : "Never verified — tap to set your real balance"} style={{ marginTop: 5, display: "inline-flex", alignItems: "center", gap: 3, fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 700, color: cfg.c, background: v.state === "new" ? "var(--bg)" : cfg.c + "1A", borderRadius: 5, padding: "2px 5px", lineHeight: 1, maxWidth: "100%" }}>{cfg.icon}<span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cfg.t}</span></div>; })()}</div> })}</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>{wallets.map(w => { const b = roundMoney(wBal[w.id] || 0); return <div key={w.id} onClick={() => sCalW(w)} className="card-hover" style={{ ...cc, flex: 1, minWidth: 0, padding: "12px 10px", cursor: "pointer", borderLeft: `3px solid ${w.color}`, borderRadius: 14 }}><div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 8 }}><DI2 id={w.id} accent={w.neon || w.color} size={14} /><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, flex: 1 }}>{w.name}</span>{w.id === "cash" && <button onClick={e => { e.stopPropagation(); sRecountW(w); }} title="Count cash" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12, padding: "1px 3px", lineHeight: 1, opacity: 0.5, flexShrink: 0 }}>⟳</button>}</div><div style={{ fontSize: 16, fontWeight: 700, fontFamily: "var(--font-h)", color: b >= 0 ? w.color : "#E07A5F" }}>{fmt(b)}</div>{(() => { const v = walletVerify[w.id] || { state: "new" }; const cfg = { ok: { c: "#6BAA75", icon: <IconCheck size={9} stroke={3} />, t: "Verified" }, stale: { c: "#FBBF24", icon: <IconClock size={9} />, t: "Check" }, drift: { c: "#D4726A", icon: <Warning size={9} weight="fill" />, t: "Drift" }, new: { c: "var(--muted)", icon: <Scales size={9} />, t: "Verify" } }[v.state]; return <div title={v.state === "drift" ? `Last check was off by ${fmt(Math.abs(v.last.gap))} — tap to reconcile & find the missing entry` : v.state === "stale" ? `${v.newTx ? v.newTx + " new txn" + (v.newTx === 1 ? "" : "s") : v.days + "d"} ${v.last ? "since last verified" : "logged — never verified"} — tap to reconcile` : v.state === "ok" ? `Verified ${v.last.date}` : "Never verified — tap to set your real balance"} style={{ marginTop: 5, display: "inline-flex", alignItems: "center", gap: 3, fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 700, color: cfg.c, background: v.state === "new" ? "var(--bg)" : cfg.c + "1A", borderRadius: 5, padding: "2px 5px", lineHeight: 1, maxWidth: "100%" }}>{cfg.icon}<span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cfg.t}</span></div>; })()}</div> })}</div>
 
         <LionM balance={mBal} dancing={ld} aiMsg={lionMsg} aiLoading={lionMsgLoading} onTap={() => sChatOpen(true)} />
         {(() => { const sl = scoreLabel(finScore.score); return <div style={{ ...cc, padding: "10px 16px", marginBottom: 12, display: "flex", alignItems: "center", gap: 10 }}><div style={{ width: 44, height: 44, borderRadius: "50%", border: `2.5px solid ${sl.color}`, background: sl.color + "18", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><span style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 800, color: sl.color }}>{finScore.score}</span></div><div style={{ flex: 1 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, color: "var(--text)" }}>Health Score — {sl.label}</div><div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>Savings · Bills · Spread · Logging</div></div>{finStreak > 1 && <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 8, background: "#FBBF2415", border: "1px solid #FBBF24" }}><Fire size={14} weight="fill" color="#FBBF24" /><span style={{ fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, color: "#FBBF24" }}>{finStreak}d</span></div>}</div>; })()}
