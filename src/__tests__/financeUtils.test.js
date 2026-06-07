@@ -10,6 +10,7 @@ import {
   recurringDaysOverdue,
   distributeAmount,
   historySortCompare,
+  itemTimestamp,
 } from '../financeUtils.js';
 
 // ---------------------------------------------------------------------------
@@ -403,5 +404,21 @@ describe('historySortCompare', () => {
     const third = [...first.map(id => items.find(i => i.id === id))].sort(historySortCompare).map(i => i.id);
     expect(first).toEqual(second);
     expect(first).toEqual(third);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// itemTimestamp
+// ---------------------------------------------------------------------------
+describe('itemTimestamp', () => {
+  it('does not derive a bogus timestamp from a UUID id (dashes present)', () => {
+    // parseInt('ffffffff', 36) ≈ 1.2e12 — without the dash guard this slipped
+    // through the sanity window and mis-dated the row to ~2008.
+    expect(itemTimestamp({ id: 'ffffffff-1111-2222-3333-444444444444' })).toBe(0);
+  });
+
+  it('prefers created_at over any id heuristic', () => {
+    const t = Date.parse('2026-05-19T10:00:00Z');
+    expect(itemTimestamp({ id: 'ffffffff-aaaa', created_at: '2026-05-19T10:00:00Z' })).toBe(t);
   });
 });

@@ -308,6 +308,22 @@ describe('flushSyncQueue', () => {
     expect(getPendingSyncCount()).toBe(0);
   });
 
+  it('does not clobber a write enqueued during an in-flight flush', async () => {
+    const { flushSyncQueue, queueSupabaseRequest, getPendingSyncCount } = await import('../offlineSync.js');
+    queueSupabaseRequest(makeItem({ path: '/a' }));
+    // fetch resolving for /a also simulates a concurrent write landing in the
+    // queue mid-flush. The old code wrote back a snapshot-derived array and
+    // dropped it; reconciling against the live queue must preserve it.
+    global.fetch = vi.fn().mockImplementation(async () => {
+      queueSupabaseRequest(makeItem({ path: '/b-added-mid-flush' }));
+      return { ok: true };
+    });
+
+    const result = await flushSyncQueue();
+    expect(result.synced).toBe(1);          // /a flushed
+    expect(getPendingSyncCount()).toBe(1);  // /b survived, not clobbered
+  });
+
   it('retains 5xx item in queue but continues processing subsequent items', async () => {
     const { flushSyncQueue, queueSupabaseRequest } = await import('../offlineSync.js');
     queueSupabaseRequest(makeItem({ path: '/first' }));

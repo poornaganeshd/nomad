@@ -123,6 +123,20 @@ describe("parseBankCsv", () => {
     expect(rows).toEqual([{ date: "2024-01-15", amount: 100, note: "Shop, Inc", type: "expense" }]);
   });
 
+  it("reads DD/MM dates with day <= 12 as Indian, not US MM/DD", () => {
+    // Regression: new Date("05/11/2024") parses as US May 11. For an Indian
+    // statement (DD/MM) this is 5 November. day<=12 made both interpretations
+    // valid, so the swap was silent.
+    const csv = "Date,Narration,Debit,Credit\n05/11/2024,Diwali shopping,2500,";
+    const rows = parseBankCsv(csv);
+    expect(rows).toEqual([{ date: "2024-11-05", amount: 2500, note: "Diwali shopping", type: "expense" }]);
+  });
+
+  it("still parses ISO YYYY-MM-DD dates", () => {
+    const rows = parseBankCsv("Date,Description,Amount\n2024-03-07,Book,300");
+    expect(rows).toEqual([{ date: "2024-03-07", amount: 300, note: "Book", type: "expense" }]);
+  });
+
   it("skips rows with no usable date or amount", () => {
     const csv = ["Date,Narration,Debit,Credit", "not-a-date,Foo,10,", "15/01/2024,Bar,0,0"].join("\n");
     expect(parseBankCsv(csv)).toEqual([]);

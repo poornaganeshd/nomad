@@ -67,7 +67,24 @@ export const parseBankCsv = (text) => {
     if (cells.length < 2) continue;
     const rawDate = dateCol >= 0 ? cells[dateCol] : null;
     if (!rawDate) continue;
-    const parsedDate = (() => { const d = new Date(rawDate); if (!Number.isNaN(d.getTime())) return localDateKey(d); const m = rawDate.match(/^(\d{2})[/-](\d{2})[/-](\d{2,4})$/); if (m) { const y = m[3].length === 2 ? "20" + m[3] : m[3]; return `${y}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`; } return null; })();
+    const parsedDate = (() => {
+      // DD/MM/YYYY or DD-MM-YYYY (Indian bank format) FIRST. `new Date("05/11/2024")`
+      // mis-reads slash dates as US MM/DD and silently swaps day↔month for any day ≤ 12
+      // (so 5 Nov becomes 11 May). Tests only used day=15 (>12), which forced Date to
+      // fail and hid the swap.
+      const m = rawDate.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+      if (m) {
+        const day = Number(m[1]), mon = Number(m[2]);
+        if (mon >= 1 && mon <= 12 && day >= 1 && day <= 31) {
+          const y = m[3].length === 2 ? "20" + m[3] : m[3];
+          return `${y}-${String(mon).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+        }
+      }
+      // ISO (YYYY-MM-DD) or month-name formats — let Date parse.
+      const d = new Date(rawDate);
+      if (!Number.isNaN(d.getTime())) return localDateKey(d);
+      return null;
+    })();
     if (!parsedDate) continue;
     const cleanAmt = v => parseFloat((v || "").replace(/[^0-9.]/g, "")) || 0;
     const debit = debitCol >= 0 ? cleanAmt(cells[debitCol]) : 0;

@@ -101,6 +101,23 @@ describe('mergeRemote', () => {
     expect(result.orphans).toEqual([]);
   });
 
+  it('keeps the LOCAL row when it exists in both but a local upsert is still pending', () => {
+    // Offline receipt migration/discard: the local row has the new value and a
+    // queued upsert that hasn't flushed. A remote read before the queue drains
+    // must NOT revert the edit back to the stale remote value.
+    const local  = [row('a', { amount: 100, receipt_url: 'https://cloudinary/r.jpg' })];
+    const remote = [row('a', { amount: 100, receipt_url: 'data:image/jpeg;base64,AAAA' })];
+    const result = mergeRemote({
+      table: 'expenses',
+      remote,
+      local,
+      ...depsWith({ pendingUpsert: [{ table: 'expenses', id: 'a' }] }),
+    });
+    expect(result.next).toHaveLength(1);
+    expect(result.next[0].receipt_url).toBe('https://cloudinary/r.jpg');
+    expect(result.orphans).toEqual([]);
+  });
+
   it('puts local-only rows BEFORE remote so unsynced additions stay on top', () => {
     const result = mergeRemote({
       table: 'expenses',

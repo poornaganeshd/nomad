@@ -51,10 +51,21 @@ export function mergeRemote({ table, remote, local, isPendingDelete, isPendingUp
   const queued = localOnlyNotPendingDelete.filter(r => isPendingUpsert(table, r.id));
   const orphans = localOnlyNotPendingDelete.filter(r => !isPendingUpsert(table, r.id));
 
-  // Local rows go first so the newest unsynced additions stay on top of
+  // Rows present in BOTH local and remote: the remote copy is normally the
+  // server-of-record and wins. EXCEPTION — if this device still has a pending
+  // upsert queued for that id (an offline edit that hasn't flushed yet, e.g.
+  // migrating a receipt to Cloudinary or discarding a local copy), keep the
+  // LOCAL row. Otherwise a remote read that lands before the queue drains
+  // reverts the edit, and the change appears to "come back" until sync runs.
+  const localById = new Map(safeLocal.filter(r => r && r.id != null).map(r => [r.id, r]));
+  const reconciledRemote = visibleRemote.map(r =>
+    isPendingUpsert(table, r.id) && localById.has(r.id) ? localById.get(r.id) : r
+  );
+
+  // Local-only rows go first so the newest unsynced additions stay on top of
   // history lists; remote rows follow in their server-supplied order.
   return {
-    next: [...queued, ...orphans, ...visibleRemote],
+    next: [...queued, ...orphans, ...reconciledRemote],
     orphans,
   };
 }

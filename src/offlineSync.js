@@ -300,7 +300,13 @@ export const flushSyncQueue = async () => {
 
   const work = (async () => {
 
-  const remaining = [];
+  // Track outcomes by item id rather than rebuilding the queue from the stale
+  // snapshot. The awaits below yield to the event loop, so a write can be
+  // enqueued mid-flush (e.g. a direct send that 5xx'd). Writing back a
+  // snapshot-derived array would clobber it. We reconcile against the LIVE
+  // queue at the end instead.
+  const doneIds = new Set();       // fully resolved → drop from queue
+  const retryUpdates = new Map();  // id → bumped _retries (still pending)
   let synced = 0;
   let progressedDuringFlush = false;
 
@@ -313,6 +319,7 @@ export const flushSyncQueue = async () => {
       const replayItem = { ...item, headers: replayHeaders };
       const response = await performRequest(replayItem);
       if (response.ok) {
+        doneIds.add(item.id);
         synced += 1;
         progressedDuringFlush = true;
         continue;
@@ -327,9 +334,10 @@ export const flushSyncQueue = async () => {
           if (!isHealItem(item)) {
             notifyDrops({ kind: "dead-letter", status: response.status, item });
           }
+          doneIds.add(item.id);
           progressedDuringFlush = true;
         } else {
-          remaining.push({ ...item, _retries: retries });
+          retryUpdates.set(item.id, retries);
         }
         continue;
       }
@@ -337,6 +345,7 @@ export const flushSyncQueue = async () => {
       // Conflict (412 Precondition Failed): a newer server version exists.
       // Discard this write and notify the UI — it will never succeed as-is.
       if (response.status === 412) {
+        doneIds.add(item.id);
         progressedDuringFlush = true;
         notifyDrops({ kind: "conflict", status: 412, item });
         continue;
@@ -345,6 +354,7 @@ export const flushSyncQueue = async () => {
       // Definitive client-side reject (4xx) OR opaque/CORS (status: 0).
       // Drop the item; notify the UI only for user-driven writes so heal
       // retries can't spam toasts the user can't act on.
+      doneIds.add(item.id);
       progressedDuringFlush = true;
       if (!isHealItem(item)) {
         let code = null;
@@ -362,12 +372,19 @@ export const flushSyncQueue = async () => {
       }
       continue;
     } catch {
-      // AbortError, network failure, DNS — keep this and the rest, stop.
-      remaining.push(item, ...queue.slice(index + 1));
+      // AbortError, network failure, DNS — stop here. The current item and the
+      // rest stay queued simply by being absent from doneIds/retryUpdates.
       break;
     }
   }
 
+  // Reconcile against the LIVE queue (not the snapshot) so a write enqueued
+  // mid-flush survives: drop resolved ids, apply bumped retry counts, keep
+  // everything else — unprocessed snapshot items AND anything added during flush.
+  const live = readQueue();
+  const remaining = live
+    .filter(q => !doneIds.has(q.id))
+    .map(q => retryUpdates.has(q.id) ? { ...q, _retries: retryUpdates.get(q.id) } : q);
   writeQueue(remaining);
 
   if (remaining.length === 0) {

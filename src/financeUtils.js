@@ -125,7 +125,11 @@ export const itemTimestamp = (it) => {
   if (it?.created_at) { const n = Date.parse(it.created_at); if (Number.isFinite(n)) return n; }
   if (it?.createdAt)  { const n = Date.parse(it.createdAt);  if (Number.isFinite(n)) return n; }
   const id = String(it?.id || "");
-  const m = id.match(/^([0-9a-z]{8,11})/i);
+  // Only the base36 uid() fallback encodes Date.now() in its prefix; a
+  // crypto.randomUUID() id contains dashes and its hex prefix can parse to a
+  // spurious ~1e12 value that slips through the sanity window and mis-dates the
+  // row. Skip dashed (UUID) ids — they fall through to updated_at / 0.
+  const m = !id.includes("-") && id.match(/^([0-9a-z]{8,11})/i);
   if (m) {
     const n = parseInt(m[1], 36);
     // Sanity check: timestamp in ms must be after year 2001 (1e12) and before year 5000 (~1e14)
