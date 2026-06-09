@@ -99,9 +99,15 @@ export default function CalendarView({
         style={{
           minHeight: 44,
           minWidth: 0,
+          boxSizing: "border-box",
           borderRadius: 10,
           background: isSel ? "#E07A5F" : cellColor(dat.exp),
-          border: isSel ? "2px solid #E07A5F" : isT ? "2px solid var(--text)" : "1px solid var(--border)",
+          // Keep the border width constant across every cell so the inner
+          // content width never changes — the selected/today ring is drawn as
+          // an inset shadow instead, which doesn't steal layout space (a 2px
+          // border used to shrink the cell enough to truncate the amount).
+          border: "1px solid var(--border)",
+          boxShadow: isSel ? "inset 0 0 0 2px #E07A5F" : isT ? "inset 0 0 0 2px var(--text)" : "none",
           padding: 4,
           cursor: "pointer",
           display: "flex",
