@@ -215,123 +215,6 @@ function LionM({ balance: bal, dancing, aiMsg, aiLoading, onTap }) {
   return <div style={{ display: "flex", alignItems: "flex-end", gap: 12, padding: "12px 0", cursor: onTap ? "pointer" : "default" }} onClick={onTap}><Lion mood={mood} dancing={dancing} /><div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: "14px 14px 14px 4px", padding: "10px 14px", fontSize: 13, color: "var(--ts)", maxWidth: 220, fontFamily: "var(--font-b)", lineHeight: 1.5 }}>{aiLoading ? <span style={{ color: "var(--muted)", fontStyle: "italic" }}>Thinking…</span> : displayMsg}</div></div>
 }
 
-function Chart({ expenses: ex, incomes: inc, settlements: stl, months: ms, period = "month" }) {
-  const sumAmt = arr => arr.reduce((s, x) => s + Number(x.amount || 0), 0);
-  const addDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
-  const startOfWeek = (date) => { const d = new Date(date); d.setDate(d.getDate() - d.getDay()); return d; };
-  const allDates = [...ex, ...inc, ...stl].map(x => x.date).filter(Boolean).sort();
-  let buckets = [];
-
-  if (period === "day") {
-    const today = new Date();
-    buckets = Array.from({ length: 14 }, (_, i) => {
-      const date = addDays(today, -(13 - i));
-      const key = localDateKey(date);
-      return { key, label: new Date(`${key}T00:00:00`).getDate().toString() };
-    });
-  } else if (period === "week") {
-    const currentWeek = startOfWeek(new Date());
-    buckets = Array.from({ length: 8 }, (_, i) => {
-      const start = addDays(currentWeek, -(7 * (7 - i)));
-      const key = localDateKey(start);
-      return { key, label: new Date(`${key}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" }) };
-    });
-  } else if (period === "month") {
-    const monthKeys = allDates.length
-      ? [...new Set(allDates.map(d => d.slice(0, 7)))].sort().slice(-12)
-      : ms.slice(-12);
-    buckets = monthKeys.map(key => ({ key, label: ml(key) }));
-  } else if (period === "year") {
-    const years = [...new Set(allDates.map(d => d.slice(0, 4)))].sort();
-    buckets = years.map(key => ({ key, label: key }));
-  }
-
-  if (buckets.length < 1) return <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: 24, fontFamily: "var(--font-b)" }}>Add transactions to see trends</p>;
-
-  const data = buckets.map(({ key, label }) => {
-    let income = 0, spent = 0;
-    if (period === "day") {
-      income = sumAmt(inc.filter(x => x.date === key));
-      spent = sumAmt(ex.filter(x => x.date === key))
-        + sumAmt(stl.filter(x => x.date === key && x.direction === "owe"))
-        - sumAmt(stl.filter(x => x.date === key && x.direction === "owed"));
-    } else if (period === "week") {
-      const end = localDateKey(addDays(new Date(`${key}T00:00:00`), 6));
-      income = sumAmt(inc.filter(x => x.date >= key && x.date <= end));
-      spent = sumAmt(ex.filter(x => x.date >= key && x.date <= end))
-        + sumAmt(stl.filter(x => x.date >= key && x.date <= end && x.direction === "owe"))
-        - sumAmt(stl.filter(x => x.date >= key && x.date <= end && x.direction === "owed"));
-    } else if (period === "month") {
-      income = sumAmt(inc.filter(x => mk(x.date) === key));
-      spent = sumAmt(ex.filter(x => mk(x.date) === key))
-        + sumAmt(stl.filter(x => mk(x.date) === key && x.direction === "owe"))
-        - sumAmt(stl.filter(x => mk(x.date) === key && x.direction === "owed"));
-    } else {
-      income = sumAmt(inc.filter(x => x.date?.startsWith(key)));
-      spent = sumAmt(ex.filter(x => x.date?.startsWith(key)))
-        + sumAmt(stl.filter(x => x.date?.startsWith(key) && x.direction === "owe"))
-        - sumAmt(stl.filter(x => x.date?.startsWith(key) && x.direction === "owed"));
-    }
-    const safeSpent = Math.max(0, spent);
-    const net = income - safeSpent;
-    return { label, income, spent: safeSpent, net, netArea: Math.max(0, net), hasData: income > 0 || safeSpent > 0 };
-  });
-
-  if (data.every(p => p.income === 0 && p.spent === 0)) return <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: 24, fontFamily: "var(--font-b)" }}>No data for this period</p>;
-
-  if (period === "day") {
-    data.forEach((d, i) => { d.rollingAvg = i >= 6 ? data.slice(i - 6, i + 1).reduce((s, x) => s + x.spent, 0) / 7 : undefined; });
-  }
-
-  const allVals = data.flatMap(d => [d.income, d.spent, d.netArea]).filter(v => v > 0);
-  const sorted = [...allVals].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)] || 1;
-  const maxVal = Math.max(...allVals, 1);
-  const useLog = maxVal > 5 * median && allVals.length > 3;
-
-  const fmtY = v => { if (!v || v < 1) return ""; if (v >= 100000) return `₹${(v / 100000).toFixed(1)}L`; if (v >= 1000) return `₹${(v / 1000).toFixed(0)}k`; return `₹${Math.round(v)}`; };
-
-  const IncomeDot = ({ cx, cy, payload }) => payload.hasData
-    ? <circle cx={cx} cy={cy} r={4} fill="var(--card)" stroke="#6BAA75" strokeWidth={2} />
-    : <circle cx={cx} cy={cy} r={3} fill="var(--muted)" opacity={0.28} />;
-
-  const xInterval = period === "day" ? 2 : period === "week" ? 1 : 0;
-
-  return (
-    <ResponsiveContainer width="100%" height={210}>
-      <ComposedChart data={data} margin={{ top: 10, right: 4, bottom: 20, left: 0 }}>
-        <defs>
-          <linearGradient id="netGreen" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="5%" stopColor="#6BAA75" stopOpacity={0.22} />
-            <stop offset="95%" stopColor="#6BAA75" stopOpacity={0} />
-          </linearGradient>
-        </defs>
-        <XAxis dataKey="label" tick={{ fontSize: 9, fontFamily: "var(--font-h)", fill: "var(--muted)" }} tickLine={false} axisLine={false} interval={xInterval} />
-        <YAxis scale={useLog ? "log" : "auto"} domain={useLog ? [1, "auto"] : [0, "auto"]} tickFormatter={fmtY} tick={{ fontSize: 9, fontFamily: "var(--font-h)", fill: "var(--muted)" }} tickLine={false} axisLine={false} width={44} allowDataOverflow={useLog} />
-        <Tooltip content={({ active, payload, label }) => {
-          if (!active || !payload?.length) return null;
-          const ip = payload.find(p => p.dataKey === "income"), sp = payload.find(p => p.dataKey === "spent"), np = payload.find(p => p.dataKey === "netArea")?.payload?.net;
-          return <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", fontFamily: "var(--font-h)", fontSize: 12, boxShadow: "0 2px 12px rgba(0,0,0,0.1)" }}><div style={{ fontWeight: 700, marginBottom: 4, color: "var(--ts)", fontSize: 11 }}>{label}</div>{ip && <div style={{ color: "#6BAA75", fontWeight: 600 }}>Income: {fmt(ip.value || 0)}</div>}{sp && <div style={{ color: "#E07A5F", fontWeight: 600 }}>Spent: {fmt(sp.value || 0)}</div>}<div style={{ color: np >= 0 ? "#7B8CDE" : "#D4726A", fontWeight: 600 }}>Net: {fmt(np || 0)}</div></div>;
-        }} />
-        <Area dataKey="netArea" fill="url(#netGreen)" stroke="none" />
-        <Bar dataKey="spent" fill="#E07A5F" fillOpacity={0.82} radius={[4, 4, 0, 0]} maxBarSize={18} />
-        <Line dataKey="income" stroke="#6BAA75" strokeWidth={2.5} dot={<IncomeDot />} activeDot={{ r: 5, fill: "#6BAA75" }} />
-        {period === "day" && data.some(d => d.rollingAvg !== undefined) && <Line dataKey="rollingAvg" stroke="#7B8CDE" strokeWidth={1.5} strokeDasharray="4 3" dot={false} activeDot={false} />}
-      </ComposedChart>
-    </ResponsiveContainer>
-  );
-}
-
-function Heatmap({ expenses: ex, onDayClick, selectedDay = null }) {
-  const today = new Date(), [vY, sY] = useState(today.getFullYear()), [vM, sM] = useState(today.getMonth()); const goB = () => { if (vM === 0) { sM(11); sY(y => y - 1) } else sM(m => m - 1) }; const goF = () => { if (vY === today.getFullYear() && vM === today.getMonth()) return; if (vM === 11) { sM(0); sY(y => y + 1) } else sM(m => m + 1) }; const iC = vY === today.getFullYear() && vM === today.getMonth();
-  const fd = new Date(vY, vM, 1).getDay(), dim = new Date(vY, vM + 1, 0).getDate(), mn = new Date(vY, vM).toLocaleDateString("en-US", { month: "long", year: "numeric" }), pfx = `${vY}-${String(vM + 1).padStart(2, "0")}`;
-  const dt = useMemo(() => { const m = {}; ex.forEach(e => { if (typeof e.date === "string" && e.date.startsWith(pfx)) m[e.date] = (m[e.date] || 0) + e.amount; }); return m; }, [ex, pfx]); const mx = Math.max(...Object.values(dt), 1), mt = Object.values(dt).reduce((s, v) => s + v, 0), ad = Object.keys(dt).length;
-  const gc = a => { if (!a) return "var(--border)"; const r = a / mx; return r < 0.25 ? "#6BAA75" : r < 0.5 ? "#FBBF24" : r < 0.75 ? "#E07A5F" : "#D4726A" };
-  const cells = []; for (let i = 0; i < fd; i++)cells.push(<div key={`e${i}`} style={{ width: 36, height: 36 }} />); for (let d = 1; d <= dim; d++) { const ds = `${pfx}-${String(d).padStart(2, "0")}`, a = dt[ds] || 0, isT = iC && d === today.getDate(), isSel = selectedDay === ds; cells.push(<div key={d} onClick={onDayClick ? () => onDayClick(isSel ? null : ds) : undefined} style={{ width: 36, height: 36, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", background: gc(a), color: a ? "#fff" : "var(--muted)", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: isT || isSel ? 700 : 500, border: isSel ? "2px solid #E07A5F" : isT ? "2px solid var(--text)" : "2px solid transparent", cursor: onDayClick ? "pointer" : "default", boxShadow: isSel ? "0 0 0 2px #E07A5F40" : "none" }}>{d}</div>) }
-  const nb = { background: "none", border: "1px solid var(--border)", borderRadius: 8, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--muted)", fontSize: 14 };
-  return <div style={{ ...cc, padding: 16, marginBottom: 14, position: "relative", overflow: "hidden" }}><div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "#FBBF24" }} /><div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}><button onClick={goB} style={nb}>←</button><div style={{ textAlign: "center" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{mn}</div>{!iC && <button onClick={() => { sY(today.getFullYear()); sM(today.getMonth()) }} style={{ background: "none", border: "none", fontSize: 10, color: "#E07A5F", cursor: "pointer", fontFamily: "var(--font-h)", fontWeight: 600, marginTop: 2 }}>Jump to today</button>}</div><button onClick={goF} style={{ ...nb, opacity: iC ? 0.3 : 1 }}>→</button></div><div style={{ display: "flex", gap: 8, marginBottom: 12 }}>{[{ l: "TOTAL", v: fmt(mt), c: "#E07A5F" }, { l: "AVG/DAY", v: fmt(ad > 0 ? Math.round(mt / ad) : 0), c: "var(--ts)" }, { l: "DAYS", v: `${ad}/${dim}`, c: "var(--ts)" }].map(x => <div key={x.l} style={{ flex: 1, background: "var(--bg)", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}><div style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600 }}>{x.l}</div><div style={{ fontSize: 14, fontWeight: 600, fontFamily: "var(--font-h)", color: x.c, marginTop: 2 }}>{x.v}</div></div>)}</div><div style={{ display: "flex", gap: 2, marginBottom: 8 }}>{"SMTWTFS".split("").map((d, i) => <div key={i} style={{ width: 36, textAlign: "center", fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600 }}>{d}</div>)}</div><div style={{ display: "flex", flexWrap: "wrap", gap: 2 }}>{cells}</div><div style={{ display: "flex", gap: 8, marginTop: 10, justifyContent: "center" }}>{[{ c: "var(--border)", l: "None" }, { c: "#6BAA75", l: "Low" }, { c: "#FBBF24", l: "Med" }, { c: "#E07A5F", l: "High" }, { c: "#D4726A", l: "Heavy" }].map(x => <div key={x.l} style={{ display: "flex", alignItems: "center", gap: 3 }}><div style={{ width: 10, height: 10, borderRadius: 3, background: x.c }} /><span style={{ fontSize: 9, color: "var(--muted)" }}>{x.l}</span></div>)}</div></div>
-}
-
 function SpendingBreakdown({ expenses, categories, period, onPeriodChange, formatCurrency, darkMode }) {
   const categoryMap = useMemo(
     () => Object.fromEntries((categories || []).map(c => [c.id, c])),
@@ -477,7 +360,8 @@ function Splits({ splits: sp, settlements: stl, categories: cats = [], onAdd, on
   const goDrill = n => { sSNP(null); sSNW(null); sSAW(null); sDelConfirm(null); sDrill(n); };
   const avatarColor = name => { const pal = ["#E07A5F","#6BAA75","#7B8CDE","#F4A261","#81B29A","#A78BFA","#F2CC8F","#E07A5F"]; let h=0; for(const c of name) h=(h*31+c.charCodeAt(0))&0xffff; return pal[h%pal.length]; };
   const initials = name => name.trim().split(/\s+/).slice(0,2).map(w=>w[0]?.toUpperCase()||"").join("");
-  const remainForSplit = s => roundMoney(s.amount - (stl||[]).filter(x=>x.splitId===s.id).reduce((t,x)=>t+x.amount,0));
+  const paidBySplit = useMemo(() => { const m = {}; (stl||[]).forEach(x => { if (x.splitId != null) m[x.splitId] = (m[x.splitId] || 0) + x.amount; }); return m; }, [stl]);
+  const remainForSplit = s => roundMoney(s.amount - (paidBySplit[s.id] || 0));
   const add = () => { if((!nm.trim()&&!drill)||!am) return; const a=parseAmount(am); if(!Number.isFinite(a)||a<=0) return; onAdd({id:uid(),name:drill||nm.trim(),amount:a,direction:dir,settled:false,note:snote.trim()||undefined,categoryId:effScat||undefined}); sN(""); sA(""); sSnote("") };
   const personMap = {}; sp.filter(s=>!s.eventId&&!s.deleted_at).forEach(s=>{ const n=s.name; if(!personMap[n]) personMap[n]={splits:[],net:0}; personMap[n].splits.push(s); if(!s.settled){const rem=remainForSplit(s); personMap[n].net+=s.direction==="owed"?rem:-rem;} });
   const stlByPerson = {}; (stl||[]).filter(s=>!s.eventId).forEach(s=>{if(!stlByPerson[s.splitName])stlByPerson[s.splitName]=[];stlByPerson[s.splitName].push(s);});
@@ -945,7 +829,7 @@ const TxCard = memo(function TxCard({ item: it, categories: cats, incomeSources:
   if (isTr) return <div style={{ ...cc, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}><div style={{ width: 44, height: 44, borderRadius: 12, background: "#7B8CDE14", display: "flex", alignItems: "center", justifyContent: "center" }}><DI2 id="transfer" accent="#7B8CDE" size={22} /></div><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>Transfer</div><div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 2, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{fW?.name} → {tW?.name} · {dl(it.date)}</div></div><div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 15, color: "#7B8CDE" }}>{fmt(it.amount)}</div><button onClick={() => od(it.id, it.type)} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 14, opacity: 0.35 }}>✕</button></div>;
   if (isS) { const sW = wl.find(x => x.id === it.walletId); const sCat = it.categoryId ? cats.find(c => c.id === it.categoryId) : null; const accent = it.direction === "owed" ? "#6BAA75" : "#E07A5F"; return <div style={{ ...cc, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}><div style={{ width: 44, height: 44, borderRadius: 12, background: (sCat?.color || accent) + "14", display: "flex", alignItems: "center", justifyContent: "center" }}>{sCat ? <DI2 id={sCat.id} accent={sCat.neon || sCat.color} size={22} /> : <DI2 id={it.direction === "owed" ? "received" : "paid"} accent={accent} size={22} />}</div><div style={{ flex: 1, minWidth: 0 }}><div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}><span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{it.direction === "owed" ? `${it.splitName} paid back` : `Paid ${it.splitName}`}</span>{sCat && <span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: sCat.color, background: sCat.color + "15", padding: "1px 5px", borderRadius: 3 }}>{sCat.name.toUpperCase()}</span>}</div><div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 2, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{sW?.name} · {dl(it.date)}{it.note ? " · " + it.note : ""}</div></div><div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 15, color: accent }}>{it.direction === "owed" ? "+" : "−"}{fmt(it.amount)}</div><button onClick={() => od(it.id, it.type)} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 14, opacity: 0.35 }}>✕</button></div> }
   if (isSpl) { const pal=["#E07A5F","#6BAA75","#7B8CDE","#F4A261","#81B29A","#A78BFA"]; let h=0; for(const c of(it.name||""))h=(h*31+c.charCodeAt(0))&0xffff; const aC=pal[h%pal.length],ini=(it.name||"?").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase(),owes=it.direction==="owe"; return <div style={{...cc,borderRadius:14,padding:"14px 16px",display:"flex",alignItems:"center",gap:12,marginBottom:10,opacity:it.settled?0.6:1}}><div style={{width:44,height:44,borderRadius:"50%",background:aC,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><span style={{fontFamily:"var(--font-h)",fontSize:14,fontWeight:700,color:"#fff"}}>{ini}</span></div><div style={{flex:1,minWidth:0}}><div style={{fontSize:14,fontWeight:600,color:"var(--text)",fontFamily:"var(--font-h)",display:"flex",alignItems:"center",gap:6}}>{it.name}{it.settled&&<span style={{fontSize:9,fontFamily:"var(--font-h)",fontWeight:600,color:"#6BAA75",background:"#6BAA7515",padding:"1px 5px",borderRadius:3}}>SETTLED</span>}</div><div style={{fontSize:12,color:"var(--muted)",fontFamily:"var(--font-b)",marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{owes?"You owe":"Owes you"}{it.note?" · "+it.note:""} · {dl(it.date)}</div></div><div style={{fontFamily:"var(--font-h)",fontWeight:600,fontSize:15,color:owes?"#E07A5F":"#6BAA75",flexShrink:0}}>{owes?"−":"+"}{fmt(it.amount)}</div><button onClick={()=>od(it.id,it.type)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:14,opacity:0.35,flexShrink:0}}>✕</button></div>; }
-  return <div style={{ ...cc, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}><div style={{ width: 44, height: 44, borderRadius: 12, background: (cat?.color || "#999") + "14", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{cat ? <DI2 id={cat.id} accent={cat.neon || cat.color} size={22} /> : <span style={{ fontSize: 22 }}>❓</span>}</div><div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}><div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}><span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{cat?.name || "Unknown"}</span>{isE && <span style={{ fontSize: 7, fontFamily: "var(--font-h)", fontWeight: 600, color: isFix(it) ? "#A78BFA" : "#FBBF24", background: isFix(it) ? "#A78BFA15" : "#FBBF2415", padding: "1px 5px", borderRadius: 3 }}>{isFix(it) ? "FIXED" : "FLEX"}</span>}{w && <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 600, color: w.color, background: w.color + "18", padding: "2px 6px", borderRadius: 4, display: "inline-flex", alignItems: "center", gap: 2 }}><DI2 id={w.id} accent={w.neon || w.color} size={10} /></span>}</div><div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{evT && <span style={{ fontWeight: 600, color: "var(--ts)" }}>{evT} · </span>}{dl(it.date)}{(() => { const dn = dispNote(it.note); return dn ? " · " + dn : ""; })()}</div>{fxMeta && <div style={{ fontSize: 10, color: "#7B8CDE", fontFamily: "var(--font-h)", fontWeight: 600, marginTop: 3, letterSpacing: "0.3px" }}>{fxMeta.currency} {fxMeta.originalAmount} @ {Number(fxMeta.rateUsed).toFixed(2)}</div>}
+  return <div style={{ ...cc, borderRadius: 14, padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}><div style={{ width: 44, height: 44, borderRadius: 12, background: (cat?.color || "#999") + "14", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{cat ? <DI2 id={cat.id} accent={cat.neon || cat.color} size={22} /> : <span style={{ fontSize: 22 }}>❓</span>}</div><div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}><div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}><span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{cat?.name || "Unknown"}</span>{isE && <span style={{ fontSize: 7, fontFamily: "var(--font-h)", fontWeight: 600, color: isFix(it) ? "#A78BFA" : "#FBBF24", background: isFix(it) ? "#A78BFA15" : "#FBBF2415", padding: "1px 5px", borderRadius: 3 }}>{isFix(it) ? "FIXED" : "FLEX"}</span>}{w && <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 600, color: w.color, background: w.color + "18", padding: "2px 6px", borderRadius: 4, display: "inline-flex", alignItems: "center", gap: 2 }}><DI2 id={w.id} accent={w.neon || w.color} size={10} /></span>}{isE && it.walletId === "__tracked__" && <span title="Logged for the event ledger — not paid from your wallets" style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 700, color: "#7B8CDE", background: "#7B8CDE18", padding: "2px 6px", borderRadius: 4, letterSpacing: "0.3px" }}>PAID BY {(it.paidBy || "?").toUpperCase()}</span>}</div><div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{evT && <span style={{ fontWeight: 600, color: "var(--ts)" }}>{evT} · </span>}{dl(it.date)}{(() => { const dn = dispNote(it.note); return dn ? " · " + dn : ""; })()}</div>{fxMeta && <div style={{ fontSize: 10, color: "#7B8CDE", fontFamily: "var(--font-h)", fontWeight: 600, marginTop: 3, letterSpacing: "0.3px" }}>{fxMeta.currency} {fxMeta.originalAmount} @ {Number(fxMeta.rateUsed).toFixed(2)}</div>}
     {(isE || isI) && it.receipt_url && (() => { let urls; try { urls = JSON.parse(it.receipt_url); if (!Array.isArray(urls)) urls = [it.receipt_url]; } catch { urls = [it.receipt_url]; } return <div style={{ marginTop: 3, display: "flex", gap: 8, flexWrap: "wrap" }}>{urls.map((u, i) => { const isPdf = typeof u === "string" && (u.startsWith("data:application/pdf") || u.toLowerCase().endsWith(".pdf")); return <a key={i} href={u} target="_blank" rel="noopener noreferrer" style={{ fontSize: 10, color: "#6BAA75", fontFamily: "var(--font-h)", fontWeight: 600, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 3 }}>{isPdf ? <FilePdf size={12} /> : <Receipt size={12} />}{urls.length > 1 ? `${isPdf ? "PDF" : "Receipt"} ${i + 1}` : (isPdf ? "PDF" : "Receipt")}</a>; })}</div>; })()}</div><div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 15, color: isE ? "#E07A5F" : "#6BAA75", flexShrink: 0 }}>{isE ? "−" : "+"}{fmt(it.amount)}</div>{isE && oRef && it.walletId !== "__tracked__" && <button onClick={() => oRef(it)} title="Refund this expense as income" style={{ background: "none", border: "none", color: "#6BAA75", cursor: "pointer", fontSize: 14, opacity: 0.5, flexShrink: 0, padding: "0 2px" }}>↩</button>}<button onClick={() => od(it.id, it.type)} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 14, opacity: 0.35, flexShrink: 0 }}>✕</button></div>
 });
 
@@ -1162,12 +1046,22 @@ function Events({ events: evs, expenses: ex, splits: sp, settlements: stl, categ
     }
   };
   const addSplit = () => { if (!sn.trim() || !sa || Number(sa) <= 0 || !sel) return; oS({ id: uid(), name: sn.trim(), amount: Number(sa), direction: sd, settled: false, eventId: sel.id, note: spNote }); sSN(""); sSA(""); sSPNote("") };
+  // One pass over expenses/settlements grouped by event, instead of re-filtering
+  // both arrays for every event card (the list header sums netSpent over ALL events).
+  const evAgg = useMemo(() => {
+    const m = {};
+    const get = id => (m[id] = m[id] || { amts: [], out: 0, inn: 0 });
+    ex.forEach(x => { if (x.eventId) get(x.eventId).amts.push(x.amount); });
+    (stl || []).forEach(x => { if (x.eventId) { if (x.direction === "owe") get(x.eventId).out += x.amount; else if (x.direction === "owed") get(x.eventId).inn += x.amount; } });
+    return m;
+  }, [ex, stl]);
   const netSpent = (evId) => {
     const ev = evs.find(x => x.id === evId);
-    const eAmts = ex.filter(x => x.eventId === evId).map(x => x.amount);
+    const agg = evAgg[evId] || { amts: [], out: 0, inn: 0 };
+    const eAmts = agg.amts;
     const e = eAmts.reduce((s, x) => s + x, 0);
-    const settleOut = stl.filter(x => x.eventId === evId && x.direction === "owe").reduce((s, x) => s + x.amount, 0);
-    const settleIn = stl.filter(x => x.eventId === evId && x.direction === "owed").reduce((s, x) => s + x.amount, 0);
+    const settleOut = agg.out;
+    const settleIn = agg.inn;
     if (ev?.type === "group") {
       const parts = (ev.participants || []).filter((v, i, arr) => v && v.trim() && arr.findIndex(x => x.toLowerCase() === v.toLowerCase()) === i);
       const n = 1 + parts.length;
@@ -1178,7 +1072,8 @@ function Events({ events: evs, expenses: ex, splits: sp, settlements: stl, categ
     }
     return Math.max(0, e + settleOut - settleIn);
   };
-  const remainForSplit = s => roundMoney(s.amount - (stl || []).filter(x => x.splitId === s.id).reduce((t, x) => t + x.amount, 0));
+  const paidBySplit = useMemo(() => { const m = {}; (stl || []).forEach(x => { if (x.splitId != null) m[x.splitId] = (m[x.splitId] || 0) + x.amount; }); return m; }, [stl]);
+  const remainForSplit = s => roundMoney(s.amount - (paidBySplit[s.id] || 0));
 
   const confirmOverlay = evDelConfirm ? (
     <div style={{ position: "fixed", inset: 0, background: dm ? "rgba(0,0,0,0.65)" : "rgba(20,10,0,0.45)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
@@ -1224,7 +1119,11 @@ function Events({ events: evs, expenses: ex, splits: sp, settlements: stl, categ
       {eExps.length > 0 && <div style={{ ...cc, padding: 14, marginBottom: 14 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 11, color: "var(--muted)", fontWeight: 600, marginBottom: 10, letterSpacing: "0.5px" }}>EXPENSES</div>{[...eExps].reverse().map(e => { const cat = cats.find(c => c.id === e.categoryId) || { id: "other", name: "Other", color: "#999", neon: "#999" }; return <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid var(--border)" }}><DI2 id={cat.id} accent={cat.neon || cat.color} size={18} /><div style={{ flex: 1 }}><div style={{ fontSize: 13, fontWeight: 600, fontFamily: "var(--font-h)", color: "var(--text)" }}>{cat.name}</div>{e.note && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 1 }}>{e.note}</div>}{isGroup && e.paidBy && e.paidBy !== "me" && <div style={{ fontSize: 10, color: "#7B8CDE", marginTop: 1, fontFamily: "var(--font-h)", fontWeight: 600 }}>paid by {e.paidBy}</div>}</div><span style={{ fontFamily: "var(--font-h)", fontWeight: 600, color: "#E07A5F", fontSize: 14 }}>−{fmt(e.amount)}</span></div> })}</div>}
       {eSp.length > 0 && <div style={{ ...cc, padding: 14, marginBottom: 14 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 11, color: "var(--muted)", fontWeight: 600, marginBottom: 10, letterSpacing: "0.5px" }}>SPLITS</div>{eSp.map(s => <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid var(--border)", opacity: s.settled ? 0.4 : 1 }}><span style={{ fontSize: 14 }}>{s.settled ? "✅" : s.direction === "owe" ? "🔴" : "🟢"}</span><div style={{ flex: 1 }}><div style={{ fontSize: 13, fontWeight: 600, fontFamily: "var(--font-h)", color: "var(--text)" }}>{s.name}</div><div style={{ fontSize: 11, color: "var(--muted)" }}>{s.settled ? "Settled" : s.direction === "owe" ? "You owe" : "Owes you"}</div>{s.note && <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 1, fontStyle: "italic" }}>{s.note}</div>}</div><span style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 14, color: s.direction === "owe" ? "#E07A5F" : "#6BAA75" }}>{fmt(s.amount)}</span>{!s.settled && <button onClick={() => sSTgt(s)} style={{ border: "1px solid var(--border)", background: "none", borderRadius: 6, padding: "3px 8px", fontSize: 10, color: "var(--muted)", cursor: "pointer" }}>Settle</button>}<button onClick={() => oDS(s.id)} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 13, opacity: 0.4 }}>✕</button></div>)}</div>}
       {sel.status === "active" && <div style={{ ...cc, padding: 16, marginBottom: 14 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 11, color: "var(--muted)", fontWeight: 600, marginBottom: 12, letterSpacing: "0.5px" }}>ADD EXPENSE</div><div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>{cats.map(c => <button key={c.id} onClick={() => sEC(c.id)} style={{ padding: "6px 12px", borderRadius: 8, fontSize: 12, fontFamily: "var(--font-b)", border: `1.5px solid ${ec === c.id ? c.color : "var(--border)"}`, background: ec === c.id ? c.color + "18" : "var(--card)", color: ec === c.id ? c.color : "var(--ts)", cursor: "pointer", fontWeight: ec === c.id ? 600 : 400, display: "flex", alignItems: "center", gap: 4 }}><DI2 id={c.id} accent={c.neon || c.color} size={14} />{c.name}</button>)}</div>{isGroup && <div style={{ marginBottom: 12 }}><label style={ls}>Paid by</label><div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{["me", ...(sel.participants || [])].map(p => { const label = p === "me" ? "You" : p; return <button key={p} onClick={() => sEPaidBy(p)} style={{ padding: "7px 14px", borderRadius: 8, fontSize: 12, fontFamily: "var(--font-h)", border: `1.5px solid ${ePaidBy === p ? "#7B8CDE" : "var(--border)"}`, background: ePaidBy === p ? "#7B8CDE18" : "var(--card)", color: ePaidBy === p ? "#7B8CDE" : "var(--ts)", cursor: "pointer", fontWeight: ePaidBy === p ? 600 : 400 }}>{label}</button>; })}</div></div>}{(!isGroup || ePaidBy === "me") && <><label style={ls}>Paid From</label><div style={{ display: "flex", gap: 6, marginBottom: 12 }}>{wl.map(w => <button key={w.id} onClick={() => sEW(w.id)} style={{ flex: 1, padding: "8px", borderRadius: 8, border: `1.5px solid ${ew === w.id ? w.color : "var(--border)"}`, background: ew === w.id ? w.color + "15" : "var(--card)", fontSize: 12, fontWeight: ew === w.id ? 600 : 500, fontFamily: "var(--font-h)", color: ew === w.id ? w.color : "var(--muted)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}><DI2 id={w.id} accent={w.neon || w.color} size={12} />{w.name}</button>)}</div></>}<div style={{ display: "flex", gap: 8 }}><input type="number" value={ea} onChange={e => sEA(e.target.value)} placeholder="₹" style={{ ...is, width: 80 }} /><input value={en} onChange={e => sEN(e.target.value)} placeholder="Note" style={{ ...is, flex: 1 }} /><button onClick={addExp} style={{ padding: "10px 14px", border: "none", borderRadius: 10, background: "#E07A5F", color: "#fff", fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>+</button></div></div>}
-      {sel.status === "active" && (() => {
+      {/* Bill Splitter is solo-event only: in group events the per-expense
+          "Paid by" flow already creates the IOUs, and the GROUP SUMMARY
+          reconciles only against those + settlements — splitter-made IOUs
+          would double-track the same money. */}
+      {sel.status === "active" && !isGroup && (() => {
         const totalNum = (() => { const n = parseAmount(bsTotal); return Number.isFinite(n) && n > 0 ? n : 0; })(), validPpl = bsPpl.filter(p => p.name.trim()), hc = validPpl.length + 1;
         const equalShares = distributeAmount(totalNum, hc), eqMy = equalShares[0] || 0, eqOthers = validPpl.map((_, i) => equalShares[i + 1] || 0);
         const custOT = bsPpl.reduce((s, p) => s + ((Number.isFinite(parseAmount(p.amount)) ? parseAmount(p.amount) : 0)), 0), custMy = Math.max(0, totalNum - custOT);
@@ -1651,6 +1550,9 @@ export default function Nomad() {
     return items.sort(historySortCompare);
   }, [flt, ex, inc, tr, stl, fm, hSearch, hMinAmt, hMaxAmt, hDateFrom, hDateTo, hType, cats, isrc, evs]);
   const timelineData = useMemo(() => {
+    // Only consumed by history rows when the timeline toggle is ON — skip the
+    // full ledger walk entirely while it's off (every tx edit re-runs this memo).
+    if (!hTimeline) return {};
     const all = [...ex.map(e => ({ ...e, type: "expense" })), ...inc.map(i => ({ ...i, type: "income" })), ...tr.map(t => ({ ...t, type: "transfer" })), ...stl.map(s => ({ ...s, type: "settlement" }))].sort((a, b) => { const dd = new Date(a.date) - new Date(b.date); if (dd !== 0) return dd; return new Date(a.created_at || a.createdAt || a.updated_at || 0) - new Date(b.created_at || b.createdAt || b.updated_at || 0); });
     const wDelta = (tx, wId) => { if (tx.type === "expense") return (tx.walletId || "upi_lite") === wId ? -tx.amount : 0; if (tx.type === "income") return (tx.walletId || "bank") === wId ? tx.amount : 0; if (tx.type === "transfer") { if (tx.fromWallet === wId) return -tx.amount; if (tx.toWallet === wId) return tx.amount; return 0; } if (tx.type === "settlement") return tx.walletId === wId ? (tx.direction === "owed" ? tx.amount : -tx.amount) : 0; return 0; };
     // Calibrations shift wsb by `gap` at a specific point in time. For each
@@ -1661,25 +1563,32 @@ export default function Nomad() {
     const calsByWallet = {};
     calLog.forEach(c => { if (!calsByWallet[c.wId]) calsByWallet[c.wId] = []; calsByWallet[c.wId].push(c); });
     const txTs = (tx) => { const t = tx.created_at || tx.createdAt || tx.updated_at; return t ? new Date(t).getTime() : new Date(tx.date + "T23:59:59").getTime(); };
+    // Single forward pass: Σ wDelta over all[0..i] is a running prefix sum per
+    // wallet (accumulated in the same j-ascending order the old per-tx
+    // slice().reduce() used, so results are bit-identical) — O(n·wallets)
+    // instead of O(n²·wallets).
     const map = {};
-    all.forEach((tx, i) => {
+    const prefix = {};
+    wallets.forEach(w => { prefix[w.id] = 0; });
+    all.forEach((tx) => {
       const after = {}, before = {};
       const tts = txTs(tx);
-      const slice = all.slice(0, i + 1);
       wallets.forEach(w => {
         const cals = calsByWallet[w.id] || [];
         const futureGapSum = cals.filter(c => c.ts > tts).reduce((s, c) => s + (c.gap || 0), 0);
         const histStartBal = (wsb[w.id] || 0) - futureGapSum;
-        const aft = histStartBal + slice.reduce((s, t) => s + wDelta(t, w.id), 0);
+        const d = wDelta(tx, w.id);
+        prefix[w.id] += d;
+        const aft = histStartBal + prefix[w.id];
         after[w.id] = aft;
-        before[w.id] = aft - wDelta(tx, w.id);
+        before[w.id] = aft - d;
       });
       map[tx.id] = { before, after };
     });
     return map;
-  }, [ex, inc, tr, stl, wsb, wallets, calLog]);
+  }, [ex, inc, tr, stl, wsb, wallets, calLog, hTimeline]);
 
-  const budgetStatus = useMemo(() => { const cm = localDateKey().slice(0, 7); const splitCat = (id) => sp.find(x => x.id === id)?.categoryId; const mEx = ex.filter(e => mk(e.date) === cm && !isTrackedExp(e)); const mStl = (stl || []).filter(s => s.direction === "owe" && mk(s.date) === cm); return Object.entries(budgets).filter(entry => entry[1] > 0).map(([cid, lim]) => { const exSum = mEx.filter(e => e.categoryId === cid).reduce((s, e) => s + e.amount, 0); const stlSum = mStl.filter(s => (s.categoryId || splitCat(s.splitId)) === cid).reduce((s, x) => s + x.amount, 0); const spent = roundMoney(exSum + stlSum); const cat = cats.find(c => c.id === cid) || { id: cid, name: cid, color: "#999", neon: "#999" }; const pct = Math.min(100, Math.round(spent / lim * 100)); return { cid, cat, spent, lim, pct }; }); }, [budgets, ex, stl, sp, cats]);
+  const budgetStatus = useMemo(() => { const cm = localDateKey().slice(0, 7); const splitCatById = new Map(sp.map(x => [x.id, x.categoryId])); const splitCat = (id) => splitCatById.get(id); const mEx = ex.filter(e => mk(e.date) === cm && !isTrackedExp(e)); const mStl = (stl || []).filter(s => s.direction === "owe" && mk(s.date) === cm); return Object.entries(budgets).filter(entry => entry[1] > 0).map(([cid, lim]) => { const exSum = mEx.filter(e => e.categoryId === cid).reduce((s, e) => s + e.amount, 0); const stlSum = mStl.filter(s => (s.categoryId || splitCat(s.splitId)) === cid).reduce((s, x) => s + x.amount, 0); const spent = roundMoney(exSum + stlSum); const cat = cats.find(c => c.id === cid) || { id: cid, name: cid, color: "#999", neon: "#999" }; const pct = Math.min(100, Math.round(spent / lim * 100)); return { cid, cat, spent, lim, pct }; }); }, [budgets, ex, stl, sp, cats]);
 
   // Settlements that the user PAID OUT count as real spending, categorized by
   // the linked split's categoryId (snapshot on the settlement, or fetched from
@@ -1687,7 +1596,8 @@ export default function Nomad() {
   // spending-breakdown, per-day/per-week chart, and spending-by-category
   // aggregations can include them without forking their logic.
   const settlementsAsExpenses = useMemo(() => {
-    const splitCat = (id) => sp.find(x => x.id === id)?.categoryId;
+    const splitCatById = new Map((sp || []).map(x => [x.id, x.categoryId]));
+    const splitCat = (id) => splitCatById.get(id);
     return (stl || []).filter(s => s.direction === "owe").map(s => ({
       id: s.id,
       date: s.date,
@@ -1843,7 +1753,13 @@ export default function Nomad() {
     return { day: roundMoney(day + stDay), month: roundMoney(month + stMonth) };
   };
 
-  const addE = data => {
+  // `balanceDelta` is for BATCH imports only: wBal/balanceOnDate come from
+  // state that doesn't update until the next render, so every entry in a
+  // tight loop would otherwise be validated against the PRE-batch balance
+  // (and store a stale balBefore). Callers thread the net effect of the
+  // batch entries already accepted so each one sees the balance the previous
+  // ones left behind — as if they'd been typed one at a time.
+  const addE = (data, { balanceDelta = 0 } = {}) => {
     const amt = roundMoney(data.amount);
     if (amt <= 0) { showT("Enter a valid amount", "error"); return false }
     if (amt > 10000000) { showT("Amount too large (max ₹1 crore)", "error"); return false }
@@ -1859,7 +1775,7 @@ export default function Nomad() {
     const today = localDateKey();
     const isBackdated = data.date && data.date < today;
     // Use historical balance for backdated, current for today/future
-    const b = roundMoney(isBackdated ? balanceOnDate(data.walletId, data.date) : (wBal[data.walletId] || 0));
+    const b = roundMoney((isBackdated ? balanceOnDate(data.walletId, data.date) : (wBal[data.walletId] || 0)) + balanceDelta);
     if (b < amt) { showT(isBackdated ? `${w?.name} only had ${fmt(b)} on ${data.date} (need ${fmt(amt)})` : `Not enough in ${w?.name} (have ${fmt(b)}, need ${fmt(amt)})`, "error"); return false }
     // UPI Lite cap warnings
     if (isUpiLite(data.walletId, wallets)) {
@@ -1876,7 +1792,7 @@ export default function Nomad() {
     showT(online ? "Expense added" : "Expense saved offline", "success");
     return true;
   };
-  const addI = data => { const amt = roundMoney(data.amount); if (isUpiLite(data.walletId, wallets)) { showT("UPI Lite is for spending only", "error"); return false } if (amt <= 0) { showT("Enter a valid amount", "error"); return false } if (amt > 10000000) { showT("Amount too large (max ₹1 crore)", "error"); return false } if (typeof data.note === "string" && data.note.length > 500) data = { ...data, note: data.note.slice(0, 500) }; const isBackdated = data.date && data.date < localDateKey(); const balBefore = roundMoney(isBackdated ? balanceOnDate(data.walletId, data.date) : (wBal[data.walletId] || 0)); const rec = { id: uid(), type: "income", ...data, amount: amt, balBefore, created_at: new Date().toISOString() }; sInc(p => [rec, ...p]); sbUpsert("incomes", [toSB(rec, COLS.incomes)]); dance(); showT(online ? "Income added" : "Income saved offline", "success"); return true };
+  const addI = (data, { balanceDelta = 0 } = {}) => { const amt = roundMoney(data.amount); if (isUpiLite(data.walletId, wallets)) { showT("UPI Lite is for spending only", "error"); return false } if (amt <= 0) { showT("Enter a valid amount", "error"); return false } if (amt > 10000000) { showT("Amount too large (max ₹1 crore)", "error"); return false } if (typeof data.note === "string" && data.note.length > 500) data = { ...data, note: data.note.slice(0, 500) }; const isBackdated = data.date && data.date < localDateKey(); const balBefore = roundMoney((isBackdated ? balanceOnDate(data.walletId, data.date) : (wBal[data.walletId] || 0)) + balanceDelta); const rec = { id: uid(), type: "income", ...data, amount: amt, balBefore, created_at: new Date().toISOString() }; sInc(p => [rec, ...p]); sbUpsert("incomes", [toSB(rec, COLS.incomes)]); dance(); showT(online ? "Income added" : "Income saved offline", "success"); return true };
   const addT = data => { const amt = roundMoney(data.amount); if (amt <= 0) { showT("Enter an amount above zero", "error"); return false } if (amt > 10000000) { showT("Amount too large (max ₹1 crore)", "error"); return false } if (!data.fromWallet || !data.toWallet) { showT("Pick a source and a destination wallet", "error"); return false } if (data.fromWallet === data.toWallet) { showT("Source and destination must be different wallets", "error"); return false } const isBackdated = data.date && data.date < localDateKey(); const fromBalBefore = roundMoney(isBackdated ? balanceOnDate(data.fromWallet, data.date) : (wBal[data.fromWallet] || 0)); if (fromBalBefore < amt) { showT(`Insufficient balance`, "error"); return false } if (typeof data.note === "string" && data.note.length > 500) data = { ...data, note: data.note.slice(0, 500) }; const toBalBefore = roundMoney(isBackdated ? balanceOnDate(data.toWallet, data.date) : (wBal[data.toWallet] || 0)); const rec = { id: uid(), type: "transfer", ...data, amount: amt, fromBalBefore, toBalBefore, created_at: new Date().toISOString() }; sTr(p => [rec, ...p]); sbUpsert("transfers", [toSB(rec, COLS.transfers)]); dance(); showT(online ? "Transfer done" : "Transfer queued offline", "success"); return true };
   const refundItem = exp => { if (!exp || exp.amount <= 0 || exp.walletId === "__tracked__") return; const src = isrc[0]; if (!src) { showT("No income source configured", "error"); return; } const note = ("Refund: " + (exp.note || cats.find(c => c.id === exp.categoryId)?.name || "")).slice(0, 500); addI({ id: uid(), amount: exp.amount, sourceId: src.id, walletId: exp.walletId, note, date: localDateKey() }); };
   const settle = (sid, wid, payAmt) => {
@@ -2144,7 +2060,18 @@ export default function Nomad() {
     showT(`Cleared ${n} local receipt${n === 1 ? "" : "s"}`, "success");
   };
   const impCsv = (file) => { const r = new FileReader(); r.onerror = () => showT("Failed to read CSV file", "error"); r.onload = e => { const rows = parseBankCsv(e.target.result); if (rows.length === 0) { showT("No valid rows found — check CSV format", "error"); return; } sCsvPreview(rows); showT(`Parsed ${rows.length} rows — review and confirm import`, "info"); }; r.readAsText(file); };
-  const confirmCsvImport = () => { if (!csvPreview?.length) return; let imported = 0; csvPreview.forEach(row => { const ok = row.type === "income" ? addI({ id: uid(), amount: row.amount, sourceId: "allowance", walletId: "bank", date: row.date, note: (row.note || "").slice(0, 500) }) : addE({ id: uid(), amount: row.amount, categoryId: "food", walletId: "bank", date: row.date, note: (row.note || "").slice(0, 500) }); if (ok !== false) imported++; }); sCsvPreview(null); showT(`Imported ${imported} transactions — recategorize as needed`, "success"); };
+  // Running per-wallet balance for batch imports — see the addE balanceDelta
+  // comment. Backdated entries are validated against balanceOnDate(entry.date),
+  // so only batch entries dated on/before that date count toward their delta;
+  // today/future entries check live wBal, so every accepted batch entry counts.
+  const makeBatchTracker = () => {
+    const applied = [];
+    return {
+      deltaFor: (walletId, date, isBackdated) => roundMoney(applied.filter(x => x.walletId === walletId && (!isBackdated || x.date <= date)).reduce((s, x) => s + x.amt, 0)),
+      record: (walletId, date, amt) => applied.push({ walletId, date, amt }),
+    };
+  };
+  const confirmCsvImport = () => { if (!csvPreview?.length) return; let imported = 0; const batch = makeBatchTracker(), today = localDateKey(); csvPreview.forEach(row => { const amount = roundMoney(Number(row.amount) || 0); const isBackdated = row.date < today; const balanceDelta = batch.deltaFor("bank", row.date, isBackdated); const ok = row.type === "income" ? addI({ id: uid(), amount, sourceId: "allowance", walletId: "bank", date: row.date, note: (row.note || "").slice(0, 500) }, { balanceDelta }) : addE({ id: uid(), amount, categoryId: "food", walletId: "bank", date: row.date, note: (row.note || "").slice(0, 500) }, { balanceDelta }); if (ok !== false) { imported++; batch.record("bank", row.date, row.type === "income" ? amount : -amount); } }); sCsvPreview(null); showT(`Imported ${imported} transactions — recategorize as needed`, "success"); };
   const impLedger = async (file) => {
     if (ledgerLoading) return;
     sLedgerLoading(true); sLedgerPreview(null);
@@ -2196,15 +2123,18 @@ export default function Nomad() {
   const confirmLedgerImport = () => {
     if (!ledgerPreview?.length) return;
     let imported = 0;
+    const batch = makeBatchTracker(), today = localDateKey();
     ledgerPreview.forEach(en => {
       const amount = roundMoney(Number(en.amount) || 0);
       if (amount <= 0 || !en.date) return;
       const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(en.date) ? en.date : localDateKey();
       const noteStr = (en.note || "").slice(0, 500);
+      const wid = wallets[0]?.id || "bank";
+      const balanceDelta = batch.deltaFor(wid, dateOk, dateOk < today);
       const ok = en.type === "income"
-        ? addI({ id: uid(), amount, sourceId: isrc[0]?.id || "allowance", walletId: wallets[0]?.id || "bank", date: dateOk, note: noteStr })
-        : addE({ id: uid(), amount, categoryId: cats[0]?.id || "food", walletId: wallets[0]?.id || "bank", date: dateOk, note: noteStr });
-      if (ok !== false) imported++;
+        ? addI({ id: uid(), amount, sourceId: isrc[0]?.id || "allowance", walletId: wid, date: dateOk, note: noteStr }, { balanceDelta })
+        : addE({ id: uid(), amount, categoryId: cats[0]?.id || "food", walletId: wid, date: dateOk, note: noteStr }, { balanceDelta });
+      if (ok !== false) { imported++; batch.record(wid, dateOk, en.type === "income" ? amount : -amount); }
     });
     sLedgerPreview(null);
     showT(`Imported ${imported} of ${ledgerPreview.length} entries — recategorize as needed`, "success");
