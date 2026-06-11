@@ -23,6 +23,18 @@
 // The MERGE returns the orphan list separately so the caller can re-queue
 // only those without colliding with rows that are already in flight.
 
+// Union two row arrays by id, primary rows winning on conflict. Used by
+// load() to merge LIVE React state with the (800ms-debounced) nomad-v5
+// backup before reconciling against remote: a row added while the remote
+// fetch was in flight exists only in live state — merging against the backup
+// alone would wipe it when the (stale) remote response replaces state.
+export function unionById(primary, secondary) {
+  const safePrimary = Array.isArray(primary) ? primary.filter(r => r && r.id != null) : [];
+  const seen = new Set(safePrimary.map(r => r.id));
+  const extras = (Array.isArray(secondary) ? secondary : []).filter(r => r && r.id != null && !seen.has(r.id));
+  return [...safePrimary, ...extras];
+}
+
 export function mergeRemote({ table, remote, local, isPendingDelete, isPendingUpsert, remoteDeletedIds }) {
   const safeRemote = Array.isArray(remote) ? remote : [];
   const safeLocal  = Array.isArray(local)  ? local  : [];

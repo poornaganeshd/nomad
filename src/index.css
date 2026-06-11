@@ -59,6 +59,23 @@ body {
   to { opacity: 1; }
 }
 
+@keyframes evRowIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes evNudge {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(3px); }
+}
+
+.evPress {
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.evPress:active {
+  transform: scale(0.95);
+}
+
 #root {
   width: 1126px;
   max-width: 100%;

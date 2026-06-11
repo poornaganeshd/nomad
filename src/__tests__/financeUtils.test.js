@@ -9,6 +9,7 @@ import {
   isRecurringDueToday,
   recurringDaysOverdue,
   distributeAmount,
+  groupShareTotals,
   historySortCompare,
   itemTimestamp,
 } from '../financeUtils.js';
@@ -332,6 +333,44 @@ describe('distributeAmount', () => {
 // ---------------------------------------------------------------------------
 // historySortCompare
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// groupShareTotals — per-person totals across a SERIES of group expenses.
+// Must agree with the per-expense split records created by the Events tab
+// (each expense distributed independently via distributeAmount).
+// ---------------------------------------------------------------------------
+describe('groupShareTotals', () => {
+  it('sums per-expense distributions, not a redistribution of the total', () => {
+    // Two ₹100 expenses among 3 people: each expense gives index 0 the extra
+    // paisa → [33.34+33.34, 33.33+33.33, 33.33+33.33].
+    expect(groupShareTotals([100, 100], 3)).toEqual([66.68, 66.66, 66.66]);
+    // distributeAmount(200, 3) would give [66.67, 66.67, 66.66] — a ₹0.01
+    // mismatch against the recorded splits that never settles.
+    expect(groupShareTotals([100, 100], 3)).not.toEqual(distributeAmount(200, 3));
+  });
+
+  it('matches the sum of distributeAmount per expense for every person', () => {
+    const amounts = [100, 33.33, 7, 0.05, 999.99];
+    const n = 4;
+    const expected = [0, 0, 0, 0];
+    amounts.forEach(a => distributeAmount(a, n).forEach((v, i) => { expected[i] = roundMoney(expected[i] + v); }));
+    expect(groupShareTotals(amounts, n)).toEqual(expected);
+  });
+
+  it('per-person totals add up to the grand total exactly', () => {
+    const amounts = [10, 10, 10, 0.01, 5.55];
+    const totals = groupShareTotals(amounts, 3);
+    const grand = roundMoney(amounts.reduce((s, a) => s + a, 0));
+    expect(roundMoney(totals.reduce((s, v) => s + v, 0))).toBe(grand);
+  });
+
+  it('handles empty input, zero people, and a single person', () => {
+    expect(groupShareTotals([], 3)).toEqual([0, 0, 0]);
+    expect(groupShareTotals([100], 0)).toEqual([]);
+    expect(groupShareTotals(null, 2)).toEqual([0, 0]);
+    expect(groupShareTotals([12.34, 5], 1)).toEqual([17.34]);
+  });
+});
+
 describe('historySortCompare', () => {
   it('sorts by date descending', () => {
     const items = [

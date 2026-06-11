@@ -45,7 +45,7 @@ export default defineConfig([
     // splitting them — which CLAUDE.md forbids. Demote these specific rules to
     // warn here so CI can gate `npm run lint` strictly: genuine errors anywhere
     // else still fail the build, but this known-cosmetic noise doesn't.
-    files: ['src/App.jsx', 'src/Routine.jsx', 'src/components/TrendChart.jsx'],
+    files: ['src/App.jsx', 'src/Routine.jsx'],
     rules: {
       'react-hooks/set-state-in-effect': 'warn',
       'react-hooks/static-components': 'warn',

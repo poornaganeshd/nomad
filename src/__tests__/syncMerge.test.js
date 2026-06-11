@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mergeRemote, isRecentRow } from '../syncMerge.js';
+import { mergeRemote, isRecentRow, unionById } from '../syncMerge.js';
 
 // Builders ------------------------------------------------------------------
 
@@ -242,5 +242,54 @@ describe('mergeRemote — server tombstones', () => {
     });
     expect(result.next.map(r => r.id)).toEqual(['keep']);
     expect(result.orphans.map(r => r.id)).toEqual(['keep']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unionById — live state ∪ localStorage backup, used by load() so rows added
+// while the remote refresh was in flight can't be wiped by the merge.
+// ---------------------------------------------------------------------------
+describe('unionById', () => {
+  it('keeps all primary rows and appends secondary-only rows', () => {
+    const live = [row('new1'), row('new2')];
+    const backup = [row('new1', { note: 'stale copy' }), row('old')];
+    expect(unionById(live, backup).map(r => r.id)).toEqual(['new1', 'new2', 'old']);
+  });
+
+  it('prefers the primary (live) copy when both sides have the row', () => {
+    const live = [row('a', { amount: 50, receipt_url: 'cloud://x' })];
+    const backup = [row('a', { amount: 50 })];
+    expect(unionById(live, backup)[0].receipt_url).toBe('cloud://x');
+  });
+
+  it('tolerates null/undefined/id-less rows on either side', () => {
+    expect(unionById(null, [row('b'), null, {}])).toEqual([row('b')]);
+    expect(unionById([row('a'), null, {}], undefined)).toEqual([row('a')]);
+  });
+});
+
+describe('mergeRemote — load() race: entry added while refresh in flight', () => {
+  // The user logs an expense right after opening the app. Its POST is in
+  // flight (NOT in the offline queue), the 800ms-debounced nomad-v5 backup
+  // has not fired (NOT in the backup), and the remote GET snapshot predates
+  // it (NOT in remote). Merging against union(live, backup) must keep it.
+  it('keeps a row that exists only in live state', () => {
+    const live = [row('just-added', { amount: 250 })];
+    const backup = [row('synced-long-ago')];
+    const remote = [row('synced-long-ago')];
+    const result = mergeRemote({
+      table: 'expenses', remote, local: unionById(live, backup), ...baseDeps,
+      remoteDeletedIds: new Set(),
+    });
+    expect(result.next.map(r => r.id)).toEqual(['just-added', 'synced-long-ago']);
+  });
+
+  it('still drops a row the server tombstoned even if live state has it', () => {
+    const live = [row('deleted-elsewhere')];
+    const result = mergeRemote({
+      table: 'expenses', remote: [], local: unionById(live, []), ...baseDeps,
+      remoteDeletedIds: new Set(['deleted-elsewhere']),
+    });
+    expect(result.next).toEqual([]);
   });
 });

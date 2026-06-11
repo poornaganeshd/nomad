@@ -87,6 +87,13 @@ export const getDeadLetterCount = () => readDeadLetter().length;
 export const isPendingDelete = (table, id) =>
   readQueue().some(item => item.dedupeKey === `${table}:delete:${id}`);
 
+// True when ANY queued write carries this exact dedupeKey. Used for tables
+// whose rows aren't keyed by `id` (e.g. wallet_balances → "wallet_balances:<wid>")
+// so load() can tell that a local value is still waiting to reach the server
+// and must not be clobbered by a stale remote read.
+export const hasPendingDedupeKey = (dedupeKey) =>
+  dedupeKey != null && readQueue().some(item => item.dedupeKey === dedupeKey);
+
 // True when an upsert for `id` against `table` is still waiting in the offline
 // queue (e.g. 5xx-retry, offline, or in-flight when the page was last reloaded).
 // Used by load() to keep locally-added rows visible until they reach the server,

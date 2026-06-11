@@ -595,3 +595,27 @@ describe('idempotencyKeyFor', () => {
     expect(idempotencyKeyFor(item)).toBe(idempotencyKeyFor(item));
   });
 });
+
+// ---------------------------------------------------------------------------
+// hasPendingDedupeKey
+// ---------------------------------------------------------------------------
+describe('hasPendingDedupeKey', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.resetModules();
+  });
+
+  it('finds a queued write by its exact dedupeKey', async () => {
+    const { queueSupabaseRequest, hasPendingDedupeKey } = await import('../offlineSync.js');
+    queueSupabaseRequest(makeItem({ dedupeKey: 'wallet_balances:bank' }));
+    expect(hasPendingDedupeKey('wallet_balances:bank')).toBe(true);
+    expect(hasPendingDedupeKey('wallet_balances:cash')).toBe(false);
+  });
+
+  it('returns false for null/undefined keys and an empty queue', async () => {
+    const { hasPendingDedupeKey } = await import('../offlineSync.js');
+    expect(hasPendingDedupeKey(null)).toBe(false);
+    expect(hasPendingDedupeKey(undefined)).toBe(false);
+    expect(hasPendingDedupeKey('anything')).toBe(false);
+  });
+});

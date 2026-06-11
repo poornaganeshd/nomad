@@ -106,6 +106,24 @@ export const distributeAmount = (amount, headCount) => {
   });
 };
 
+// Per-person share totals for a SERIES of group expenses. Each expense is
+// distributed independently with distributeAmount (the same way the split
+// records are created when the expense is logged), then summed per person.
+// This is NOT the same as distributeAmount(totalOfAllExpenses, headCount):
+// the remainder paisa lands on a per-expense basis, so redistributing the
+// grand total can disagree with the recorded splits by a paisa per expense —
+// leaving members "owing ₹0.01" forever after fully settling. Any view that
+// reconciles against split/settlement records must use this.
+export const groupShareTotals = (amounts, headCount) => {
+  const totals = Array.from({ length: Math.max(0, headCount || 0) }, () => 0);
+  (amounts || []).forEach((amount) => {
+    distributeAmount(amount, headCount).forEach((share, i) => {
+      totals[i] = roundMoney(totals[i] + share);
+    });
+  });
+  return totals;
+};
+
 // Stable, descending comparator for history rows.
 // Order: date desc → creation timestamp desc → id desc.
 //

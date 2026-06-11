@@ -30,7 +30,7 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 ## Baselines (verify before/after edits; don't regress)
 
 - **Tests:** 351 pass / 0 fail, 17 files (`npm test`).
-- **Lint:** 0 errors / 14 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx`/`TrendChart.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
+- **Lint:** 0 errors / 14 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
 - **Build:** succeeds (~1.16 MB bundle; the >500 kB chunk warning is expected).
 
@@ -79,7 +79,7 @@ First run shows `CredentialSetup.jsx`. Creds (Supabase URL + anon key, optional 
 - **`Routine.jsx`** — self-contained daily food/skin/habit/sleep/mood/water sub-app (own tab).
 - **`AIHub.jsx`** — AI toolbox tab (rendered when `tab === "ai"`). Exposes 11 distinct tools: Subscription Detector, Anomaly Scanner, Duplicate Detector, Merchant Cleanup, AI Narrative, What-if Simulator, Budget Recommender, Mood↔Spend Correlation, Tax Helper (India 80C/80D/HRA), Smart Reminders, and Goal/Budget Coach. All tools call `POST /api/ai-analyze` with a `mode` param; all PII is redacted via `redactTransactions()`/`redact()` before sending. Props: `expenses`, `incomes`, `categories`, `wallets`, `budgets`, `recurring`, `onApplyBudgets`, `onApplyMerchantRules`, `onShowToast`.
 - **`CalendarView.jsx`** — month-grid calendar rendered inside the history tab. Shows per-day expense/income totals with a heat-map background (green → yellow → red). Supports controlled selection (`selectedDay` + `onDayClick` props) or internal state; `compact` prop hides the day-detail panel. Props: `expenses`, `incomes`, `transfers`, `categories`, `wallets`, `onTxClick`, `compact`, `selectedDay`, `onDayClick`.
-- **`CredentialSetup.jsx`**, **`ReceiptPicker.jsx`** (image + PDF), **`components/TrendChart.jsx`**.
+- **`CredentialSetup.jsx`**, **`ReceiptPicker.jsx`** (image + PDF).
 
 ### Support modules (`src/`)
 | File | Purpose |
