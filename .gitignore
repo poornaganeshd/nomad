@@ -27,4 +27,3 @@ playwright-report/
 *.sln
 *.sw?
 .aider*
-preview-event-detail.html
