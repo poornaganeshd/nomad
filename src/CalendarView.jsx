@@ -136,10 +136,13 @@ export default function CalendarView({
           )}
           {dat.exp > 0 && (
             <div style={{
-              fontSize: 8,
+              // High-contrast text colour, not the expense orange: on the warmer
+              // heat-map cells (high-spend days) orange-on-orange washed out, so
+              // large amounts like ₹8.0k were effectively invisible.
+              fontSize: 9,
               fontFamily: "var(--font-h)",
               fontWeight: 700,
-              color: isSel ? "#fff" : "#E07A5F",
+              color: isSel ? "#fff" : "var(--text)",
               lineHeight: 1,
               overflow: "hidden",
               textOverflow: "ellipsis",

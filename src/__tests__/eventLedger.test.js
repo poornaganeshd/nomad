@@ -91,3 +91,79 @@ describe('event group ledger', () => {
     expect(debit).toEqual({ C: 45, D: 35 });
   });
 });
+
+// Mirrors the grpSettled reconciliation in App.jsx (Events detail). The group
+// BALANCES card is derived from group EXPENSES only, so it must reconcile against
+// settlements of the auto-IOUs created when an expense is logged (those carry a
+// groupId matching an event expense) — NOT settlements of manually-added split
+// IOUs, which live in their own owe/owed tally. Mixing them in over-subtracts and
+// leaves a phantom balance after everything looks settled. Keep in sync with the
+// `eStl`/`grpSettled`/`bal` math in App.jsx.
+const grpSettled = (parts, settlements, expenseIds) => {
+  const ids = new Set(expenseIds);
+  const eStl = settlements.filter(s => s.groupId && ids.has(s.groupId));
+  return Object.fromEntries(parts.map(p => {
+    const pl = p.toLowerCase();
+    if (p === 'You') {
+      const out = eStl.filter(s => s.direction === 'owe').reduce((t, s) => t + s.amount, 0);
+      const inn = eStl.filter(s => s.direction === 'owed').reduce((t, s) => t + s.amount, 0);
+      return [p, inn - out];
+    }
+    const out = eStl.filter(s => s.direction === 'owe' && (s.splitName || '').toLowerCase() === pl).reduce((t, s) => t + s.amount, 0);
+    const inn = eStl.filter(s => s.direction === 'owed' && (s.splitName || '').toLowerCase() === pl).reduce((t, s) => t + s.amount, 0);
+    return [p, out - inn];
+  }));
+};
+
+const grpBalances = ({ parts, paid, shares, settlements, expenseIds }) => {
+  const settled = grpSettled(parts, settlements, expenseIds);
+  return parts.map(p => ({ name: p, bal: roundMoney((paid[p] || 0) - (shares[p] || 0) - (settled[p] || 0)) }));
+};
+
+describe('event group BALANCES vs settlements', () => {
+  // Scenario from the bug report: ₹1,151 group expense paid by You (2 people),
+  // PLUS a manual ₹175 IOU Rakesh owes you. Settling everything used to leave a
+  // phantom "You owe ₹175 / Rakesh gets back ₹175" because the manual settlement
+  // wrongly counted against the expense balance.
+  it('settling the expense IOU clears the balance to zero', () => {
+    const bals = grpBalances({
+      parts: ['You', 'Rakesh'],
+      paid: { You: 1151, Rakesh: 0 },
+      shares: { You: 575.5, Rakesh: 575.5 },
+      // Only the auto-IOU settlement (groupId === the expense id) counts.
+      settlements: [{ direction: 'owed', splitName: 'Rakesh', amount: 575.5, groupId: 'exp1' }],
+      expenseIds: ['exp1'],
+    });
+    expect(bals).toEqual([{ name: 'You', bal: 0 }, { name: 'Rakesh', bal: 0 }]);
+    expect(suggestSettlements(bals)).toEqual([]);
+  });
+
+  it('a manually-added IOU settlement does not corrupt the expense balance', () => {
+    const bals = grpBalances({
+      parts: ['You', 'Rakesh'],
+      paid: { You: 1151, Rakesh: 0 },
+      shares: { You: 575.5, Rakesh: 575.5 },
+      settlements: [
+        { direction: 'owed', splitName: 'Rakesh', amount: 575.5, groupId: 'exp1' }, // auto IOU
+        { direction: 'owed', splitName: 'Rakesh', amount: 175, /* no groupId */ }, // manual IOU
+      ],
+      expenseIds: ['exp1'],
+    });
+    // The manual ₹175 is ignored here — expense balance is fully settled, no
+    // phantom "You owe ₹175".
+    expect(bals).toEqual([{ name: 'You', bal: 0 }, { name: 'Rakesh', bal: 0 }]);
+    expect(suggestSettlements(bals)).toEqual([]);
+  });
+
+  it('a partial settlement of the expense IOU leaves the remaining balance', () => {
+    const bals = grpBalances({
+      parts: ['You', 'Rakesh'],
+      paid: { You: 1151, Rakesh: 0 },
+      shares: { You: 575.5, Rakesh: 575.5 },
+      settlements: [{ direction: 'owed', splitName: 'Rakesh', amount: 300, groupId: 'exp1' }],
+      expenseIds: ['exp1'],
+    });
+    expect(bals).toEqual([{ name: 'You', bal: 275.5 }, { name: 'Rakesh', bal: -275.5 }]);
+    expect(suggestSettlements(bals)).toEqual([{ from: 'Rakesh', to: 'You', amt: 275.5 }]);
+  });
+});
