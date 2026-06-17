@@ -165,3 +165,45 @@ export const historySortCompare = (a, b) => {
   if (tb !== ta) return tb - ta;
   return String(b?.id || "").localeCompare(String(a?.id || ""));
 };
+
+// ---------------------------------------------------------------------------
+// Shared decision helpers — the "single source of truth" wall.
+//
+// Each function below replaces logic that used to be inlined (and silently
+// drifted) in more than one place in App.jsx. They are pure and unit-tested, so
+// every call site stays in agreement and a regression shows up as a test
+// failure rather than a user-visible bug. Don't re-inline these.
+// ---------------------------------------------------------------------------
+
+// RBI cap: a UPI Lite wallet may never hold more than ₹5000.
+export const UPI_LITE_MAX_BALANCE = 5000;
+
+// True when topping a UPI Lite wallet (current balance) up by `incoming` would
+// breach the ₹5000 ceiling. Used by every path that can credit UPI Lite
+// (calibration AND transfers — transfers used to skip the check entirely).
+export const exceedsUpiLiteBalance = (currentBalance, incoming = 0) =>
+  roundMoney((Number(currentBalance) || 0) + (Number(incoming) || 0)) > UPI_LITE_MAX_BALANCE;
+
+// Default wallet for a settle / record-payment action. direction "owed" means
+// YOU receive the money, and UPI Lite cannot receive — so it must never be the
+// default for a receive. (The modal used to default to UPI Lite and the save
+// then rejected it, so a no-tap confirm always errored.) `isUpiLiteFn` is the
+// app's isUpiLite predicate, passed in to keep this module React/wallet-free.
+export const defaultSettleWalletId = (direction, wallets, isUpiLiteFn) => {
+  const list = wallets || [];
+  const usable = direction === "owed" ? list.filter(w => !isUpiLiteFn(w)) : list;
+  return (usable[0] || list[0])?.id;
+};
+
+// Resolve a recurring bill's category to a display object. Recurring bills use
+// the recurring category lists (built-in defaults + the user's custom ones), NOT
+// the expense categories — looking them up against expense categories showed a
+// raw id like "ott"/"other_rec". Pass the lists in priority order. Single source
+// of truth for every place that renders a recurring category.
+export const resolveRecCategory = (categoryId, lists = [], categoryName) => {
+  for (const list of lists) {
+    const hit = (list || []).find(c => c && c.id === categoryId);
+    if (hit) return hit;
+  }
+  return { id: categoryId, name: categoryName || categoryId, color: "#8A8A9A", neon: "#A0A0B0" };
+};

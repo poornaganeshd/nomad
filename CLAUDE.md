@@ -61,6 +61,8 @@ Vitest + jsdom (configured in `vite.config.js` under `test`). Coverage via `@vit
 | `wBal` logic in `App.jsx` (mirrors `roundMoney`) | `src/__tests__/balances.test.js` |
 | `parseAmount`/`isUpiLite` helpers in `App.jsx` | `src/__tests__/helpers.test.js` |
 | `src/syncMerge.js` (reconcile regression) | `src/__tests__/reconcileFlow.test.js` |
+| event group ledger + `grpSettled` reconciliation (mirrors App.jsx Events) | `src/__tests__/eventLedger.test.js` |
+| single-source decision helpers (`exceedsUpiLiteBalance`, `defaultSettleWalletId`, `resolveRecCategory`) | `src/__tests__/guards.test.js` |
 | `api/_shared.ts` | `api/__tests__/_shared.test.ts` |
 | `api/_ai-provider.ts` | `api/__tests__/ai-provider.test.ts` |
 | `api/ai-analyze.ts` | `api/__tests__/ai-analyze.test.ts` |
@@ -137,4 +139,5 @@ Cron in `vercel.json` (only `send-reports`). Env: `VITE_SUPABASE_URL`/`SUPABASE_
 - **`AIHub.jsx` calls only `/api/ai-analyze`** (not the older `ai-insights`/`ai-categorize`/`ai-chat` endpoints) for its 11 tools. The omnibus `ai-analyze.ts` is the preferred pattern for new AI features — add a mode there rather than a new file to stay under the Vercel Hobby function limit.
 - **`api/ai-analyze.ts` has a sanitize step** — after AI returns JSON, each mode's `sanitize()` function normalises enum values and resets out-of-list IDs to `null`. Always add sanitization when accepting AI output for a new mode; don't let raw AI strings reach the client.
 - **`balances.test.js` and `helpers.test.js` mirror inline logic in `App.jsx`** — they duplicate and test pure functions that live inside the monolith. If you extract or change `wBal` accumulation or `parseAmount`/`isUpiLite`, update these tests to match.
+- **Single-source decision helpers live in `financeUtils.js` — don't re-inline them.** A recurring bug class here was the same decision copied into several call sites then drifting apart (e.g. recurring category looked up in expense `cats` in one place but `RC`/`recCats` in another; the UPI-Lite ₹5000 ceiling enforced on calibration/income but not transfers; the settle modal defaulting a *receive* to UPI-Lite which the save then rejects). These now have one tested home: `resolveRecCategory` (every recurring-category render), `exceedsUpiLiteBalance`/`UPI_LITE_MAX_BALANCE` (every path that credits UPI Lite), `defaultSettleWalletId` (settle/record-payment default wallet). Call them; don't paste a fresh copy. Guarded by `guards.test.js`.
 - **Don't trust this file's claims about a symbol existing** — grep first. Prior versions of this doc described features (demo mode, meditation/workout cards, habit streaks, push notifications) that were never shipped or were later removed. The code is authoritative.
