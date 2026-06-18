@@ -3,7 +3,7 @@
 // propagates to ALL write paths (add, undo, first-connect sync, etc.)
 // automatically. Never write an inline array in a toSB() call.
 export const COLS = {
-  expenses:    ["id", "amount", "categoryId", "walletId", "note", "date", "eventId", "groupId", "receipt_url", "paidBy", "balBefore"],
+  expenses:    ["id", "amount", "categoryId", "walletId", "note", "date", "eventId", "groupId", "receipt_url", "paidBy", "balBefore", "splitWith"],
   incomes:     ["id", "amount", "sourceId", "walletId", "note", "date", "receipt_url", "balBefore"],
   transfers:   ["id", "amount", "fromWallet", "toWallet", "note", "date", "fromBalBefore", "toBalBefore"],
   settlements: ["id", "amount", "splitName", "splitId", "direction", "walletId", "date", "groupId", "eventId", "categoryId", "note"],

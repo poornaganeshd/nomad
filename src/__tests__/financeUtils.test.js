@@ -10,6 +10,7 @@ import {
   recurringDaysOverdue,
   distributeAmount,
   groupShareTotals,
+  expenseShareMap,
   historySortCompare,
   itemTimestamp,
 } from '../financeUtils.js';
@@ -368,6 +369,46 @@ describe('groupShareTotals', () => {
     expect(groupShareTotals([100], 0)).toEqual([]);
     expect(groupShareTotals(null, 2)).toEqual([0, 0]);
     expect(groupShareTotals([12.34, 5], 1)).toEqual([17.34]);
+  });
+});
+
+describe('expenseShareMap', () => {
+  const parts = ['You', 'Rahul', 'Priya'];
+
+  it('falls back to an equal split when an expense has no splitWith (legacy)', () => {
+    // Matches groupShareTotals: ₹100 among 3 → You gets the extra paisa.
+    expect(expenseShareMap([{ amount: 100 }], parts)).toEqual({ You: 33.34, Rahul: 33.33, Priya: 33.33 });
+  });
+
+  it('agrees with groupShareTotals for a series of equal-split expenses', () => {
+    const exps = [{ amount: 100 }, { amount: 100 }];
+    const totals = groupShareTotals([100, 100], 3);
+    expect(expenseShareMap(exps, parts)).toEqual({ You: totals[0], Rahul: totals[1], Priya: totals[2] });
+  });
+
+  it('honours an explicit unequal splitWith breakdown', () => {
+    const exps = [{ amount: 100, splitWith: { You: 50, Rahul: 30, Priya: 20 } }];
+    expect(expenseShareMap(exps, parts)).toEqual({ You: 50, Rahul: 30, Priya: 20 });
+  });
+
+  it('excludes people omitted from splitWith (subset split)', () => {
+    // Only You + Rahul share this one; Priya was excluded.
+    const exps = [{ amount: 80, splitWith: { You: 40, Rahul: 40 } }];
+    expect(expenseShareMap(exps, parts)).toEqual({ You: 40, Rahul: 40, Priya: 0 });
+  });
+
+  it('mixes legacy equal and explicit splitWith expenses', () => {
+    const exps = [
+      { amount: 90 },                                        // equal: 30 each
+      { amount: 100, splitWith: { You: 100 } },              // you covered it alone
+    ];
+    expect(expenseShareMap(exps, parts)).toEqual({ You: 130, Rahul: 30, Priya: 30 });
+  });
+
+  it('per-person shares sum to the grand total', () => {
+    const exps = [{ amount: 100, splitWith: { You: 33.34, Rahul: 33.33, Priya: 33.33 } }, { amount: 50, splitWith: { You: 25, Priya: 25 } }];
+    const totals = expenseShareMap(exps, parts);
+    expect(roundMoney(Object.values(totals).reduce((s, v) => s + v, 0))).toBe(150);
   });
 });
 

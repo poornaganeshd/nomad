@@ -331,6 +331,10 @@ DO $$ BEGIN ALTER TABLE expenses  ADD COLUMN IF NOT EXISTS "balBefore" NUMERIC D
 DO $$ BEGIN ALTER TABLE incomes   ADD COLUMN IF NOT EXISTS "balBefore" NUMERIC DEFAULT NULL; EXCEPTION WHEN undefined_table THEN NULL; END $$;
 DO $$ BEGIN ALTER TABLE transfers ADD COLUMN IF NOT EXISTS "fromBalBefore" NUMERIC DEFAULT NULL; EXCEPTION WHEN undefined_table THEN NULL; END $$;
 DO $$ BEGIN ALTER TABLE transfers ADD COLUMN IF NOT EXISTS "toBalBefore"   NUMERIC DEFAULT NULL; EXCEPTION WHEN undefined_table THEN NULL; END $$;
+-- Per-expense group split breakdown: { "You": share, "<name>": share, ... } in
+-- INR. Absent/null = legacy equal split among all participants. Lets a single
+-- group expense be split unequally, by exact amounts, or among a subset.
+DO $$ BEGIN ALTER TABLE expenses  ADD COLUMN IF NOT EXISTS "splitWith"  JSONB   DEFAULT NULL; EXCEPTION WHEN undefined_table THEN NULL; END $$;
 
 -- ── 7. SYNC IDEMPOTENCY KEYS ──────────────────────────────────
 -- Used by /api/sync to detect already-applied mutations so a client retry

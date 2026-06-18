@@ -154,6 +154,52 @@ describe('getExchangeRate', () => {
 });
 
 // ---------------------------------------------------------------------------
+// getExchangeRate — historical (back-dated transactions)
+// ---------------------------------------------------------------------------
+describe('getExchangeRate (historical date)', () => {
+  const localToday = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+
+  it('fetches the rate AS OF a past date and caches it under a composite key', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ usd: { inr: 80.5 }, date: '2024-01-15' }),
+    });
+    const rate = await getExchangeRate('USD', '2024-01-15');
+    expect(rate).toBe(80.5);
+    const cached = JSON.parse(localStorage.getItem(RATE_CACHE_KEY));
+    expect(cached['USD@2024-01-15'].rate).toBe(80.5);
+  });
+
+  it('uses a cached historical rate regardless of TTL (rates are immutable)', async () => {
+    const cache = { 'USD@2024-01-15': { rate: 80.5, fetchedAt: Date.now() - 99 * 60 * 60 * 1000, date: '2024-01-15' } };
+    localStorage.setItem(RATE_CACHE_KEY, JSON.stringify(cache));
+    global.fetch = vi.fn();
+    expect(await getExchangeRate('USD', '2024-01-15')).toBe(80.5);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("today's date uses the live rate, not the historical path", async () => {
+    const cache = { USD: { rate: 83.5, fetchedAt: Date.now() } };
+    localStorage.setItem(RATE_CACHE_KEY, JSON.stringify(cache));
+    global.fetch = vi.fn();
+    expect(await getExchangeRate('USD', localToday())).toBe(83.5);
+    expect(await getExchangeRate('USD')).toBe(83.5);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the live rate when every historical source is unavailable', async () => {
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: false }) // historical: jsdelivr dated
+      .mockResolvedValueOnce({ ok: false }) // historical: fxratesapi historical
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ rates: { INR: 84 } }) }); // live primary
+    expect(await getExchangeRate('USD', '2024-01-15')).toBe(84);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // saveCurrencyMeta / getCurrencyMeta
 // ---------------------------------------------------------------------------
 describe('saveCurrencyMeta & getCurrencyMeta', () => {

@@ -124,6 +124,35 @@ export const groupShareTotals = (amounts, headCount) => {
   return totals;
 };
 
+// Per-person share map for a list of group expenses, honouring each expense's
+// optional `splitWith` breakdown — a { name -> share } object ("You" for the
+// logger, absent/0 = excluded from that expense). Expenses WITHOUT `splitWith`
+// fall back to an equal split across `allParts`, identical to groupShareTotals,
+// so legacy events reconcile unchanged. `allParts` is the canonical participant
+// list INCLUDING "You" (index 0), and its order decides who absorbs the
+// remainder paisa on equal splits — keep "You" first to match netSpent. Returns
+// { name -> roundMoney total }.
+export const expenseShareMap = (expenses, allParts) => {
+  const parts = (allParts || []).filter(Boolean);
+  const totals = Object.fromEntries(parts.map((p) => [p, 0]));
+  (expenses || []).forEach((e) => {
+    if (!e) return;
+    const sw = e.splitWith;
+    if (sw && typeof sw === "object") {
+      parts.forEach((p) => {
+        const v = Number(sw[p]);
+        if (Number.isFinite(v) && v > 0) totals[p] = roundMoney(totals[p] + v);
+      });
+    } else {
+      distributeAmount(e.amount, parts.length).forEach((share, i) => {
+        const p = parts[i];
+        if (p != null) totals[p] = roundMoney(totals[p] + share);
+      });
+    }
+  });
+  return totals;
+};
+
 // Stable, descending comparator for history rows.
 // Order: date desc → creation timestamp desc → id desc.
 //
