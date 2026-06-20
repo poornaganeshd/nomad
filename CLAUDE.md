@@ -29,8 +29,8 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 
 ## Baselines (verify before/after edits; don't regress)
 
-- **Tests:** 351 pass / 0 fail, 17 files (`npm test`).
-- **Lint:** 0 errors / 14 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
+- **Tests:** 552 pass / 0 fail, 26 files (`npm test`).
+- **Lint:** 0 errors / 12 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
 - **Build:** succeeds (~1.16 MB bundle; the >500 kB chunk warning is expected).
 
@@ -58,6 +58,8 @@ Vitest + jsdom (configured in `vite.config.js` under `test`). Coverage via `@vit
 | `src/foodVision.js` | `src/__tests__/foodVision.test.js` |
 | `src/dbCols.js` | `src/__tests__/dbCols.test.js` |
 | `src/txParsers.js` | `src/__tests__/txParsers.test.js` |
+| `src/nomadLiteSplit.js` | `src/__tests__/nomadLiteSplit.test.js` |
+| `netAcrossPeople` / `writeOffTotals` in `financeUtils.js` | `src/__tests__/financeUtils.test.js` |
 | `wBal` logic in `App.jsx` (mirrors `roundMoney`) | `src/__tests__/balances.test.js` |
 | `parseAmount`/`isUpiLite` helpers in `App.jsx` | `src/__tests__/helpers.test.js` |
 | `src/syncMerge.js` (reconcile regression) | `src/__tests__/reconcileFlow.test.js` |
@@ -79,6 +81,7 @@ First run shows `CredentialSetup.jsx`. Creds (Supabase URL + anon key, optional 
 - **`Routine.jsx`** — self-contained daily food/skin/habit/sleep/mood/water sub-app (own tab).
 - **`AIHub.jsx`** — AI toolbox tab (rendered when `tab === "ai"`). Exposes 11 distinct tools: Subscription Detector, Anomaly Scanner, Duplicate Detector, Merchant Cleanup, AI Narrative, What-if Simulator, Budget Recommender, Mood↔Spend Correlation, Tax Helper (India 80C/80D/HRA), Smart Reminders, and Goal/Budget Coach. All tools call `POST /api/ai-analyze` with a `mode` param; all PII is redacted via `redactTransactions()`/`redact()` before sending. Props: `expenses`, `incomes`, `categories`, `wallets`, `budgets`, `recurring`, `onApplyBudgets`, `onApplyMerchantRules`, `onShowToast`.
 - **`CalendarView.jsx`** — month-grid calendar rendered inside the history tab. Shows per-day expense/income totals with a heat-map background (green → yellow → red). Supports controlled selection (`selectedDay` + `onDayClick` props) or internal state; `compact` prop hides the day-detail panel. Props: `expenses`, `incomes`, `transfers`, `categories`, `wallets`, `onTxClick`, `compact`, `selectedDay`, `onDayClick`.
+- **`NomadLite.jsx`** + **`nomadLiteSplit.js`** — "NOMAD Lite": a presets shell of standalone quick-calculators launched from the **clock icon in the Events list header** (Events `view === "lite"`). First preset "Current Split" = electricity/utility bill splitter (base load + appliance %-groups + auto/manual extra, donut, cards/table, copy/WhatsApp/print). **localStorage-only** (`nomad-lite-v1`), never synced to Supabase. Theme is global (inherits app CSS vars — no local toggle). Pure split math + helpers live in `nomadLiteSplit.js` so `NomadLite.jsx` stays components-only (`react-refresh/only-export-components` is an error outside App/Routine). Add future presets to the `PRESETS` array.
 - **`CredentialSetup.jsx`**, **`ReceiptPicker.jsx`** (image + PDF).
 
 ### Support modules (`src/`)
@@ -91,18 +94,21 @@ First run shows `CredentialSetup.jsx`. Creds (Supabase URL + anon key, optional 
 | `billReminders.js` | due/upcoming recurring-bill toasts |
 | `receiptUpload.js` | compress + upload receipts (3 modes, below) |
 | `currencyConverter.js` | INR FX rates, 24h-cached in localStorage |
-| `financeUtils.js` | pure money/date helpers (`roundMoney`, `localDateKey`, recurring due-date, `distributeAmount`, `historySortCompare`). **No side effects.** |
+| `financeUtils.js` | pure money/date helpers (`roundMoney`, `localDateKey`, recurring due-date, `distributeAmount`, `historySortCompare`, `netAcrossPeople`, `writeOffTotals`). **No side effects.** |
 | `financeScore.js`, `redactor.js`, `foodVision.js` | finance score; PII redaction before AI; client food-photo compress + call |
 | `txParsers.js` | pure parsing utilities: `parseAmount` (locale-aware — EU comma, US thousands, Indian lakhs), `parseVoiceTx` (spoken text → `{amount, walletId, categoryId, note}`), `parseBankCsv` (HDFC/ICICI/SBI/generic CSV → transaction array) |
 
 ### Offline-first write path
 All Supabase writes go through `sendSupabaseRequest` in `offlineSync.js`. Offline or 5xx → serialised into localStorage queue `nomad-sync-queue-v1`, replayed on reconnect/visibility. Dedup by `dedupeKey`; bodies merged on dedup. Per-item retry; after 3 fails → dead-letter `nomad-sync-failed-v1`. Drops surface via `subscribeSyncDrops` (wired to toasts) — route any new drop condition through it. In production, writes route through **`/api/sync`** proxy for server-side idempotency (`nomad_sync_keys` table); dev/test go direct.
 
+### Cross-device live pull
+An open tab fetches Supabase only once on mount, so a row added on another device used to stay invisible until a full reload ("new entries missing on other device"). `App.jsx` runs a **background re-pull** — `load({ skipLocal: true })` on tab refocus (`visibilitychange`) **and** a 60s interval — via a `loadRef` so the interval always uses the latest closure. `load()` flushes the offline write queue first (push), then re-fetches + `mergeRemote` (pull); `mergeRemote` keeps any pending-upsert local row so a background pull can't clobber an in-flight edit. **`skipLocal` is load-bearing:** under `if (!skipLocal)`, the mount load restores local-only prefs (theme, categories, income sources) from the `nomad-v5` backup — background pulls MUST skip that, or a pull firing inside the 800ms backup debounce reverts a just-added category / theme toggle.
+
 ### Soft delete & conflicts
 `sbDelete` is a soft delete (PATCH `deleted_at=now()`); `sbDeleteWhere` is a hard DELETE (bulk/nuke). `sbGet` appends `&deleted_at=is.null` only for `SOFT_DELETE_TABLES` = {expenses, incomes, transfers, recurring, events, splits}. Optimistic concurrency: recurring edits send `If-Unmodified-Since` from version cache `nomad-record-versions-v1`; 412 → conflict toast + discard; flush strips the header so offline replays always win. Recurring is the only table with conflict detection (the others are append-only).
 
 ### Local backup & PWA
-Full state mirrored to localStorage `nomad-v5` (loaded as fallback). Categories/incomeSources live **only** in `nomad-v5` + backup export (not synced to Supabase — multi-device users restore via backup). `public/sw.js` is cache-first (app shell); skips Supabase + non-OK/opaque responses; bump `CACHE_NAME` when changing it (Vite plugin auto-injects a build-version suffix). No push notifications (removed) — reminders are in-app only.
+Full state mirrored to localStorage `nomad-v5` (loaded as fallback). Categories/incomeSources/write-off tags optionally sync cross-device via the **`user_prefs`** JSONB table (single row keyed `"nomad"`, dedupeKey `user_prefs:nomad`) — `load()` probes it once: present → `prefsSync="on"` (a debounced effect pushes `{categories, incomeSources, writeOffs}`, and remote is adopted when present & not pending, write-off map UNIONED local-wins); absent (un-migrated) → `prefsSync="off"`, stay localStorage-only with **zero error toasts**. So these still work offline/un-migrated, and follow you across devices once `nomad_setup.sql` is re-run. `nomad-v5` remains the local fallback + backup-export source. `public/sw.js` is cache-first (app shell); skips Supabase + non-OK/opaque responses; bump `CACHE_NAME` when changing it (Vite plugin auto-injects a build-version suffix). No push notifications (removed) — reminders are in-app only.
 
 ### Backend (`api/`)
 | File | Route | Purpose |
@@ -120,7 +126,7 @@ Full state mirrored to localStorage `nomad-v5` (loaded as fallback). Categories/
 Cron in `vercel.json` (only `send-reports`). Env: `VITE_SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY`, `GMAIL_USER`/`GMAIL_APP_PASSWORD`, `CRON_SECRET`, and `GEMINI_API_KEY`/`GROQ_API_KEY`/`NVIDIA_API_KEY` (any one enables AI).
 
 ### Database
-`nomad_setup.sql` is idempotent (safe re-run; `IF NOT EXISTS` / `DROP ... IF EXISTS`). Core tables: `expenses`, `incomes`, `transfers`, `settlements`, `splits`, `recurring`, `events`, `wallet_balances`. Email: `report_schedules`, `report_delivery_log`. Sync: `nomad_sync_keys`. Owner-only: `user_registry`. Routine: `daily_logs`, `user_config`. RLS disabled everywhere.
+`nomad_setup.sql` is idempotent (safe re-run; `IF NOT EXISTS` / `DROP ... IF EXISTS`). Core tables: `expenses`, `incomes`, `transfers`, `settlements`, `splits`, `recurring`, `events`, `wallet_balances`, `user_prefs` (cross-device JSONB prefs — categories/income sources/write-off tags). Email: `report_schedules`, `report_delivery_log`. Sync: `nomad_sync_keys`. Owner-only: `user_registry`. Routine: `daily_logs`, `user_config`. RLS disabled everywhere.
 
 ## Key conventions / gotchas
 
@@ -132,6 +138,8 @@ Cron in `vercel.json` (only `send-reports`). Env: `VITE_SUPABASE_URL`/`SUPABASE_
 - **Wallets/categories/sources are user-editable**, stored in localStorage state (`WALLETS`/`DC`/`DI`/`RC` are just default seeds). `wallets` state is the live source — never hardcode `{upi_lite,bank,cash}`.
 - **Group splits use `distributeAmount` (`grpShareMap`)**, not `total/n`, to avoid ₹0.01 residue. `addE` must include `paidBy` in its `COLS.expenses` write or group summaries break on reload.
 - **Tags were removed** — don't re-add (redundant with Events). SQL `tags` columns are dead but harmless.
+- **IOU write-offs are a separate localStorage map** `nomad-writeoffs-v1` = `{ splitId: "written" | "forgiven" }`, NOT a column on the split row. Two reasons: (1) no DB migration needed — adding a `COLS.splits` column the user's Supabase lacks 400s **every** split write; (2) the background pull would overwrite a local-only field on the synced row. The split is marked `settled: true` (synced) so it leaves all active nets; the write-off TAG (the loss category) stays in the map. `writeOffTotals(splits, settlements, map)` sums it; the "Write-offs" home one-liner reads it. "written" = a debt owed to you you gave up; "forgiven" = a debt you owed that was waived; both non-cash (no settlement, no wallet movement). The map also rides in the `user_prefs` cross-device blob (UNIONed, local-wins) so tags follow you across devices when migrated — but the `nomad-writeoffs-v1` localStorage map stays the source of truth and the un-migrated fallback.
+- **"Net across everything"** (home card) = `netAcrossPeople(splits, settlements, events)`: per-counterparty net of owe vs owed across personal IOUs **and** event splits. Excludes skipped, settled (remaining ≤ 0 after settlements), and **splits in `status: "completed"` events** — a finished event must never keep nagging the global net.
 - **Routine date math** uses a noon anchor (`new Date(y, m, d, 12)`) to dodge DST off-by-one. Keep it when touching streak/calendar code.
 - **`txParsers.js` is the only source for amount/voice/CSV parsing.** `parseAmount` handles EU comma-decimal, US thousands, and Indian lakh formats. `parseBankCsv` handles HDFC/ICICI/SBI and generic CSV layouts with auto-detected column headers (no row-count cap). Don't re-implement these inline in `App.jsx`.
 - **`AIHub.jsx` calls only `/api/ai-analyze`** (not the older `ai-insights`/`ai-categorize`/`ai-chat` endpoints) for its 11 tools. The omnibus `ai-analyze.ts` is the preferred pattern for new AI features — add a mode there rather than a new file to stay under the Vercel Hobby function limit.

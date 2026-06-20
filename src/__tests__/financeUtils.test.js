@@ -12,7 +12,95 @@ import {
   groupShareTotals,
   historySortCompare,
   itemTimestamp,
+  netAcrossPeople,
+  writeOffTotals,
 } from '../financeUtils.js';
+
+describe('writeOffTotals', () => {
+  it('sums written-off and forgiven separately and nets the loss', () => {
+    const splits = [
+      { id: 'a', amount: 53.31, direction: 'owed' },
+      { id: 'b', amount: 8.2, direction: 'owe' },
+      { id: 'c', amount: 999, direction: 'owe' }, // not in map → ignored
+    ];
+    const r = writeOffTotals(splits, [], { a: 'written', b: 'forgiven' });
+    expect(r.written).toBe(53.31);
+    expect(r.forgiven).toBe(8.2);
+    expect(r.netLoss).toBe(45.11);
+  });
+
+  it('counts only the remaining balance after prior settlements', () => {
+    const splits = [{ id: 'a', amount: 100, direction: 'owed' }];
+    const r = writeOffTotals(splits, [{ splitId: 'a', amount: 40 }], { a: 'written' });
+    expect(r.written).toBe(60); // 100 paid 40 → 60 written off
+  });
+
+  it('ignores fully-settled or untagged splits and bad input', () => {
+    expect(writeOffTotals([{ id: 'a', amount: 50 }], [{ splitId: 'a', amount: 50 }], { a: 'written' }).written).toBe(0);
+    expect(writeOffTotals().netLoss).toBe(0);
+    expect(writeOffTotals(null, null, null)).toEqual({ written: 0, forgiven: 0, netLoss: 0 });
+  });
+});
+
+describe('netAcrossPeople', () => {
+  it('nets owe vs owed per person across personal + event splits', () => {
+    const splits = [
+      { id: 's1', name: 'Rakesh', amount: 125, direction: 'owe' },                 // personal, you owe
+      { id: 's2', name: 'Rakesh', amount: 147, direction: 'owed', eventId: 'e1' }, // event, owes you
+    ];
+    const events = [{ id: 'e1', status: 'active' }];
+    const { people } = netAcrossPeople(splits, [], events);
+    expect(people).toHaveLength(1);
+    expect(people[0]).toMatchObject({ name: 'Rakesh', owe: 125, owed: 147, net: 22, placeCount: 2 });
+  });
+
+  it('excludes splits belonging to a COMPLETED event (the reported bug)', () => {
+    const splits = [
+      { id: 's1', name: 'Asha', amount: 200, direction: 'owed', eventId: 'done' },
+      { id: 's2', name: 'Asha', amount: 50, direction: 'owed' }, // personal, still open
+    ];
+    const events = [{ id: 'done', status: 'completed' }];
+    const { people } = netAcrossPeople(splits, [], events);
+    expect(people).toHaveLength(1);
+    expect(people[0].owed).toBe(50);       // the completed-event 200 is gone
+    expect(people[0].placeCount).toBe(1);
+  });
+
+  it('subtracts settlements and drops fully-settled splits', () => {
+    const splits = [{ id: 's1', name: 'Vik', amount: 300, direction: 'owed' }];
+    const settlements = [{ splitId: 's1', amount: 300 }];
+    expect(netAcrossPeople(splits, settlements, []).people).toHaveLength(0);
+
+    const partial = netAcrossPeople(splits, [{ splitId: 's1', amount: 100 }], []);
+    expect(partial.people[0].owed).toBe(200); // 300 - 100 remaining
+  });
+
+  it('ignores skipped and settled splits', () => {
+    const splits = [
+      { id: 's1', name: 'Mara', amount: 80, direction: 'owe', skipped: true },
+      { id: 's2', name: 'Mara', amount: 90, direction: 'owe', settled: true },
+      { id: 's3', name: 'Mara', amount: 40, direction: 'owe' },
+    ];
+    const { people } = netAcrossPeople(splits, [], []);
+    expect(people[0].owe).toBe(40);
+  });
+
+  it('rolls top-line totals from per-person nets', () => {
+    const splits = [
+      { id: 'a', name: 'P1', amount: 100, direction: 'owed' }, // they owe you 100
+      { id: 'b', name: 'P2', amount: 60, direction: 'owe' },   // you owe 60
+    ];
+    const { totalOwed, totalOwe } = netAcrossPeople(splits, [], []);
+    expect(totalOwed).toBe(100);
+    expect(totalOwe).toBe(60);
+  });
+
+  it('handles empty / malformed input safely', () => {
+    expect(netAcrossPeople().people).toEqual([]);
+    expect(netAcrossPeople(null, null, null).people).toEqual([]);
+    expect(netAcrossPeople([{ id: 'x', amount: 10, direction: 'owe' }], [], []).people).toEqual([]); // no name → skipped
+  });
+});
 
 // ---------------------------------------------------------------------------
 // roundMoney

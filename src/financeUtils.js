@@ -165,3 +165,73 @@ export const historySortCompare = (a, b) => {
   if (tb !== ta) return tb - ta;
   return String(b?.id || "").localeCompare(String(a?.id || ""));
 };
+
+// "Net across everything" — aggregates every still-open IOU per counterparty
+// across BOTH personal splits (no eventId) and event splits, nets owe vs owed,
+// and counts the distinct "places" (contexts) a person appears in.
+//
+// Correctness guards — these ARE the feature:
+//   1. skipped splits never count (explicitly waived).
+//   2. settled splits never count, and amount is the REMAINING balance
+//      (original − settlements applied) so a fully-paid split contributes 0 and
+//      drops out — settlements actually cancel the debt here.
+//   3. a split inside a COMPLETED event never counts. Once an event is wrapped
+//      up its balances are closed; it must not keep nagging the global net.
+//      (This was the reported bug: settled/finished events still showed here.)
+export const netAcrossPeople = (splits = [], settlements = [], events = []) => {
+  const paidBySplit = {};
+  (settlements || []).forEach((s) => {
+    if (s && s.splitId != null) paidBySplit[s.splitId] = (paidBySplit[s.splitId] || 0) + (Number(s.amount) || 0);
+  });
+  const doneEvents = new Set((events || []).filter((e) => e && e.status === "completed").map((e) => e.id));
+
+  const byName = new Map();
+  (splits || []).forEach((sp) => {
+    if (!sp || sp.deleted_at || sp.skipped || sp.settled) return;          // guard 1 + 2
+    if (sp.eventId && doneEvents.has(sp.eventId)) return;                   // guard 3
+    const remaining = roundMoney((Number(sp.amount) || 0) - (paidBySplit[sp.id] || 0)); // guard 2
+    if (remaining <= 0.005) return;
+    const name = String(sp.name || "").trim();
+    if (!name) return;
+    let entry = byName.get(name);
+    if (!entry) { entry = { name, owe: 0, owed: 0, places: new Set() }; byName.set(name, entry); }
+    if (sp.direction === "owed") entry.owed = roundMoney(entry.owed + remaining);
+    else entry.owe = roundMoney(entry.owe + remaining);
+    entry.places.add(sp.eventId || "personal");
+  });
+
+  const people = [...byName.values()]
+    .map((e) => ({ name: e.name, owe: e.owe, owed: e.owed, net: roundMoney(e.owed - e.owe), placeCount: e.places.size }))
+    .filter((e) => e.owe > 0.005 || e.owed > 0.005)
+    .sort((a, b) => Math.abs(b.net) - Math.abs(a.net) || (b.owed + b.owe) - (a.owed + a.owe));
+
+  const totalOwed = roundMoney(people.reduce((t, p) => t + Math.max(0, p.net), 0));
+  const totalOwe = roundMoney(people.reduce((t, p) => t + Math.max(0, -p.net), 0));
+  return { people, totalOwed, totalOwe };
+};
+
+// Write-offs summary. `writeOffMap` is { splitId: "written" | "forgiven" } —
+// kept in its OWN localStorage key (nomad-writeoffs-v1), NOT on the synced split
+// row, so a background Supabase pull can never wipe the tag and it needs no DB
+// column. "written" = a debt owed TO YOU you gave up collecting; "forgiven" = a
+// debt YOU owed that the other side waived. Both are non-cash (no settlement, no
+// wallet movement) — purely a record of what fell off the books. Sums the
+// REMAINING balance (original − prior settlements). netLoss = written − forgiven.
+export const writeOffTotals = (splits = [], settlements = [], writeOffMap = {}) => {
+  const map = writeOffMap || {};
+  const paid = {};
+  (settlements || []).forEach((s) => {
+    if (s && s.splitId != null) paid[s.splitId] = (paid[s.splitId] || 0) + (Number(s.amount) || 0);
+  });
+  let written = 0, forgiven = 0;
+  (splits || []).forEach((s) => {
+    if (!s || s.deleted_at) return;
+    const kind = map[s.id];
+    if (!kind) return;
+    const rem = roundMoney((Number(s.amount) || 0) - (paid[s.id] || 0));
+    if (rem <= 0.005) return;
+    if (kind === "written") written = roundMoney(written + rem);
+    else if (kind === "forgiven") forgiven = roundMoney(forgiven + rem);
+  });
+  return { written, forgiven, netLoss: roundMoney(written - forgiven) };
+};
