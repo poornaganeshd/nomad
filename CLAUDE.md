@@ -29,8 +29,8 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 
 ## Baselines (verify before/after edits; don't regress)
 
-- **Tests:** 351 pass / 0 fail, 17 files (`npm test`).
-- **Lint:** 0 errors / 14 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
+- **Tests:** 552 pass / 0 fail, 26 files (`npm test`).
+- **Lint:** 0 errors / 12 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
 - **Build:** succeeds (~1.16 MB bundle; the >500 kB chunk warning is expected).
 
@@ -58,6 +58,7 @@ Vitest + jsdom (configured in `vite.config.js` under `test`). Coverage via `@vit
 | `src/foodVision.js` | `src/__tests__/foodVision.test.js` |
 | `src/dbCols.js` | `src/__tests__/dbCols.test.js` |
 | `src/txParsers.js` | `src/__tests__/txParsers.test.js` |
+| `src/nomadLiteSplit.js` | `src/__tests__/nomadLiteSplit.test.js` |
 | `wBal` logic in `App.jsx` (mirrors `roundMoney`) | `src/__tests__/balances.test.js` |
 | `parseAmount`/`isUpiLite` helpers in `App.jsx` | `src/__tests__/helpers.test.js` |
 | `src/syncMerge.js` (reconcile regression) | `src/__tests__/reconcileFlow.test.js` |
@@ -81,6 +82,7 @@ First run shows `CredentialSetup.jsx`. Creds (Supabase URL + anon key, optional 
 - **`Routine.jsx`** — self-contained daily food/skin/habit/sleep/mood/water sub-app (own tab).
 - **`AIHub.jsx`** — AI toolbox tab (rendered when `tab === "ai"`). Exposes 11 distinct tools: Subscription Detector, Anomaly Scanner, Duplicate Detector, Merchant Cleanup, AI Narrative, What-if Simulator, Budget Recommender, Mood↔Spend Correlation, Tax Helper (India 80C/80D/HRA), Smart Reminders, and Goal/Budget Coach. All tools call `POST /api/ai-analyze` with a `mode` param; all PII is redacted via `redactTransactions()`/`redact()` before sending. Props: `expenses`, `incomes`, `categories`, `wallets`, `budgets`, `recurring`, `onApplyBudgets`, `onApplyMerchantRules`, `onShowToast`.
 - **`CalendarView.jsx`** — month-grid calendar rendered inside the history tab. Shows per-day expense/income totals with a heat-map background (green → yellow → red). Supports controlled selection (`selectedDay` + `onDayClick` props) or internal state; `compact` prop hides the day-detail panel. Props: `expenses`, `incomes`, `transfers`, `categories`, `wallets`, `onTxClick`, `compact`, `selectedDay`, `onDayClick`.
+- **`NomadLite.jsx`** + **`nomadLiteSplit.js`** — "NOMAD Lite": a presets shell of standalone quick-calculators launched from the **clock icon in the Events list header** (Events `view === "lite"`). First preset "Current Split" = electricity/utility bill splitter (base load + appliance %-groups + auto/manual extra, donut, cards/table, copy/WhatsApp/print). **localStorage-only** (`nomad-lite-v1`), never synced to Supabase. Theme is global (inherits app CSS vars — no local toggle). Pure split math + helpers live in `nomadLiteSplit.js` so `NomadLite.jsx` stays components-only (`react-refresh/only-export-components` is an error outside App/Routine). Add future presets to the `PRESETS` array.
 - **`CredentialSetup.jsx`**, **`ReceiptPicker.jsx`** (image + PDF).
 
 ### Support modules (`src/`)
@@ -100,11 +102,14 @@ First run shows `CredentialSetup.jsx`. Creds (Supabase URL + anon key, optional 
 ### Offline-first write path
 All Supabase writes go through `sendSupabaseRequest` in `offlineSync.js`. Offline or 5xx → serialised into localStorage queue `nomad-sync-queue-v1`, replayed on reconnect/visibility. Dedup by `dedupeKey`; bodies merged on dedup. Per-item retry; after 3 fails → dead-letter `nomad-sync-failed-v1`. Drops surface via `subscribeSyncDrops` (wired to toasts) — route any new drop condition through it. In production, writes route through **`/api/sync`** proxy for server-side idempotency (`nomad_sync_keys` table); dev/test go direct.
 
+### Cross-device live pull
+An open tab fetches Supabase only once on mount, so a row added on another device used to stay invisible until a full reload ("new entries missing on other device"). `App.jsx` runs a **background re-pull** — `load({ skipLocal: true })` on tab refocus (`visibilitychange`) **and** a 60s interval — via a `loadRef` so the interval always uses the latest closure. `load()` flushes the offline write queue first (push), then re-fetches + `mergeRemote` (pull); `mergeRemote` keeps any pending-upsert local row so a background pull can't clobber an in-flight edit. **`skipLocal` is load-bearing:** under `if (!skipLocal)`, the mount load restores local-only prefs (theme, categories, income sources) from the `nomad-v5` backup — background pulls MUST skip that, or a pull firing inside the 800ms backup debounce reverts a just-added category / theme toggle.
+
 ### Soft delete & conflicts
 `sbDelete` is a soft delete (PATCH `deleted_at=now()`); `sbDeleteWhere` is a hard DELETE (bulk/nuke). `sbGet` appends `&deleted_at=is.null` only for `SOFT_DELETE_TABLES` = {expenses, incomes, transfers, recurring, events, splits}. Optimistic concurrency: recurring edits send `If-Unmodified-Since` from version cache `nomad-record-versions-v1`; 412 → conflict toast + discard; flush strips the header so offline replays always win. Recurring is the only table with conflict detection (the others are append-only).
 
 ### Local backup & PWA
-Full state mirrored to localStorage `nomad-v5` (loaded as fallback). Categories/incomeSources live **only** in `nomad-v5` + backup export (not synced to Supabase — multi-device users restore via backup). `public/sw.js` is cache-first (app shell); skips Supabase + non-OK/opaque responses; bump `CACHE_NAME` when changing it (Vite plugin auto-injects a build-version suffix). No push notifications (removed) — reminders are in-app only.
+Full state mirrored to localStorage `nomad-v5` (loaded as fallback). Categories/incomeSources optionally sync cross-device via the **`user_prefs`** JSONB table (single row keyed `"nomad"`, dedupeKey `user_prefs:nomad`) — `load()` probes it once: present → `prefsSync="on"` (a debounced effect pushes `{categories, incomeSources}`, and remote is adopted when present & not pending a local upsert); absent (un-migrated) → `prefsSync="off"`, stay localStorage-only with **zero error toasts**. So these still work offline/un-migrated, and follow you across devices once `nomad_setup.sql` is re-run. `nomad-v5` remains the local fallback + backup-export source. `public/sw.js` is cache-first (app shell); skips Supabase + non-OK/opaque responses; bump `CACHE_NAME` when changing it (Vite plugin auto-injects a build-version suffix). No push notifications (removed) — reminders are in-app only.
 
 ### Backend (`api/`)
 | File | Route | Purpose |
@@ -122,7 +127,7 @@ Full state mirrored to localStorage `nomad-v5` (loaded as fallback). Categories/
 Cron in `vercel.json` (only `send-reports`). Env: `VITE_SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY`, `GMAIL_USER`/`GMAIL_APP_PASSWORD`, `CRON_SECRET`, and `GEMINI_API_KEY`/`GROQ_API_KEY`/`NVIDIA_API_KEY` (any one enables AI).
 
 ### Database
-`nomad_setup.sql` is idempotent (safe re-run; `IF NOT EXISTS` / `DROP ... IF EXISTS`). Core tables: `expenses`, `incomes`, `transfers`, `settlements`, `splits`, `recurring`, `events`, `wallet_balances`. Email: `report_schedules`, `report_delivery_log`. Sync: `nomad_sync_keys`. Owner-only: `user_registry`. Routine: `daily_logs`, `user_config`. RLS disabled everywhere.
+`nomad_setup.sql` is idempotent (safe re-run; `IF NOT EXISTS` / `DROP ... IF EXISTS`). Core tables: `expenses`, `incomes`, `transfers`, `settlements`, `splits`, `recurring`, `events`, `wallet_balances`, `user_prefs` (cross-device JSONB prefs — categories / income sources). Email: `report_schedules`, `report_delivery_log`. Sync: `nomad_sync_keys`. Owner-only: `user_registry`. Routine: `daily_logs`, `user_config`. RLS disabled everywhere.
 
 ## Key conventions / gotchas
 

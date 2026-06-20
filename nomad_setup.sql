@@ -117,6 +117,20 @@ ALTER TABLE recurring       REPLICA IDENTITY DEFAULT;
 ALTER TABLE events          REPLICA IDENTITY DEFAULT;
 ALTER TABLE wallet_balances REPLICA IDENTITY DEFAULT;
 
+-- Cross-device app preferences: a single-row-per-key JSONB store for data that
+-- is NOT transactional — user-curated categories, income sources, and the IOU
+-- write-off tag map (key = 'nomad'). Kept here (not on transaction rows) so a
+-- fresh device can pull the user's setup. The app degrades to localStorage-only
+-- if this table is absent, so running this migration is optional but enables
+-- categories / income sources / write-off labels to follow you across devices.
+CREATE TABLE IF NOT EXISTS user_prefs (
+  key        TEXT PRIMARY KEY,
+  value      JSONB,
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+ALTER TABLE user_prefs DISABLE ROW LEVEL SECURITY;
+ALTER TABLE user_prefs REPLICA IDENTITY DEFAULT;
+
 -- ── 1b. UPDATED_AT COLUMNS + TRIGGER ─────────────────────────
 -- Adds updated_at to every core table so future conflict detection
 -- (last-write-wins guards, incremental sync) has a server-stamped value
