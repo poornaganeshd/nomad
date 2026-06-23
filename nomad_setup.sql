@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS splits (
   settled   BOOLEAN,
   "eventId" TEXT,
   "groupId" TEXT,
-  note      TEXT
+  note      TEXT,
+  date      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS recurring (
@@ -258,6 +259,7 @@ ALTER TABLE expenses ADD COLUMN IF NOT EXISTS "paidBy"      TEXT;
 ALTER TABLE splits   ADD COLUMN IF NOT EXISTS note          TEXT;
 ALTER TABLE splits   ADD COLUMN IF NOT EXISTS deleted_at    TIMESTAMPTZ DEFAULT NULL;
 ALTER TABLE splits   ADD COLUMN IF NOT EXISTS skipped       BOOLEAN DEFAULT FALSE;
+ALTER TABLE splits   ADD COLUMN IF NOT EXISTS date          TEXT;
 ALTER TABLE events   ADD COLUMN IF NOT EXISTS type          TEXT DEFAULT 'solo';
 ALTER TABLE events   ADD COLUMN IF NOT EXISTS participants  JSONB DEFAULT '[]';
 
