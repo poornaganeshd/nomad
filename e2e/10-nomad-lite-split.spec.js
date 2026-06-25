@@ -56,3 +56,13 @@ test("adding an appliance opens its editor ready to edit", async ({ page }) => {
   await expect(page.locator("input[value='New appliance']")).toBeVisible();
   await expect(page.getByRole("button", { name: /Remove appliance/ })).toBeVisible();
 });
+
+test("Tip & Tax Split preset computes per-head total", async ({ page }) => {
+  await gotoLocal(page);
+  await page.getByRole("button", { name: "Events", exact: true }).click();
+  await page.getByRole("button", { name: "Open NOMAD Lite" }).click();
+  await page.getByRole("button", { name: /Tip & Tax Split/ }).click();
+  // bill 1000 + default 10% tip (100) + 5% tax (50) = 1150, default 2 people → 575
+  await page.locator("input[placeholder='0']").first().fill("1000");
+  await expect(page.getByText("₹575.00")).toBeVisible();
+});

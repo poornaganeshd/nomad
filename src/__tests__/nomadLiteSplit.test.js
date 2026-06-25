@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { computeSplit, loadState, DEFAULT_STATE, initials, fmt, LS_KEY, guessIcon, ICON_KEYS } from "../nomadLiteSplit";
+import { computeSplit, computeTipSplit, loadState, DEFAULT_STATE, initials, fmt, LS_KEY, guessIcon, ICON_KEYS } from "../nomadLiteSplit";
 
 const P = [{ id: "P1", name: "Aarav" }, { id: "P2", name: "Diya" }, { id: "P3", name: "Kiran" }];
 const round = (n) => Math.round(n * 100) / 100;
@@ -131,6 +131,25 @@ describe("helpers", () => {
   it("fmt renders INR with 2 decimals", () => {
     expect(fmt(1234.5)).toBe("₹1,234.50");
     expect(fmt(Infinity)).toBe("₹0.00");
+  });
+});
+
+describe("computeTipSplit", () => {
+  it("adds tip + tax on the pre-tax bill and splits equally", () => {
+    const r = computeTipSplit({ bill: "1000", tipPct: "10", taxPct: "5", people: 4 });
+    expect(round(r.tax)).toBe(50);   // 5% of 1000
+    expect(round(r.tip)).toBe(100);  // 10% of 1000
+    expect(round(r.grand)).toBe(1150);
+    expect(round(r.perHead)).toBe(287.5);
+  });
+  it("handles zero people without dividing by zero", () => {
+    const r = computeTipSplit({ bill: "500", tipPct: "10", taxPct: "0", people: 0 });
+    expect(r.perHead).toBe(0);
+    expect(round(r.grand)).toBe(550);
+  });
+  it("clamps negative / NaN inputs to zero", () => {
+    const r = computeTipSplit({ bill: "-100", tipPct: "abc", taxPct: "-5", people: -3 });
+    expect(r.bill).toBe(0); expect(r.tip).toBe(0); expect(r.tax).toBe(0); expect(r.grand).toBe(0); expect(r.people).toBe(0);
   });
 });
 
