@@ -50,7 +50,7 @@ const kbd = fn => e => { if (e.key === "Enter" || e.key === " ") { e.preventDefa
 // cascade geometry
 const CARD_H = 118, PEEK = 46, GAP = 18;
 
-export default function IOUWallet({ splits = [], settlements = [], categories = [], wallets = [], fmt = n => "₹" + n, uid = () => Math.random().toString(36).slice(2), isUpiLite = () => false, SettleModal = null, onAdd = () => {}, onSettle = () => {}, onSettleNet = () => {}, onSkip = () => {}, onUnskip = () => {}, onDelete = () => {}, onError = () => {} }) {
+export default function IOUWallet({ splits = [], settlements = [], categories = [], wallets = [], events = [], fmt = n => "₹" + n, uid = () => Math.random().toString(36).slice(2), isUpiLite = () => false, SettleModal = null, onAdd = () => {}, onSettle = () => {}, onSettleNet = () => {}, onSettleEventNet = () => {}, onSkip = () => {}, onUnskip = () => {}, onDelete = () => {}, onError = () => {} }) {
   const [view, sView] = useState("home");        // home | person
   const [cur, sCur] = useState(null);            // current person name
   const [layout, sLayout] = useState("stack");   // stack (cascade) | cards (gesture: swipe down spreads, up restacks)
@@ -64,10 +64,15 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
   const openMorph = (name, rect) => sMorph({ name, rect });
 
   // ── derived: canonical people + nets (mirrors App.jsx Splits aggregation) ──
-  const paidBy = {}; settlements.filter(s => s.splitId != null && !s.eventId).forEach(s => { paidBy[s.splitId] = (paidBy[s.splitId] || 0) + s.amount; });
+  // Event splits are now folded in alongside personal IOUs so one person's whole
+  // balance — general + every event they're in — lives in one place. Each split
+  // keeps its eventId, so the person-detail view groups them back by source and
+  // settling routes to the matching handler (onSettleNet vs onSettleEventNet).
+  const evName = id => events.find(e => e.id === id)?.name || "Event";
+  const paidBy = {}; settlements.filter(s => s.splitId != null).forEach(s => { paidBy[s.splitId] = (paidBy[s.splitId] || 0) + s.amount; });
   const remOf = s => roundMoney(s.amount - (paidBy[s.id] || 0));
   const canon = {}; const dispOf = raw => { const k = String(raw || "").trim().toLowerCase(); if (!k) return ""; if (!canon[k]) canon[k] = String(raw).trim(); return canon[k]; };
-  const personMap = {}; splits.filter(s => !s.eventId && !s.deleted_at).forEach(s => { const n = dispOf(s.name); if (!n) return; if (!personMap[n]) personMap[n] = { splits: [], net: 0 }; personMap[n].splits.push(s); if (!s.settled && !s.skipped) personMap[n].net += s.direction === "owed" ? remOf(s) : -remOf(s); });
+  const personMap = {}; splits.filter(s => !s.deleted_at).forEach(s => { const n = dispOf(s.name); if (!n) return; if (!personMap[n]) personMap[n] = { splits: [], net: 0 }; personMap[n].splits.push(s); if (!s.settled && !s.skipped) personMap[n].net += s.direction === "owed" ? remOf(s) : -remOf(s); });
   const people = Object.keys(personMap);
   const isResolved = n => personMap[n].splits.every(s => s.settled || s.skipped);
   const active = people.filter(n => !isResolved(n)).sort((a, b) => Math.abs(personMap[b].net) - Math.abs(personMap[a].net));
@@ -82,7 +87,12 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
     const c1 = avatarColor(name);
     const open = pm.splits.filter(s => !s.settled && !s.skipped);
     const last = open.slice().sort((a, b) => iouDateKey(b).localeCompare(iouDateKey(a)))[0];
-    const sub = open.length ? (last ? `${last.note || (categories.find(c => c.id === last.categoryId)?.name || "IOU")} · ${relDate(last.date || last.createdAt)}` : "") : "All settled";
+    // Subtitle prefers a source summary (general + N events) when the balance
+    // spans more than one place, else falls back to the latest IOU's note/date.
+    const evCount = new Set(open.filter(s => s.eventId).map(s => s.eventId)).size;
+    const hasGen = open.some(s => !s.eventId);
+    const srcSummary = evCount > 0 ? `${evCount} event${evCount > 1 ? "s" : ""}${hasGen ? " + general" : ""}` : "";
+    const sub = open.length ? (srcSummary || (last ? `${last.note || (categories.find(c => c.id === last.categoryId)?.name || "IOU")} · ${relDate(last.date || last.createdAt)}` : "")) : "All settled";
     return { n, up, down, c1, openCount: open.length, sub, dir: up ? "Owes you" : down ? "You owe" : "Settled", amt: Math.abs(n) < 0.5 ? "—" : fmt(Math.abs(n)) };
   };
   const openPerson = name => { sCur(name); sView("person"); sAdding(false); sMorph(null); };
@@ -91,15 +101,31 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
   // ── PERSON DETAIL ─────────────────────────────────────────────────────────
   if (view === "person" && cur && personMap[cur]) {
     const pm = personMap[cur]; const n = pm.net; const pos = n > 0.5; const ac = avatarColor(cur);
-    const rows = pm.splits.slice().sort((a, b) => { const ra = (a.settled || a.skipped) ? 1 : 0, rb = (b.settled || b.skipped) ? 1 : 0; if (ra !== rb) return ra - rb; return iouDateKey(b).localeCompare(iouDateKey(a)); });
+    const sortRows = arr => arr.slice().sort((a, b) => { const ra = (a.settled || a.skipped) ? 1 : 0, rb = (b.settled || b.skipped) ? 1 : 0; if (ra !== rb) return ra - rb; return iouDateKey(b).localeCompare(iouDateKey(a)); });
+    // Group this person's IOUs by source: "General" (no eventId) + one section per
+    // event. Each group carries its own pending net so it can be settled on its
+    // own — general via onSettleNet, an event via onSettleEventNet — keeping the
+    // Events tab and this wallet in lock-step (both read the same splits state).
+    const groupMap = {}; pm.splits.forEach(s => { const key = s.eventId || "__general__"; if (!groupMap[key]) groupMap[key] = { key, eventId: s.eventId || null, label: s.eventId ? evName(s.eventId) : "General", splits: [], net: 0 }; groupMap[key].splits.push(s); if (!s.settled && !s.skipped) groupMap[key].net += s.direction === "owed" ? remOf(s) : -remOf(s); });
+    // canNet decides whether a one-tap net "Settle up" is offered for the group.
+    // General → always (onSettleNet). Event → only when every pending IOU is
+    // expense-derived (has a groupId), because onSettleEventNet settles those
+    // alone; a manual-only event IOU would make the net button a no-op, so we
+    // hide it there and let each row settle via its own Record button instead.
+    Object.values(groupMap).forEach(g => { if (!g.eventId) { g.canNet = true; return; } const pend = g.splits.filter(s => !s.settled && !s.skipped); g.canNet = pend.length > 0 && pend.every(s => !!s.groupId); });
+    const groupList = Object.values(groupMap).sort((a, b) => (a.eventId ? 1 : 0) - (b.eventId ? 1 : 0) || Math.abs(b.net) - Math.abs(a.net));
     return <div>
       <div onClick={() => { sView("home"); sCur(null); }} role="button" tabIndex={0} onKeyDown={kbd(() => { sView("home"); sCur(null); })} aria-label="Back to wallet" style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--muted)", fontSize: 12.5, fontWeight: 700, fontFamily: "var(--font-h)", cursor: "pointer", padding: "7px 12px", marginBottom: 8, borderRadius: 12, background: SURF, boxShadow: NEU_SM }}><CaretLeft size={14} weight="bold" /> Wallet</div>
       <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 16 }}>
         <div style={{ width: 50, height: 50, borderRadius: 16, background: ac, color: ink(ac), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 17, boxShadow: NEU_SM }}>{initials(cur)}</div>
         <div><div style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 19, color: "var(--text)" }}>{cur}</div><div style={{ fontSize: 12.5, fontWeight: 700, marginTop: 2, color: Math.abs(n) < 0.5 ? "var(--muted)" : pos ? MINT : CORAL }}>{Math.abs(n) < 0.5 ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><CheckCircle size={13} weight="fill" /> All settled up</span> : pos ? `Owes you ${fmt(n)}` : `You owe ${fmt(-n)}`}</div></div>
       </div>
-      {Math.abs(n) >= 0.5 && <button onClick={() => sNetSheet(cur)} style={{ width: "100%", border: "none", borderRadius: RAD_SM, boxShadow: NEU_SM, padding: 14, cursor: "pointer", color: ink(pos ? MINT : CORAL), fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 14, marginBottom: 16, background: pos ? MINT : CORAL, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8 }}><CheckCircle size={16} weight="fill" /> Settle up · {pos ? `collect ${fmt(n)}` : `pay ${fmt(-n)}`}</button>}
-      {rows.map(s => {
+      {groupList.map(g => { const gpos = g.net > 0.5, gactive = Math.abs(g.net) > 0.5; const gcol = gpos ? MINT : CORAL; return <div key={g.key} style={{ marginBottom: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10, paddingLeft: 2 }}>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0 }}>{g.eventId ? <span style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 800, color: VIOLET, background: VIOLET + "22", padding: "4px 10px", borderRadius: 9, display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 190 }}><span style={{ width: 6, height: 6, borderRadius: 6, background: VIOLET, flexShrink: 0 }} />{g.label}</span> : <span style={{ fontSize: 10.5, fontFamily: "var(--font-h)", fontWeight: 800, color: "var(--muted)", letterSpacing: ".7px", textTransform: "uppercase" }}>General</span>}<span style={{ fontSize: 11.5, fontWeight: 800, fontFamily: "var(--font-h)", color: gactive ? gcol : "var(--muted)", fontVariantNumeric: "tabular-nums" }}>{!gactive ? "settled" : (gpos ? "+" : "−") + fmt(Math.abs(g.net)).slice(1)}</span></div>
+          {gactive && g.canNet && <button onClick={() => sNetSheet({ name: cur, net: g.net, eventId: g.eventId, label: g.eventId ? g.label : null })} style={{ border: "none", borderRadius: 11, boxShadow: NEU_SM, padding: "6px 13px", cursor: "pointer", background: gcol, color: ink(gcol), fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 11, display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0 }}><CheckCircle size={13} weight="fill" /> Settle up</button>}
+        </div>
+        {sortRows(g.splits).map(s => {
         const done = s.settled && !s.skipped, skip = s.skipped, owe = s.direction === "owe", col = owe ? CORAL : MINT;
         const rem = remOf(s), part = !done && !skip && rem < s.amount - 0.005;
         const c = categories.find(x => x.id === s.categoryId);
@@ -127,9 +153,10 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
           </div>}
         </div>;
       })}
+      </div>; })}
       {!adding ? <button onClick={() => sAdding(true)} style={{ width: "100%", border: "none", borderRadius: RAD_SM, padding: 13, background: SURF, boxShadow: NEU_SM, color: "var(--ts)", fontFamily: "var(--font-h)", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginTop: 8, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6 }}><Plus size={15} weight="bold" /> Add IOU with {cur}</button> : <AddForm fixedName={cur} {...addFormProps} />}
       {SettleModal && settleTgt && <SettleModal split={settleTgt} remaining={remOf(settleTgt)} wallets={wallets} onConfirm={(wid, amount, date) => { const r = onSettle(settleTgt.id, wid, amount, date); sSettleTgt(null); if (r !== false) sBurst(b => b + 1); }} onClose={() => sSettleTgt(null)} />}
-      {netSheet && <NetSheet name={netSheet} pm={personMap[netSheet]} wallets={wallets} fmt={fmt} isUpiLite={isUpiLite} onSettleNet={(...a) => { const r = onSettleNet(...a); if (r !== false) sBurst(b => b + 1); return r; }} onClose={() => sNetSheet(null)} />}{burst > 0 && <Confetti key={burst} />}
+      {netSheet && <NetSheet desc={netSheet} wallets={wallets} fmt={fmt} isUpiLite={isUpiLite} onConfirm={(wid, amt) => { const r = netSheet.eventId ? onSettleEventNet(netSheet.eventId, netSheet.name, wid, amt) : onSettleNet(netSheet.name, wid, amt); if (r !== false) sBurst(b => b + 1); return r; }} onClose={() => sNetSheet(null)} />}{burst > 0 && <Confetti key={burst} />}
     </div>;
   }
 
@@ -166,7 +193,7 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
     {settledPeople.length > 0 && <details style={{ marginTop: 18 }}><summary style={{ fontSize: 11.5, color: "var(--muted)", cursor: "pointer", fontFamily: "var(--font-h)", fontWeight: 700 }}><CheckCircle size={12} weight="fill" style={{ verticalAlign: "-2px", marginRight: 4 }} />Settled up ({settledPeople.length})</summary><div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 9 }}>{settledPeople.map(name => <div key={name} onClick={() => openPerson(name)} role="button" tabIndex={0} onKeyDown={kbd(() => openPerson(name))} aria-label={`Open ${name}, settled`} style={{ display: "flex", alignItems: "center", gap: 11, padding: "11px 14px", ...neuCard, opacity: 0.72, cursor: "pointer" }}><div style={{ width: 32, height: 32, borderRadius: 11, background: avatarColor(name), color: ink(avatarColor(name)), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 12, boxShadow: NEU_SM }}>{initials(name)}</div><span style={{ flex: 1, fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--ts)" }}>{name}</span><span style={{ fontSize: 11, color: MINT, fontFamily: "var(--font-h)", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 3 }}><CheckCircle size={12} weight="fill" /> settled</span></div>)}</div></details>}
 
     {SettleModal && settleTgt && <SettleModal split={settleTgt} remaining={remOf(settleTgt)} wallets={wallets} onConfirm={(wid, amount, date) => { const r = onSettle(settleTgt.id, wid, amount, date); sSettleTgt(null); if (r !== false) sBurst(b => b + 1); }} onClose={() => sSettleTgt(null)} />}
-    {netSheet && <NetSheet name={netSheet} pm={personMap[netSheet]} wallets={wallets} fmt={fmt} isUpiLite={isUpiLite} onSettleNet={(...a) => { const r = onSettleNet(...a); if (r !== false) sBurst(b => b + 1); return r; }} onClose={() => sNetSheet(null)} />}
+    {netSheet && <NetSheet desc={netSheet} wallets={wallets} fmt={fmt} isUpiLite={isUpiLite} onConfirm={(wid, amt) => { const r = netSheet.eventId ? onSettleEventNet(netSheet.eventId, netSheet.name, wid, amt) : onSettleNet(netSheet.name, wid, amt); if (r !== false) sBurst(b => b + 1); return r; }} onClose={() => sNetSheet(null)} />}
     {morph && <MorphCompose rect={morph.rect} name={morph.name} categories={categories} uid={uid} onAdd={onAdd} onError={onError} onClose={() => sMorph(null)} />}
     {burst > 0 && <Confetti key={burst} />}
   </div>;
@@ -260,8 +287,8 @@ function PersonCard({ name, info, onOpen, showAdd = false, onQuickAdd = () => {}
 // Whole-person net settle sheet (neumorphic) → routes to App's settleNet, which
 // nets owe/owed and validates wallet funds against the net only. Empty amount =
 // settle the full net; a smaller amount = partial (settleNet handles the math).
-function NetSheet({ name, pm, wallets, fmt, isUpiLite, onSettleNet, onClose }) {
-  const n = roundMoney(pm?.net || 0); const absNet = Math.abs(n); const pos = n > 0.5;
+function NetSheet({ desc, wallets, fmt, isUpiLite, onConfirm, onClose }) {
+  const name = desc?.name; const n = roundMoney(desc?.net || 0); const absNet = Math.abs(n); const pos = n > 0.5;
   const recv = pos; // receiving money → UPI Lite not allowed
   const opts = recv ? wallets.filter(w => !isUpiLite(w)) : wallets;
   const [wid, sWid] = useState((opts[0] || wallets[0])?.id);
@@ -273,7 +300,7 @@ function NetSheet({ name, pm, wallets, fmt, isUpiLite, onSettleNet, onClose }) {
     <div onClick={e => e.stopPropagation()} style={{ background: SURF, borderRadius: "24px 24px 0 0", width: "100%", maxWidth: 430, boxShadow: NEU_RAISED, overflow: "hidden" }}>
       <div style={{ background: accent, color: ink(accent), padding: "16px 20px" }}>
         <div style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 17 }}>Settle with {name}</div>
-        <div style={{ fontSize: 11.5, fontWeight: 600, opacity: .82, marginTop: 2 }}>Nets every open IOU — owe and owed cancel.</div>
+        <div style={{ fontSize: 11.5, fontWeight: 600, opacity: .82, marginTop: 2 }}>{desc?.label ? `Event · ${desc.label} — nets this event's IOUs.` : "Nets every general IOU — owe and owed cancel."}</div>
       </div>
       <div style={{ padding: 20 }}>
         <div style={{ textAlign: "center", marginBottom: 16 }}><div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700 }}>{pos ? `Collect from ${name}` : `Pay ${name}`}</div><div style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 36, letterSpacing: "-1.2px", color: accent, margin: "4px 0", fontVariantNumeric: "tabular-nums" }}>{fmt(absNet)}</div></div>
@@ -283,7 +310,7 @@ function NetSheet({ name, pm, wallets, fmt, isUpiLite, onSettleNet, onClose }) {
         <div style={{ display: "flex", gap: 9, marginBottom: 18 }}>{opts.map(w => { const on = wid === w.id; return <button key={w.id} onClick={() => sWid(w.id)} style={{ flex: 1, padding: "11px 5px", borderRadius: 14, display: "flex", flexDirection: "column", alignItems: "center", gap: 5, cursor: "pointer", border: "none", boxShadow: on ? NEU_INSET : NEU_SM, background: on ? w.color + "30" : SURF, transition: "box-shadow .15s, background .15s" }}><span style={{ width: 14, height: 14, borderRadius: 5, background: w.color }} /><span style={{ fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 700, color: on ? "var(--text)" : "var(--muted)" }}>{w.name}</span></button>; })}</div>
         <div style={{ display: "flex", gap: 11 }}>
           <button onClick={onClose} style={{ flex: 1, padding: 13, border: "none", borderRadius: 14, background: SURF, boxShadow: NEU_SM, color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
-          <button onClick={ev => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; const ok = onSettleNet(name, wid, partial ? amt : ""); if (ok !== false) onClose(); else ev.currentTarget.disabled = false; }} style={{ flex: 2, padding: 13, border: "none", borderRadius: 14, boxShadow: NEU_SM, background: accent, color: ink(accent), fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>{pos ? "Collect" : "Pay"} {fmt(partial ? roundMoney(entered) : absNet)} & settle</button>
+          <button onClick={ev => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; const ok = onConfirm(wid, partial ? amt : ""); if (ok !== false) onClose(); else ev.currentTarget.disabled = false; }} style={{ flex: 2, padding: 13, border: "none", borderRadius: 14, boxShadow: NEU_SM, background: accent, color: ink(accent), fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>{pos ? "Collect" : "Pay"} {fmt(partial ? roundMoney(entered) : absNet)} & settle</button>
         </div>
       </div>
     </div>
