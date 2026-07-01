@@ -46,8 +46,13 @@
   }
 }
 
+html,
 body {
   margin: 0;
+  /* Stop the browser/PWA pull-to-refresh from reloading the app on a swipe-down
+     at the top of a list (the IOU cascade's swipe-to-spread lives there). The
+     app has its own background re-pull, so native pull-to-refresh is dead weight. */
+  overscroll-behavior-y: contain;
 }
 
 @keyframes evSlideUp {
