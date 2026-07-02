@@ -1,11 +1,21 @@
-const CACHE_NAME = 'nomad-app-v11';
+const CACHE_NAME = 'nomad-app-v12';
 const APP_SHELL = ['/', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL))
   );
-  self.skipWaiting();
+  // NO skipWaiting() here: taking over immediately fires controllerchange,
+  // which main.jsx answers with a reload — yanking the app out from under the
+  // user mid-scroll every time a deploy lands. The new SW now WAITS until the
+  // user taps the "App updated — reload" banner, which posts SKIP_WAITING.
+});
+
+self.addEventListener('message', (event) => {
+  // waitUntil keeps the just-woken waiting worker alive until skipWaiting
+  // completes — without it the promotion can be silently dropped when the
+  // worker is stopped right after the message handler returns.
+  if (event.data === 'SKIP_WAITING') event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener('activate', (event) => {

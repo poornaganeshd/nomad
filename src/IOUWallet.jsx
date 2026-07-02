@@ -53,14 +53,17 @@ const ink = hex => lum(hex) > 140 ? "#46435A" : "#EDEAF2";
 const kbd = fn => e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); } };
 
 // Lock the document scroll while a full-screen sheet/morph is mounted. The
-// effect cleanup restores the previous value on unmount, so a sheet can never
-// leave the page wedged — this replaces nothing (there was no lock before) and
-// stops the page behind a sheet from scroll-bleeding under the finger.
+// lock must go on <html> — the viewport takes its overflow from the root
+// element, so hiding overflow on <body> alone doesn't stop touch scrolling on
+// mobile. The effect cleanup restores the previous values on unmount, so a
+// sheet can never leave the page wedged.
 function useLockBodyScroll() {
   useEffect(() => {
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => { document.body.style.overflow = prev; };
+    const html = document.documentElement, body = document.body;
+    const prevH = html.style.overflow, prevB = body.style.overflow;
+    html.style.overflow = "hidden";
+    body.style.overflow = "hidden";
+    return () => { html.style.overflow = prevH; body.style.overflow = prevB; };
   }, []);
 }
 
