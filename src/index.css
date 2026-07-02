@@ -49,10 +49,12 @@
 html,
 body {
   margin: 0;
-  /* Stop the browser/PWA pull-to-refresh from reloading the app on a swipe-down
-     at the top of a list (the IOU cascade's swipe-to-spread lives there). The
-     app has its own background re-pull, so native pull-to-refresh is dead weight. */
-  overscroll-behavior-y: contain;
+  /* No overscroll-behavior / overflow tricks here: the swipe cascade that
+     needed pull-to-refresh suppressed is gone, and any non-visible overflow on
+     html/body can demote Chrome Android's root scroller off the compositor
+     fast-path (main-thread scrolling = stiff, janky touch scroll). Horizontal
+     clipping lives in App.jsx's style block as overflow-x: clip, which clips
+     WITHOUT creating a scroll container. */
 }
 
 @keyframes evSlideUp {
