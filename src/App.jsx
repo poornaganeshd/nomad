@@ -24,6 +24,7 @@ import { parseAmount, parseVoiceTx, parseBankCsv } from "./txParsers";
 import CalendarView from "./CalendarView";
 import NomadLite from "./NomadLite";
 import IOUWallet from "./IOUWallet";
+import { useLockBodyScroll } from "./scrollLock";
 const APP = "NOMAD", CUR = "₹";
 // Use crypto.randomUUID() when available (all modern browsers + Node 14.17+).
 // Falls back to a longer random suffix than the previous 4 chars to keep
@@ -356,6 +357,7 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
 
 
 function SettleM({ split: sp, remaining: rm, onConfirm: oc, onClose: cl, wallets: wl = WALLETS }) {
+  useLockBodyScroll();
   const isO = sp.direction === "owed"; const walletOptions = isO ? wl.filter(w => !isUpiLite(w)) : wl; const [wid, sW] = useState(() => defaultSettleWalletId(sp.direction, wl, isUpiLite) || "bank"); const maxAmt = rm ?? sp.amount; const [amt, sAmt] = useState(String(maxAmt)); const [sdate, sSdate] = useState(localDateKey()); const parsedAmt = parseAmount(amt); const validAmt = Math.min(Math.max(Number.isFinite(parsedAmt) ? parsedAmt : 0, 0.01), maxAmt); const isPartial = validAmt < maxAmt - 0.005;
   return <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={cl}><div onClick={e => e.stopPropagation()} style={{ background: "var(--card)", borderRadius: "20px 20px 0 0", padding: 24, width: "100%", maxWidth: 430 }}><div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{isO ? `Receiving from ${sp.name}` : `Paying ${sp.name}`}</div><button onClick={cl} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: 4 }}><IconX size={18} /></button></div><div style={{ marginBottom: 14 }}><div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 600, marginBottom: 5, letterSpacing: "0.5px" }}>AMOUNT{isPartial ? " (PARTIAL PAYMENT)" : ""}</div><div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--bg)", borderRadius: 10, padding: "10px 14px", border: `1.5px solid ${isO ? "#6BAA75" : "#E07A5F"}` }}><span style={{ fontFamily: "var(--font-h)", fontSize: 16, color: "var(--muted)" }}>₹</span><input type="number" value={amt} onChange={e => sAmt(e.target.value)} max={maxAmt} min={0.01} step={0.01} style={{ flex: 1, border: "none", background: "transparent", fontFamily: "var(--font-h)", fontSize: 20, fontWeight: 700, color: isO ? "#6BAA75" : "#E07A5F", outline: "none" }} /><button onClick={() => sAmt(String(maxAmt))} style={{ fontSize: 9, fontFamily: "var(--font-h)", color: "var(--muted)", background: "var(--border)", border: "none", borderRadius: 4, padding: "2px 6px", cursor: "pointer", fontWeight: 600 }}>MAX</button></div>{isPartial && <div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-h)", marginTop: 5 }}>{fmt(roundMoney(maxAmt - validAmt))} will remain as pending IOU</div>}</div><div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 600, marginBottom: 8, letterSpacing: "0.5px" }}>DATE</div><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 20 }}><input type="date" value={sdate} max={localDateKey()} onChange={e => sSdate(e.target.value)} style={{ ...is, marginBottom: 0, flex: 1 }} />{sdate !== localDateKey() && <button onClick={() => sSdate(localDateKey())} style={{ padding: "11px 13px", border: "1.5px solid var(--border)", borderRadius: 10, background: "transparent", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}>Today</button>}</div><div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 600, marginBottom: 8, letterSpacing: "0.5px" }}>{isO ? "RECEIVE INTO" : "PAY FROM"}</div><div style={{ display: "flex", gap: 8, marginBottom: 20 }}>{walletOptions.map(w => <button key={w.id} onClick={() => sW(w.id)} style={{ flex: 1, padding: "10px 6px", borderRadius: 10, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, border: `2px solid ${wid === w.id ? w.color : "var(--border)"}`, background: wid === w.id ? w.color + "15" : "var(--card)", cursor: "pointer" }}><DI2 id={w.id} accent={w.neon || w.color} size={18} /><span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: wid === w.id ? 700 : 500, color: wid === w.id ? w.color : "var(--muted)" }}>{w.name}</span></button>)}</div><div style={{ display: "flex", gap: 10 }}><button onClick={cl} style={{ flex: 1, padding: 13, border: "1.5px solid var(--border)", borderRadius: 12, background: "transparent", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 13, cursor: "pointer" }}>Cancel</button><button onClick={(ev) => { if (ev.currentTarget.disabled) return; if (validAmt > 0) { ev.currentTarget.disabled = true; oc(wid, validAmt, sdate); cl(); } }} style={{ flex: 2, padding: 13, border: "none", borderRadius: 12, background: isO ? "#6BAA75" : "#E07A5F", color: "#fff", fontFamily: "var(--font-h)", fontSize: 13, cursor: "pointer", fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}><IconSend size={15} />{isO ? `Received ${fmt(validAmt)}` : `Paid ${fmt(validAmt)}`}</button></div></div></div>;
 }
@@ -814,6 +816,7 @@ const TxCard = memo(function TxCard({ item: it, categories: cats, incomeSources:
 });
 
 function CalM({ wallet: w, currentBal: cb, onSave: os, onClose: cl, onViewLedger: ovl }) {
+  useLockBodyScroll();
   const [v, sV] = useState(String(roundMoney(cb)));
   const [note, sNote] = useState("");
   const numV = Number(v) || 0;
@@ -825,6 +828,7 @@ function CalM({ wallet: w, currentBal: cb, onSave: os, onClose: cl, onViewLedger
   return <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={cl}><div onClick={e => e.stopPropagation()} style={{ background: "var(--card)", borderRadius: "20px 20px 0 0", padding: 28, width: "100%", maxWidth: 430 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 16, fontWeight: 700, color: "var(--text)", marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}><DI2 id={w.id} accent={w.neon || w.color} size={20} /> Reconcile {w.name}</div><p style={{ fontSize: 13, color: "var(--muted)", fontFamily: "var(--font-b)", marginBottom: 16, lineHeight: 1.5 }}>NOMAD balance: <strong>{fmt(roundMoney(cb))}</strong>. Enter your actual balance from your bank or UPI app.{isUL && " UPI Lite max ₹5000 (RBI)."}</p><label style={ls}>Actual Balance ({CUR})</label><input type="number" value={v} onChange={e => sV(e.target.value)} style={{ ...is, fontSize: 28, fontWeight: 700, fontFamily: "var(--font-h)", textAlign: "center", padding: "16px", color: (overCap || isNeg) ? "#D4726A" : w.color, borderColor: (overCap || isNeg) ? "#D4726A" : w.color, marginBottom: 8 }} />{overCap && <p style={{ fontSize: 11, color: "#D4726A", marginBottom: 6, fontFamily: "var(--font-h)", fontWeight: 600 }}>Exceeds ₹5000 UPI Lite cap</p>}{isNeg && <p style={{ fontSize: 11, color: "#D4726A", marginBottom: 6, fontFamily: "var(--font-h)", fontWeight: 600 }}>Cannot be negative</p>}{gap !== 0 && !overCap && !isNeg && <div style={{ fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 700, color: gapPos ? "#6BAA75" : "#D4726A", background: gapPos ? "#6BAA7515" : "#D4726A15", borderRadius: 8, padding: "7px 14px", marginBottom: 10, textAlign: "center" }}>Adjustment: {gapPos ? "+" : ""}{fmt(gap)} will be logged</div>}<input value={note} onChange={e => sNote(e.target.value)} placeholder="Reason (optional): bank charge, missed UPI, cash ATM…" style={{ ...is, fontSize: 12, marginBottom: 16, color: "var(--text)" }} />{ovl && <button onClick={ovl} style={{ width: "100%", padding: "10px", marginBottom: 12, border: "1px dashed var(--border)", borderRadius: 10, background: "transparent", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}><IconHistory size={13} />View running balance to find a mismatch</button>}<div style={{ display: "flex", gap: 10 }}><button onClick={cl} style={{ flex: 1, padding: 14, border: "1.5px solid var(--border)", borderRadius: 12, background: "transparent", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 14, cursor: "pointer" }}>Cancel</button><button disabled={overCap || isNeg} onClick={() => { os(numV, note); cl(); }} style={{ flex: 2, padding: 14, border: "none", borderRadius: 12, background: (overCap || isNeg) ? "#ccc" : w.color, color: "#fff", fontFamily: "var(--font-h)", fontSize: 14, cursor: (overCap || isNeg) ? "not-allowed" : "pointer", fontWeight: 700 }}>{gap === 0 ? "Verify ✓" : "Set Balance"}</button></div></div></div>
 }
 function RecountM({ wallet: w, currentBal: cb, onClose: cl }) {
+  useLockBodyScroll();
   const DENOMS = [500, 200, 100, 50, 20, 10, 5, 2, 1];
   const STORE = "nomad-cash-counts";
   const [counts, sCounts] = useState(() => { try { const s = JSON.parse(localStorage.getItem(STORE) || "{}"); return Object.fromEntries(DENOMS.map(d => [d, s[d] || 0])); } catch { return Object.fromEntries(DENOMS.map(d => [d, 0])); } });
@@ -843,6 +847,7 @@ function RecountM({ wallet: w, currentBal: cb, onClose: cl }) {
 // touching ONE wallet newest-first with the balance after each — so you can
 // line it up against a bank/UPI statement and spot the entry you forgot to log.
 function LedgerM({ wallet: w, rows, curBal, onReconcile, lastVerifyLabel, onClose: cl }) {
+  useLockBodyScroll();
   // Rows carry `verified` (computed by the parent from the wallet's last
   // reconcile): everything at/before your last verify shows a green check,
   // anything logged since shows none. No tapping — verifying the wallet is
@@ -870,6 +875,7 @@ function LedgerM({ wallet: w, rows, curBal, onReconcile, lastVerifyLabel, onClos
 }
 
 function RecEditPanel({ r, recCats, onSave, onClose, wallets: wl = WALLETS }) {
+  useLockBodyScroll();
   const [d, sD] = useState({
     name: r.name, amount: String(r.amount),
     categoryId: r.categoryId, categoryName: r.categoryName || "",
@@ -1525,9 +1531,14 @@ export default function Nomad() {
     const handleStorage = (e) => { if (e.key === "nomad-v5" && e.newValue !== e.oldValue) sStaleData(true); };
     // Update banner keys off a WAITING service worker (the SW no longer
     // skipWaiting()s, so controllerchange won't fire until the user accepts).
-    // Covers both cases: an update that finished installing before this ran
-    // (reg.waiting) and one that lands while the app is open (updatefound).
-    if ("serviceWorker" in navigator) navigator.serviceWorker.getRegistration().then(reg => { if (!reg) return; if (reg.waiting) sSwUpdate(true); reg.addEventListener("updatefound", () => { const w = reg.installing; if (!w) return; w.addEventListener("statechange", () => { if (w.state === "installed" && navigator.serviceWorker.controller) sSwUpdate(true); }); }); }).catch(() => {});
+    // Uses navigator.serviceWorker.ready, NOT getRegistration(): registration
+    // happens in main.jsx on window load, which can land AFTER this mount
+    // effect — getRegistration() would resolve undefined on a first visit and
+    // this listener would never attach for the whole session. ready resolves
+    // once the registration exists. Covers all three phases of an update:
+    // already waiting, currently installing, and one that starts later
+    // (updatefound) while the app is open.
+    if ("serviceWorker" in navigator) navigator.serviceWorker.ready.then(reg => { const watch = w => { if (!w) return; const fire = () => { if (w.state === "installed" && navigator.serviceWorker.controller) sSwUpdate(true); }; fire(); w.addEventListener("statechange", fire); }; if (reg.waiting) sSwUpdate(true); watch(reg.installing); reg.addEventListener("updatefound", () => watch(reg.installing)); }).catch(() => {});
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
     window.addEventListener("storage", handleStorage);
@@ -2062,17 +2073,28 @@ export default function Nomad() {
   // to actually change hands. We record an offsetting settlement against every
   // pending IOU (so each links/categorizes correctly) but validate wallet funds
   // against the NET, so you only need the net amount on hand to clear everything.
-  const settleNet = (name, wid, payAmt) => {
+  // sources: null → personal IOUs only (original behavior). { general, eventIds } →
+  // ATOMIC cross-source settle for the wallet's "Settle everything": general (when
+  // general is true) + each listed event's expense-derived IOUs, netted and
+  // validated in ONE pass against ONE wallet snapshot. Looping the per-source
+  // handlers instead would validate every payout against the same stale wBal
+  // (it's a useMemo — no re-render happens between synchronous calls in a click
+  // handler), letting two payouts jointly overdraw a wallet — and would stack
+  // one toast per source.
+  const settleNet = (name, wid, payAmt, sources = null) => {
     const remOf = s => roundMoney(s.amount - stl.filter(x => x.splitId === s.id).reduce((t, x) => t + x.amount, 0));
     const nameLc = String(name || "").trim().toLowerCase();
-    const items = sp.filter(s => (s.name || "").trim().toLowerCase() === nameLc && !s.eventId && !s.deleted_at && !s.settled && !s.skipped).map(s => ({ s, rem: remOf(s) })).filter(x => x.rem > 0.005);
+    const evSet = sources ? new Set(sources.eventIds || []) : null;
+    const evExp = {}; if (evSet) evSet.forEach(id => { evExp[id] = new Set(ex.filter(e => e.eventId === id && !e.deleted_at).map(e => e.id)); });
+    const inScope = s => !s.eventId ? (sources ? sources.general !== false : true) : (evSet ? evSet.has(s.eventId) && !!s.groupId && evExp[s.eventId].has(s.groupId) : false);
+    const items = sp.filter(s => (s.name || "").trim().toLowerCase() === nameLc && !s.deleted_at && !s.settled && !s.skipped && inScope(s)).map(s => ({ s, rem: remOf(s) })).filter(x => x.rem > 0.005);
     if (!items.length) { showT("Nothing pending to settle", "info"); return false; }
     const net = roundMoney(items.reduce((t, x) => t + (x.s.direction === "owed" ? x.rem : -x.rem), 0));
     const hasPayAmt = payAmt != null && payAmt !== "";
     const payNum = hasPayAmt ? Number(payAmt) : null;
     if (hasPayAmt && (!Number.isFinite(payNum) || payNum <= 0)) { showT("Enter a valid amount", "error"); return false; }
     const today = localDateKey();
-    const mkRec = (x, amt) => ({ id: uid(), type: "settlement", splitName: x.s.name, splitId: x.s.id, amount: amt, direction: x.s.direction, walletId: wid, date: today, createdAt: new Date().toISOString(), ...(x.s.categoryId && { categoryId: x.s.categoryId }), ...(x.s.note && { note: x.s.note }), ...(x.s.groupId && { groupId: x.s.groupId }) });
+    const mkRec = (x, amt) => ({ id: uid(), type: "settlement", splitName: x.s.name, splitId: x.s.id, amount: amt, direction: x.s.direction, walletId: wid, date: today, createdAt: new Date().toISOString(), ...(x.s.categoryId && { categoryId: x.s.categoryId }), ...(x.s.note && { note: x.s.note }), ...(x.s.groupId && { groupId: x.s.groupId }), ...(x.s.eventId && { eventId: x.s.eventId }) });
     // Partial: pay down the net direction only, up to the capped amount. The
     // remainder (and any opposite-direction IOUs) stay pending for a later settle.
     if (hasPayAmt && roundMoney(payNum) < Math.abs(net) - 0.005) {
@@ -2085,7 +2107,10 @@ export default function Nomad() {
         if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + cap) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (₹${u.day} used)`, "error"); return false; } if (roundMoney(u.month + cap) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
       }
       const recs = []; const doneIds = [];
-      for (const x of items.filter(i => i.s.direction === dir)) {
+      // General IOUs pay down before event IOUs so a partial amount clears the
+      // person's direct debts first (matches the wallet's stated allocation).
+      const ordered = items.filter(i => i.s.direction === dir).sort((a, b) => (a.s.eventId ? 1 : 0) - (b.s.eventId ? 1 : 0));
+      for (const x of ordered) {
         if (cap <= 0.005) break;
         const pay = roundMoney(Math.min(x.rem, cap));
         recs.push(mkRec(x, pay));
@@ -2623,11 +2648,12 @@ export default function Nomad() {
   if (!loaded) return null;
   const theme = dm ? { "--bg": "#000000", "--card": "#0F0F0F", "--border": "#1F1F1F", "--text": "#E5E7EB", "--ts": "#9CA3AF", "--muted": "#6B7280", "--nav-bg": "rgba(0,0,0,0.95)", "--neu-bg": "#161616", "--neu-lt": "#242424", "--neu-dk": "#000000" } : { "--bg": "#F2F0EB", "--card": "#FFF", "--border": "rgba(0,0,0,0.06)", "--text": "#1A1A2E", "--ts": "#4A4A5A", "--muted": "#8A8A9A", "--nav-bg": "rgba(242,240,235,0.92)", "--neu-bg": "#F2F0EB", "--neu-lt": "#FFFFFF", "--neu-dk": "#D4CFC6" };
 
-  return <div style={{ ...theme, fontFamily: "var(--font-b)", background: "var(--bg)", color: "var(--text)", minHeight: "100vh", width: "100%", maxWidth: 430, margin: "0 auto", padding: "0 0 110px", overflowX: "clip", boxSizing: "border-box" }}><style>{`
+  return <div className="nmClip" style={{ ...theme, fontFamily: "var(--font-b)", background: "var(--bg)", color: "var(--text)", minHeight: "100vh", width: "100%", maxWidth: 430, margin: "0 auto", padding: "0 0 110px", boxSizing: "border-box" }}><style>{`
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Nunito:wght@400;500;600;700;800&family=Playfair+Display:wght@400;500&display=swap');
 :root{--font-h:'Plus Jakarta Sans',sans-serif;--font-b:'Nunito',sans-serif}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-html,body{overflow-x:clip;max-width:100%}
+html,body{overflow-x:hidden;overflow-x:clip;max-width:100%}
+.nmClip{overflow-x:hidden;overflow-x:clip}
 body{background:${dm ? "#000000" : "#F2F0EB"}}
 input[type=date]{color-scheme:${dm ? "dark" : "light"}}input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}input[type=number]{-moz-appearance:textfield}
 ::-webkit-scrollbar{width:3px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
