@@ -176,12 +176,11 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
     // hide it there and let each row settle via its own Record button instead.
     Object.values(groupMap).forEach(g => { if (!g.eventId) { g.canNet = true; return; } const pend = g.splits.filter(s => !s.settled && !s.skipped); g.canNet = pend.length > 0 && pend.every(s => !!s.groupId); });
     const groupList = Object.values(groupMap).sort((a, b) => (a.eventId ? 1 : 0) - (b.eventId ? 1 : 0) || Math.abs(b.net) - Math.abs(a.net));
-    // Whole-person settle: offered when 2+ groups have a pending, nettable
-    // balance. Its amount is the sum of THOSE groups (a manual-only event group
-    // can't be net-settled, so it is excluded here and settles row-by-row).
-    const settleable = groupList.filter(g => g.canNet && Math.abs(g.net) > 0.5);
-    const allNet = roundMoney(settleable.reduce((t, g) => t + g.net, 0));
-    const allPos = allNet > 0.5;
+    // Whole-person settle: offered when 2+ groups still have pending IOUs.
+    // Scope = EVERY pending group (manual event IOUs included — App's
+    // settleNet handles them), so the button's amount is exactly the header
+    // net: what actually changes hands to clear this person completely.
+    const pendGroups = groupList.filter(g => g.splits.some(s => !s.settled && !s.skipped));
     // Two-pill layout: "Personal" (general IOUs + add form) and "Events" (every
     // event group). Only one segment renders at a time, so a person with many
     // events no longer produces an endless scroll. When the person only has one
@@ -236,8 +235,7 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
         <div style={{ width: 50, height: 50, borderRadius: 16, background: ac, color: ink(ac), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 17, boxShadow: NEU_SM }}>{initials(cur)}</div>
         <div><div style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 19, color: "var(--text)" }}>{cur}</div><div style={{ fontSize: 12.5, fontWeight: 700, marginTop: 2, color: Math.abs(n) < 0.5 ? "var(--muted)" : pos ? MINT : CORAL }}>{Math.abs(n) < 0.5 ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><CheckCircle size={13} weight="fill" /> All settled up</span> : pos ? `Owes you ${fmt(n)}` : `You owe ${fmt(-n)}`}</div></div>
       </div>
-      {settleable.length > 1 && <button onClick={() => sNetSheet({ name: cur, net: allNet, all: true, groups: settleable.map(g => ({ eventId: g.eventId, net: g.net })), count: settleable.length })} style={{ width: "100%", border: "none", borderRadius: RAD_SM, padding: "11px 14px", marginBottom: 14, cursor: "pointer", background: allPos ? MINT : CORAL, color: ink(allPos ? MINT : CORAL), fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 13, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, boxShadow: NEU_SM }}><CheckCircle size={15} weight="fill" /> Settle everything {fmt(Math.abs(allNet))}</button>}
-      {settleable.length > 1 && Math.abs(roundMoney(n - allNet)) > 0.5 && <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 600, margin: "-8px 2px 14px", textAlign: "center" }}>Excludes {fmt(Math.abs(roundMoney(n - allNet)))} in manually-added event IOUs — settle those from their own rows.</div>}
+      {pendGroups.length > 1 && <button onClick={() => sNetSheet({ name: cur, net: n, all: true, groups: pendGroups.map(g => ({ eventId: g.eventId, net: g.net })), count: pendGroups.length })} style={{ width: "100%", border: "none", borderRadius: RAD_SM, padding: "11px 14px", marginBottom: 14, cursor: "pointer", background: pos ? MINT : CORAL, color: ink(pos ? MINT : CORAL), fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 13, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, boxShadow: NEU_SM }}><CheckCircle size={15} weight="fill" /> Settle everything {fmt(Math.abs(n))}</button>}
       {evGroups.length > 0 && <div style={{ display: "flex", gap: 9, marginBottom: 14 }}>
         {[["personal", "Personal", genGroup?.net || 0], ["events", `Events · ${evGroups.length}`, evNetSum]].map(([id, lbl, v]) => { const on = curSeg === id; return <button key={id} onClick={() => sSeg(id)} aria-pressed={on} style={{ flex: 1, padding: "10px 8px", borderRadius: RAD_SM, border: "none", cursor: "pointer", fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 12, boxShadow: on ? NEU_INSET : NEU_SM, background: on ? (id === "events" ? VIOLET + "2e" : MINT + "2e") : SURF, color: on ? "var(--text)" : "var(--muted)", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, transition: "box-shadow .15s, background .15s" }}>{lbl}<span style={{ fontSize: 10.5, fontWeight: 800, fontVariantNumeric: "tabular-nums", color: Math.abs(v) < 0.005 ? "var(--muted)" : v > 0 ? MINT : CORAL }}>{segNetTxt(v)}</span></button>; })}
       </div>}

@@ -24,6 +24,10 @@ const EMPTY = {
  * Waits for the bottom-nav Add button so callers can interact immediately.
  */
 export async function gotoLocal(page, state = {}) {
+  // Abort remote font fetches: they're render-irrelevant to assertions, and on
+  // restricted networks the hanging requests stall the `load` event past the
+  // test timeout. Keeps the suite hermetic — no external hosts at all.
+  await page.route(/fonts\.(googleapis|gstatic)\.com/, (r) => r.abort());
   await page.goto("/");
   await page.evaluate((s) => {
     localStorage.clear();

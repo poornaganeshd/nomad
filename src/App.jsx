@@ -2085,8 +2085,15 @@ export default function Nomad() {
     const remOf = s => roundMoney(s.amount - stl.filter(x => x.splitId === s.id).reduce((t, x) => t + x.amount, 0));
     const nameLc = String(name || "").trim().toLowerCase();
     const evSet = sources ? new Set(sources.eventIds || []) : null;
-    const evExp = {}; if (evSet) evSet.forEach(id => { evExp[id] = new Set(ex.filter(e => e.eventId === id && !e.deleted_at).map(e => e.id)); });
-    const inScope = s => !s.eventId ? (sources ? sources.general !== false : true) : (evSet ? evSet.has(s.eventId) && !!s.groupId && evExp[s.eventId].has(s.groupId) : false);
+    // Event scope is by MEMBERSHIP only — manually-added event IOUs (no
+    // groupId) settle here too, so "Settle everything" really means the whole
+    // person and its amount equals the header net. Their settlement records
+    // are byte-identical to what the per-row Record button writes (splitId +
+    // eventId, no groupId), so the Events-tab ledger and grpSettled
+    // reconciliation are unaffected. settleEventNet stays strict
+    // (expense-derived only) because the group-ledger suggestion's amount
+    // must line up with grpSettled.
+    const inScope = s => !s.eventId ? (sources ? sources.general !== false : true) : (evSet ? evSet.has(s.eventId) : false);
     const items = sp.filter(s => (s.name || "").trim().toLowerCase() === nameLc && !s.deleted_at && !s.settled && !s.skipped && inScope(s)).map(s => ({ s, rem: remOf(s) })).filter(x => x.rem > 0.005);
     if (!items.length) { showT("Nothing pending to settle", "info"); return false; }
     const net = roundMoney(items.reduce((t, x) => t + (x.s.direction === "owed" ? x.rem : -x.rem), 0));

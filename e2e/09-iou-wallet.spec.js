@@ -27,9 +27,8 @@ test("settling a person nets to a settlement and marks the split settled", async
   await gotoLocal(page, { splits: [split] });
   await openIou(page);
 
-  // cascade stack: first tap fans the cards out, second opens the person detail
-  await page.getByText("Meera").first().click();
-  await page.getByText("Meera").first().click();
+  // flat card list (the old swipe cascade is gone): one tap opens the person
+  await page.getByRole("button", { name: /Open Meera/ }).click();
   // person detail → whole-person settle sheet
   await page.getByRole("button", { name: /Settle up/ }).click();
   await page.getByRole("button", { name: /Collect.*settle/ }).click();
