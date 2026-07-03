@@ -84,17 +84,22 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
   // re-walked every split/settlement row on each of those renders for nothing.
   const model = useMemo(() => {
     const evMap = new Map(events.map(e => [e.id, e]));
-    // COMPLETED events are fully out of this wallet: their IOUs don't reach
-    // personMap, so they can't touch person cards, nets, the breakdown, pills,
-    // or Settle everything. They live only inside that event in the Events tab,
-    // where recording a payment still credits the wallet balance as always.
-    // Reopening the event brings its pending IOUs back here automatically.
-    const doneEv = new Set(events.filter(e => e.status === "completed").map(e => e.id));
+    // Event IOUs reach this wallet ONLY while their event is explicitly ACTIVE
+    // (allowlist, not a completed-blocklist). This keeps out completed events
+    // AND the two zombie shapes that used to leak in forever: splits whose
+    // event was deleted (orphaned eventId), and events with a missing/legacy
+    // status — both invisible in the Events tab (its lists match only
+    // "active"/"completed" exactly), so the user had no way to clear them.
+    // Every creation path sets status: "active", so healthy data always
+    // qualifies; excluded IOUs still live inside their event in the Events tab
+    // (payments there credit the wallet as always), and reopening an event
+    // brings its pending IOUs back here automatically.
+    const activeEv = new Set(events.filter(e => e.status === "active").map(e => e.id));
     const paidBy = {}; settlements.forEach(s => { if (s.splitId != null) paidBy[s.splitId] = (paidBy[s.splitId] || 0) + s.amount; });
     const rem = s => roundMoney(s.amount - (paidBy[s.id] || 0));
     const canon = {}; const dispOf = raw => { const k = String(raw || "").trim().toLowerCase(); if (!k) return ""; if (!canon[k]) canon[k] = String(raw).trim(); return canon[k]; };
     const personMap = {};
-    splits.filter(s => !s.deleted_at && !(s.eventId && doneEv.has(s.eventId))).forEach(s => {
+    splits.filter(s => !s.deleted_at && (!s.eventId || activeEv.has(s.eventId))).forEach(s => {
       const n = dispOf(s.name); if (!n) return;
       if (!personMap[n]) personMap[n] = { splits: [], net: 0, parts: {} };
       personMap[n].splits.push(s);
