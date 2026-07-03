@@ -26,6 +26,9 @@ async function boot(page) {
   await page.route("**/api/food-vision", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(OCR_RESPONSE) })
   );
+  // Same hermetic font-abort as helpers.gotoLocal — hanging remote font fetches
+  // on restricted networks stall the `load` event past the test timeout.
+  await page.route(/fonts\.(googleapis|gstatic)\.com/, (r) => r.abort());
   await page.goto("/");
   await page.evaluate((s) => {
     localStorage.clear();
