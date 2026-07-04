@@ -153,6 +153,48 @@ describe('ai-analyze handler', () => {
     expect((r.body as { subscriptions: unknown[] }).subscriptions).toHaveLength(1);
   });
 
+  it('reconcile sanitizes verdicts, ids, and drops out-of-range/duplicate indexes', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as { __setNext: (s: string) => void };
+    mod.__setNext(JSON.stringify({
+      results: [
+        { index: 0, verdict: 'missing', matchId: null, categoryId: 'food', cleanNote: 'Swiggy', confidence: 'high', reason: 'no match' },
+        { index: 1, verdict: 'matched', matchId: 'ghost', categoryId: 'phantom', cleanNote: 'x', confidence: 'weird', reason: 'fuzzy' },
+        { index: 1, verdict: 'missing', matchId: null, categoryId: null, cleanNote: null, confidence: 'low', reason: 'dupe' },
+        { index: 9, verdict: 'missing', matchId: null, categoryId: null, cleanNote: null, confidence: 'low', reason: 'oob' },
+      ],
+    }));
+    const r = await invoke({
+      mode: 'reconcile',
+      rows: [
+        { date: '2026-06-10', amount: 450, type: 'expense', note: 'UPI-SWIGGY' },
+        { date: '2026-06-11', amount: 900, type: 'expense', note: 'POS AMAZON' },
+      ],
+      candidates: [{ id: 'real1', date: '2026-06-09', amount: 900, type: 'expense', note: 'amazon order' }],
+      categories: [{ id: 'food', name: 'Food' }],
+    });
+    expect(r.statusCode).toBe(200);
+    const results = (r.body as { results: Array<{ index: number; verdict: string; matchId: string | null; categoryId: string | null; confidence: string }> }).results;
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({ index: 0, verdict: 'missing', categoryId: 'food', confidence: 'high' });
+    // "matched" with an id not in the candidate list is unusable → demoted to uncertain.
+    expect(results[1]).toMatchObject({ index: 1, verdict: 'uncertain', matchId: null, categoryId: null, confidence: 'low' });
+  });
+
+  it('reconcile keeps a valid matchId', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as { __setNext: (s: string) => void };
+    mod.__setNext('{"results":[{"index":0,"verdict":"matched","matchId":"real1","categoryId":null,"cleanNote":null,"confidence":"medium","reason":"same amount 3 days off"}]}');
+    const r = await invoke({
+      mode: 'reconcile',
+      rows: [{ date: '2026-06-10', amount: 900, type: 'expense', note: 'POS AMAZON' }],
+      candidates: [{ id: 'real1', date: '2026-06-07', amount: 900, type: 'expense', note: 'amazon' }],
+      categories: [],
+    });
+    expect(r.statusCode).toBe(200);
+    const results = (r.body as { results: Array<{ verdict: string; matchId: string }> }).results;
+    expect(results[0].verdict).toBe('matched');
+    expect(results[0].matchId).toBe('real1');
+  });
+
   it('502 when AI returns non-JSON', async () => {
     const mod = await import('../_ai-provider.js') as unknown as { __setNext: (s: string) => void };
     mod.__setNext('not json at all');

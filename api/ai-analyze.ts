@@ -19,6 +19,8 @@
  *   note-items         One note + total → individual line items (no receipt)
  *   smart-reminders    Schedule context → predictive nudges
  *   goal-coach         Budgets vs spend → coaching message
+ *   reconcile          Unmatched bank-statement rows + nearby logged txns →
+ *                      per-row verdict (missing / fuzzy-matched) + category
  *
  * All callers should redact PII with src/redactor.js before sending.
  */
@@ -40,7 +42,8 @@ type Mode =
   | "split-cats"
   | "note-items"
   | "smart-reminders"
-  | "goal-coach";
+  | "goal-coach"
+  | "reconcile";
 
 interface Wallet   { id: string; name: string; }
 interface Category { id: string; name: string; }
@@ -499,6 +502,41 @@ Give a coaching message.`;
       return typeof o.message === "string" && typeof o.status === "string";
     },
   },
+
+  reconcile: {
+    systemPrompt: `You reconcile an Indian bank statement against a personal finance app. You receive statement rows the app could NOT auto-match (exact amount + date ±2 days already tried), plus the app's nearby logged transactions. For each statement row decide: truly missing from the app, or a fuzzy match to a logged transaction (date drift beyond 2 days, amount off by a few rupees, one bank debit covering several logged entries)?
+Return ONLY valid JSON:
+{
+  "results": [
+    { "index": 0, "verdict": "missing", "matchId": null, "categoryId": "food", "cleanNote": "Swiggy order", "confidence": "high", "reason": "No logged txn near ₹450 that week" },
+    { "index": 1, "verdict": "matched", "matchId": "abc123", "categoryId": null, "cleanNote": null, "confidence": "medium", "reason": "₹1200 logged 4 days earlier as 'electricity'" }
+  ]
+}
+
+Rules:
+- Exactly one entry per statement row; index = the row's position in the provided list.
+- verdict ∈ {"missing","matched","uncertain"}. Use "matched" ONLY when a specific logged transaction plausibly IS this bank row. When in doubt, "uncertain".
+- matchId: the logged transaction's id when verdict is "matched", else null.
+- categoryId: for "missing" rows pick the closest fit from the provided category list (expense rows only), else null.
+- cleanNote: short human note from the bank narration — strip codes like "UPI-", "POS", "NEFT", ref numbers, merchant IDs. Null when verdict is "matched".
+- confidence: high | medium | low.
+- reason: one short sentence.`,
+    buildUser: (b) => {
+      const rows = ((b.rows as Txn[]) || []).slice(0, 100);
+      const candidates = ((b.candidates as Txn[]) || []).slice(0, 200);
+      const categories = ((b.categories as Category[]) || []);
+      return `Unmatched statement rows (index, date, direction, amount, narration):
+${rows.map((r, i) => `${i} ${r.date} ${r.type === "income" ? "CREDIT" : "DEBIT"} ₹${r.amount} ${r.note || ""}`).join("\n")}
+
+Logged transactions nearby (id, date, kind, direction, amount, note):
+${candidates.map(c => `${c.id} ${c.date} ${c.type || ""} ₹${c.amount} ${c.note || ""}`).join("\n") || "(none)"}
+
+Categories: ${categories.map(c => `${c.id}=${c.name}`).join(", ")}
+
+Give a verdict for every statement row.`;
+    },
+    validate: (p) => Boolean(p && typeof p === "object" && Array.isArray((p as Record<string, unknown>).results)),
+  },
 };
 
 // Post-process model output so callers get safe, normalized payloads regardless
@@ -524,6 +562,34 @@ function sanitize(mode: Mode, parsed: Record<string, unknown>, body: Record<stri
       severity: validSev.has(String(parsed.severity)) ? parsed.severity : "none",
       anomaly:  Boolean(parsed.anomaly),
     };
+  }
+  if (mode === "reconcile") {
+    const rows       = (body.rows       as Txn[])      || [];
+    const candidates = (body.candidates as Txn[])      || [];
+    const categories = (body.categories as Category[]) || [];
+    const candIds  = new Set(candidates.map(c => String(c.id)));
+    const catIds   = new Set(categories.map(c => c.id));
+    const verdicts = new Set(["missing", "matched", "uncertain"]);
+    const seen     = new Set<number>();
+    const results  = (Array.isArray(parsed.results) ? parsed.results : [])
+      .map((r: unknown) => {
+        const o = (r && typeof r === "object" ? r : {}) as Record<string, unknown>;
+        const index = Number(o.index);
+        const verdict = verdicts.has(String(o.verdict)) ? String(o.verdict) : "uncertain";
+        const matchId = verdict === "matched" && candIds.has(String(o.matchId)) ? String(o.matchId) : null;
+        return {
+          index,
+          // A "matched" verdict without a real candidate id is unusable — demote it.
+          verdict: verdict === "matched" && !matchId ? "uncertain" : verdict,
+          matchId,
+          categoryId: catIds.has(String(o.categoryId)) ? String(o.categoryId) : null,
+          cleanNote: typeof o.cleanNote === "string" ? o.cleanNote.slice(0, 200) : null,
+          confidence: ["high", "medium", "low"].includes(String(o.confidence)) ? String(o.confidence) : "low",
+          reason: typeof o.reason === "string" ? o.reason.slice(0, 300) : "",
+        };
+      })
+      .filter(r => Number.isInteger(r.index) && r.index >= 0 && r.index < rows.length && !seen.has(r.index) && (seen.add(r.index), true));
+    return { results };
   }
   if (mode === "tax") {
     const items = Array.isArray(parsed.items) ? parsed.items : [];
