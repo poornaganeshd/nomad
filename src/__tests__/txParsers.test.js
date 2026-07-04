@@ -156,4 +156,34 @@ describe("parseBankCsv", () => {
     const csv = ["Date,Narration,Debit,Credit", "not-a-date,Foo,10,", "15/01/2024,Bar,0,0"].join("\n");
     expect(parseBankCsv(csv)).toEqual([]);
   });
+
+  it("finds the header row below account-info preamble lines (SBI/HDFC exports)", () => {
+    const csv = [
+      "Account Name :,MR POORNA",
+      "Account Number :,XXXX1234",
+      "Statement Period,01/01/2024 to 31/01/2024",
+      "Date,Narration,Debit,Credit",
+      "15/01/2024,Groceries,1200,",
+    ].join("\n");
+    expect(parseBankCsv(csv)).toEqual([{ date: "2024-01-15", amount: 1200, note: "Groceries", type: "expense" }]);
+  });
+
+  it("captures ref (UTR/cheque) and running balance columns when present", () => {
+    const csv = [
+      "Date,Narration,Chq./Ref.No.,Debit,Credit,Closing Balance",
+      '15/01/2024,UPI-SWIGGY,UTR123456,450,,"12,550.00"',
+      "16/01/2024,SALARY,NEFT789,,50000,62550.00",
+    ].join("\n");
+    expect(parseBankCsv(csv)).toEqual([
+      { date: "2024-01-15", amount: 450, note: "UPI-SWIGGY", type: "expense", ref: "UTR123456", balance: 12550 },
+      { date: "2024-01-16", amount: 50000, note: "SALARY", type: "income", ref: "NEFT789", balance: 62550 },
+    ]);
+  });
+
+  it("keeps the old row shape when ref/balance columns are absent", () => {
+    const rows = parseBankCsv("Date,Narration,Debit,Credit\n15/01/2024,Chai,20,");
+    expect(rows).toEqual([{ date: "2024-01-15", amount: 20, note: "Chai", type: "expense" }]);
+    expect("ref" in rows[0]).toBe(false);
+    expect("balance" in rows[0]).toBe(false);
+  });
 });
