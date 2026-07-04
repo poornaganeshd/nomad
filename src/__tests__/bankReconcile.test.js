@@ -51,6 +51,33 @@ describe("buildLedger", () => {
     expect(ledger[1]).toMatchObject({ id: "s2", dir: "debit", note: "Anu" });
   });
 
+  it("merges receipt line-items sharing a groupId into one summed debit", () => {
+    const ledger = buildLedger({
+      expenses: [
+        { id: "a", walletId: "bank", date: "2026-07-04", amount: 100, categoryId: "food", groupId: "g1", note: "Apple" },
+        { id: "b", walletId: "bank", date: "2026-07-04", amount: 100, categoryId: "other", groupId: "g1", note: "Pen" },
+        { id: "c", walletId: "bank", date: "2026-07-04", amount: 100, categoryId: "personal", groupId: "g1", note: "Washing Powder" },
+        { id: "d", walletId: "bank", date: "2026-07-04", amount: 50, note: "chai" },
+      ],
+      walletId: "bank",
+    });
+    expect(ledger).toHaveLength(2);
+    expect(ledger[0]).toMatchObject({ id: "a", amount: 300, dir: "debit" });
+    expect(ledger[1]).toMatchObject({ id: "d", amount: 50 });
+    // and the summed entry matches a single ₹300 statement debit
+    const r = reconcile([{ date: "2026-07-04", amount: 300, type: "expense", note: "POS SUPERMART" }], ledger);
+    expect(r.matched).toHaveLength(1);
+    expect(r.missing).toHaveLength(0);
+  });
+
+  it("keeps a lone groupId expense (event group-expense) unmerged", () => {
+    const ledger = buildLedger({
+      expenses: [{ id: "e1", walletId: "bank", date: "2026-07-01", amount: 900, groupId: "gx", note: "goa dinner" }],
+      walletId: "bank",
+    });
+    expect(ledger).toEqual([{ id: "e1", kind: "expense", date: "2026-07-01", amount: 900, dir: "debit", note: "goa dinner" }]);
+  });
+
   it("drops entries with no date or non-positive amount", () => {
     const ledger = buildLedger({
       expenses: [

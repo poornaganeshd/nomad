@@ -24,7 +24,22 @@ const dayDiff = (a, b) => Math.abs((new Date(a + "T12:00:00") - new Date(b + "T1
 // lives in NOMAD as a transfer, and must NOT be flagged "missing".
 export function buildLedger({ expenses = [], incomes = [], transfers = [], settlements = [], walletId }) {
   const out = [];
-  for (const e of expenses) if (e.walletId === walletId) out.push({ id: e.id, kind: "expense", date: e.date, amount: roundMoney(e.amount), dir: "debit", note: e.note || "" });
+  // Receipt line-items share a groupId — the bank saw ONE debit for their sum,
+  // so merge them into one ledger entry. Expenses with a unique groupId (event
+  // group-expenses) pass through unchanged: sum of one = itself.
+  const byGroup = new Map();
+  for (const e of expenses) {
+    if (e.walletId !== walletId) continue;
+    if (e.groupId) {
+      const g = byGroup.get(e.groupId);
+      if (g) { g.amount = roundMoney(g.amount + roundMoney(e.amount)); continue; }
+      const entry = { id: e.id, kind: "expense", date: e.date, amount: roundMoney(e.amount), dir: "debit", note: e.note || "" };
+      byGroup.set(e.groupId, entry);
+      out.push(entry);
+      continue;
+    }
+    out.push({ id: e.id, kind: "expense", date: e.date, amount: roundMoney(e.amount), dir: "debit", note: e.note || "" });
+  }
   for (const i of incomes) if (i.walletId === walletId) out.push({ id: i.id, kind: "income", date: i.date, amount: roundMoney(i.amount), dir: "credit", note: i.note || "" });
   for (const t of transfers) {
     if (t.fromWallet === walletId) out.push({ id: t.id, kind: "transfer", date: t.date, amount: roundMoney(t.amount), dir: "debit", note: t.note || "" });

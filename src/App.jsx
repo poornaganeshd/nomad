@@ -241,20 +241,20 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
     let buckets;
     if (period === "day") {
       const today = new Date();
-      buckets = Array.from({ length: 14 }, (_, i) => {
-        const date = addDays(today, -(13 - i));
+      buckets = Array.from({ length: 60 }, (_, i) => {
+        const date = addDays(today, -(59 - i));
         const key = localDateKey(date);
         return { key, label: new Date(`${key}T00:00:00`).toLocaleDateString("en-US", { day: "numeric", month: "short" }) };
       });
     } else if (period === "week") {
       const cur = startOfWeek(new Date());
-      buckets = Array.from({ length: 8 }, (_, i) => {
-        const start = addDays(cur, -(7 * (7 - i)));
+      buckets = Array.from({ length: 26 }, (_, i) => {
+        const start = addDays(cur, -(7 * (25 - i)));
         const key = localDateKey(start);
         return { key, label: new Date(`${key}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" }) };
       });
     } else if (period === "month") {
-      buckets = [...new Set(allDates.map(d => d.slice(0, 7)))].sort().slice(-12).map(key => {
+      buckets = [...new Set(allDates.map(d => d.slice(0, 7)))].sort().slice(-24).map(key => {
         const [y, m] = key.split("-");
         return { key, label: new Date(Number(y), Number(m) - 1, 1).toLocaleDateString("en-US", { month: "short", year: "2-digit" }) };
       });
@@ -283,6 +283,12 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
     return { data: chartData, activeCats: activeCatsData, peakKey: peak?.key || null, yMax: Math.max(1000, Math.ceil(maxTotal * 1.18 / 100) * 100) };
   }, [expenses, period, categoryMap]);
 
+  // Sideways scroll: with 60 day / 26 week / 24 month buckets the bars no longer
+  // fit one screen. Chart gets an explicit px width (36px per bucket, min 100%)
+  // inside an overflow-x wrapper, anchored to the newest bucket on the right.
+  const scrollRef = useRef(null);
+  useEffect(() => { const el = scrollRef.current; if (el) el.scrollLeft = el.scrollWidth; }, [period, data.length]);
+  const chartW = Math.max(data.length * 36, 280);
   const fmtY = v => { const n = Number(v || 0); if (n >= 100000) return `\u20b9${(n / 100000).toFixed(1)}L`; if (n >= 1000) return `\u20b9${(n / 1000).toFixed(1)}k`; return `\u20b9${Math.round(n)}`; };
   const lineStroke = darkMode ? "rgba(255,255,255,0.6)" : "rgba(44,42,36,0.4)";
   const ttBg = darkMode ? "#1A1917" : "#FAFAF7", ttBorder = darkMode ? "#2A2926" : "#DDD9D0", ttText = darkMode ? "#E8E4DC" : "#2C2A24", ttMuted = darkMode ? "#7A7870" : "#9A9488";
@@ -307,7 +313,8 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
         <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: "28px 0 8px", fontFamily: "var(--font-b)" }}>Add transactions to see trends</p>
       ) : (
         <>
-          <div style={{ width: "100%", height: 260, minWidth: 0 }}>
+          <div ref={scrollRef} style={{ width: "100%", overflowX: "auto", overflowY: "hidden", WebkitOverflowScrolling: "touch" }}>
+          <div style={{ width: chartW, minWidth: "100%", height: 260 }}>
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={data} margin={{ top: 8, right: 8, left: -4, bottom: 0 }} barCategoryGap="30%">
                 <CartesianGrid stroke={darkMode ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.06)"} vertical={false} />
@@ -341,6 +348,7 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
                 />
               </ComposedChart>
             </ResponsiveContainer>
+          </div>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
             {activeCats.map(cat => (
@@ -515,6 +523,11 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
     // Thread a running delta (same pattern as CSV/ledger batch imports) so every
     // item's balBefore reflects the ones added before it.
     let balanceDelta = 0;
+    // One groupId across the batch links the items as a single purchase: History
+    // collapses them into one ₹total card and bank reconcile matches the sum
+    // against the single statement debit (you paid once, not N times).
+    const validCount = itemsPreview.items.filter(it => roundMoney(Number(it.amount) || 0) > 0).length;
+    const gid = validCount > 1 ? uid() : null;
     itemsPreview.items.forEach(it => {
       const amount = roundMoney(Number(it.amount) || 0);
       if (amount <= 0) return;
@@ -523,7 +536,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       if (it.name) noteParts.push(it.name);
       const itemNote = noteParts.join(" · ").slice(0, 120);
       const cid = it.categoryId || matchCatHint(it.category) || catId;
-      const ok = oE({ id: uid(), amount, categoryId: cid, walletId: wid, date, note: itemNote }, { balanceDelta }) !== false;
+      const ok = oE({ id: uid(), amount, categoryId: cid, walletId: wid, date, note: itemNote, ...(gid ? { groupId: gid } : {}) }, { balanceDelta }) !== false;
       if (ok) { added++; balanceDelta = roundMoney(balanceDelta - amount); }
     });
     showT(`Added ${added} of ${itemsPreview.items.length} line items`, "success");
@@ -783,6 +796,24 @@ const TxCard = memo(function TxCard({ item: it, categories: cats, incomeSources:
   // Settlement GROUP: several settlements made in one go (a partial/net settle
   // pays down multiple IOUs at once) collapse into one summary card. Tap to
   // expand into the individual settlement cards (rendered as normal TxCards).
+  // Expense ITEM GROUP: receipt line-items logged as one purchase (shared
+  // groupId). One card with the ₹total the bank statement shows; tap to expand
+  // the per-item rows (each a normal TxCard — per-item delete/refund works).
+  if (it.__itemGroup) {
+    const accent = "#E07A5F";
+    const gW = wl.find(x => x.id === it.walletId); const n = it.items.length;
+    const prefixes = it.items.map(x => (x.note || "").split(" · ")[0]).filter(Boolean);
+    const merchant = prefixes.length === n && prefixes.every(p => p === prefixes[0] && (it.items[0].note || "").includes(" · ")) ? prefixes[0] : null;
+    return <div style={{ ...cc, borderRadius: 14, marginBottom: 10, overflow: "hidden" }}>
+      <div onClick={() => setGrpOpen(o => !o)} style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
+        <div style={{ width: 44, height: 44, borderRadius: 12, background: accent + "14", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Receipt size={22} color={accent} weight="duotone" /></div>
+        <div style={{ flex: 1, minWidth: 0 }}><div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}><span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>{merchant || "Split purchase"}</span><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: accent, background: accent + "15", padding: "1px 5px", borderRadius: 3 }}>{n} ITEMS</span></div><div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 2, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{gW?.name} · {dl(it.date)} · tap to {grpOpen ? "hide" : "see"} {n} items</div></div>
+        <div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 15, color: accent, flexShrink: 0 }}>−{fmt(it.amount)}</div>
+        <span style={{ fontSize: 10, color: "var(--muted)", transition: "transform 0.2s", display: "inline-block", transform: grpOpen ? "rotate(0deg)" : "rotate(-90deg)", flexShrink: 0 }}>▾</span>
+      </div>
+      {grpOpen && <div style={{ borderTop: "1px solid var(--border)", padding: "8px 10px 2px", background: "var(--bg)" }}><div style={{ borderLeft: `2px solid ${accent}40`, paddingLeft: 8 }}>{it.items.map(child => <TxCard key={child.id} item={child} categories={cats} incomeSources={isrc} events={evs} onDelete={od} recurringCats={rCats} wallets={wl} onRefund={oRef} />)}</div></div>}
+    </div>;
+  }
   if (it.__group) {
     const accent = it.direction === "owed" ? "#6BAA75" : "#E07A5F";
     const gW = wl.find(x => x.id === it.walletId); const n = it.items.length;
@@ -1374,15 +1405,15 @@ export default function Nomad() {
   // is confirmed present. A single JSONB row keyed "nomad".
   useEffect(() => {
     if (!loaded || prefsSync !== "on" || !SB_ENABLED) return;
-    const blob = JSON.stringify({ categories: cats, incomeSources: isrc });
+    const blob = JSON.stringify({ categories: cats, incomeSources: isrc, autoRules });
     if (blob === lastPrefsRef.current) return; // nothing changed since last sync — don't re-queue
     if (prefsSaveRef.current) clearTimeout(prefsSaveRef.current);
     prefsSaveRef.current = setTimeout(() => {
       lastPrefsRef.current = blob;
-      sbUpsert("user_prefs", [{ key: "nomad", value: { categories: cats, incomeSources: isrc }, updated_at: new Date().toISOString() }], "user_prefs:nomad");
+      sbUpsert("user_prefs", [{ key: "nomad", value: { categories: cats, incomeSources: isrc, autoRules }, updated_at: new Date().toISOString() }], "user_prefs:nomad");
     }, 1200);
     return () => { if (prefsSaveRef.current) clearTimeout(prefsSaveRef.current); };
-  }, [cats, isrc, loaded, prefsSync]);
+  }, [cats, isrc, autoRules, loaded, prefsSync]);
   const [recDelOpen, sRecDelOpen] = useState(false);
   const [lrMigrating, sLrMigrating] = useState(false);
   const [chatOpen, sChatOpen] = useState(false);
@@ -1677,13 +1708,14 @@ export default function Nomad() {
             if (pv && !hasPendingDedupeKey("user_prefs:nomad")) {
               if (Array.isArray(pv.categories) && pv.categories.length) { appliedRemotePrefs = true; if (JSON.stringify(pv.categories) !== JSON.stringify(cats)) sCats(pv.categories); }
               if (Array.isArray(pv.incomeSources) && pv.incomeSources.length) { appliedRemotePrefs = true; if (JSON.stringify(pv.incomeSources) !== JSON.stringify(isrc)) sIsrc(pv.incomeSources); }
+              if (Array.isArray(pv.autoRules) && pv.autoRules.length) { if (JSON.stringify(pv.autoRules) !== JSON.stringify(autoRules)) sAutoRules(pv.autoRules); }
             }
             // First connect with no prefs row yet: seed it from local setup so the
             // other devices can pull it.
-            if (!pv) { const lp0 = (() => { try { return JSON.parse(localStorage.getItem("nomad-v5") || "{}"); } catch { return {}; } })(); sbUpsert("user_prefs", [{ key: "nomad", value: { categories: lp0.categories || cats, incomeSources: lp0.incomeSources || isrc }, updated_at: new Date().toISOString() }], "user_prefs:nomad"); }
+            if (!pv) { const lp0 = (() => { try { return JSON.parse(localStorage.getItem("nomad-v5") || "{}"); } catch { return {}; } })(); const lr0 = (() => { try { return JSON.parse(localStorage.getItem("nomad-auto-rules") || "[]"); } catch { return []; } })(); sbUpsert("user_prefs", [{ key: "nomad", value: { categories: lp0.categories || cats, incomeSources: lp0.incomeSources || isrc, autoRules: lr0 }, updated_at: new Date().toISOString() }], "user_prefs:nomad"); }
             // Baseline the save-effect guard to the synced blob so the post-load
             // render doesn't re-push identical prefs (the phantom "Syncing 1 change").
-            { const wasPending = hasPendingDedupeKey("user_prefs:nomad"); const baseCats = (pv && !wasPending && Array.isArray(pv.categories) && pv.categories.length) ? pv.categories : cats; const baseSrc = (pv && !wasPending && Array.isArray(pv.incomeSources) && pv.incomeSources.length) ? pv.incomeSources : isrc; lastPrefsRef.current = JSON.stringify({ categories: baseCats, incomeSources: baseSrc }); }
+            { const wasPending = hasPendingDedupeKey("user_prefs:nomad"); const baseCats = (pv && !wasPending && Array.isArray(pv.categories) && pv.categories.length) ? pv.categories : cats; const baseSrc = (pv && !wasPending && Array.isArray(pv.incomeSources) && pv.incomeSources.length) ? pv.incomeSources : isrc; const baseRules = (pv && !wasPending && Array.isArray(pv.autoRules) && pv.autoRules.length) ? pv.autoRules : autoRules; lastPrefsRef.current = JSON.stringify({ categories: baseCats, incomeSources: baseSrc, autoRules: baseRules }); }
           } else if (rp.status === 400 || rp.status === 404) {
             sPrefsSync("off");
           }
@@ -1770,6 +1802,15 @@ export default function Nomad() {
     if (bulkMode || hTimeline) return historyItems;
     const groups = new Map(); const out = [];
     for (const it of historyItems) {
+      // Receipt line-items share one groupId (no eventId) — collapse into one
+      // purchase card so History shows the ₹total the bank actually saw.
+      if (it.type === "expense" && it.groupId && !it.eventId) {
+        const key = "exg|" + it.groupId;
+        const g = groups.get(key);
+        if (g) g.items.push(it);
+        else { const c = { __group: true, __itemGroup: true, type: "expense", date: it.date, walletId: it.walletId, groupId: it.groupId, items: [it], id: "exg_" + it.groupId }; groups.set(key, c); out.push(c); }
+        continue;
+      }
       if (it.type !== "settlement") { out.push(it); continue; }
       const key = `${(it.splitName || "").trim().toLowerCase()}|${it.date}|${it.direction}`;
       const g = groups.get(key);
@@ -2799,7 +2840,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         {(() => { const cm = localDateKey().slice(0, 7), mE = exAll.filter(e => mk(e.date) === cm), fixT = mE.filter(isFix).reduce((s, e) => s + e.amount, 0), flxT = mE.filter(e => !isFix(e)).reduce((s, e) => s + e.amount, 0), tot = fixT + flxT, fixP = tot > 0 ? Math.round(fixT / tot * 100) : 0, flxP = 100 - fixP; return <div style={{ ...cc, padding: "16px 18px", marginBottom: 14, position: "relative", overflow: "hidden" }}><div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "#A78BFA" }} /><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "#A78BFA", fontWeight: 700, letterSpacing: "0.5px" }}>Fixed vs Flexible</div><div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-h)" }}>This Month</div></div>{tot === 0 ? <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: "8px 0" }}>No expenses this month</p> : <><div style={{ height: 8, borderRadius: 4, background: "#FBBF24", overflow: "hidden", marginBottom: 10 }}><div style={{ height: "100%", width: `${fixP}%`, background: "#A78BFA", borderRadius: 4 }} /></div><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><div style={{ display: "flex", alignItems: "center", gap: 6 }}><div style={{ width: 8, height: 8, borderRadius: 2, background: "#A78BFA", flexShrink: 0 }} /><span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--ts)" }}>Fixed</span></div><span style={{ fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--text)" }}>{fmt(fixT)} <span style={{ color: "var(--muted)", fontWeight: 400 }}>({fixP}%)</span></span></div><div style={{ display: "flex", justifyContent: "space-between" }}><div style={{ display: "flex", alignItems: "center", gap: 6 }}><div style={{ width: 8, height: 8, borderRadius: 2, background: "#FBBF24", flexShrink: 0 }} /><span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--ts)" }}>Flexible</span></div><span style={{ fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--text)" }}>{fmt(flxT)} <span style={{ color: "var(--muted)", fontWeight: 400 }}>({flxP}%)</span></span></div></>}</div> })()}
         {budgetStatus.length > 0 && <div style={{ ...cc, padding: "16px 18px", marginBottom: 14, position: "relative", overflow: "hidden" }}><div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "#7B8CDE" }} /><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "#7B8CDE", fontWeight: 700, letterSpacing: "0.5px" }}>Monthly Budgets</div><button onClick={() => { sTab("settings"); sBudgetSettingsOpen(true); }} style={{ fontSize: 10, color: "#7B8CDE", fontFamily: "var(--font-h)", fontWeight: 600, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Edit ›</button></div>{budgetStatus.map(({ cid, cat, spent, lim, pct }) => { const bc = pct >= 100 ? "#D4726A" : pct >= 80 ? "#FBBF24" : "#6BAA75"; return <div key={cid} style={{ marginBottom: 10 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, alignItems: "center" }}><div style={{ display: "flex", alignItems: "center", gap: 6 }}><DI2 id={cid} accent={cat.neon || cat.color} size={14} /><span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--text)", fontWeight: 600 }}>{cat.name}</span>{pct >= 100 && <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: "#D4726A", background: "#D4726A15", padding: "1px 5px", borderRadius: 3 }}>OVER</span>}</div><span style={{ fontSize: 11, fontFamily: "var(--font-h)", color: bc, fontWeight: 700 }}>{fmt(spent)} / {fmt(lim)}</span></div><div style={{ height: 5, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${pct}%`, background: bc, borderRadius: 3 }} /></div></div>; })}</div>}
         <SpendingBreakdown expenses={exAll} categories={cats} period={trendPeriod} onPeriodChange={sTrendPeriod} formatCurrency={fmt} darkMode={dm} />
-        <div style={{ ...cc, padding: 18, marginBottom: 16, position: "relative", overflow: "hidden" }}><div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "#E07A5F" }} /><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "#E07A5F", marginBottom: 16, letterSpacing: "0.5px", fontWeight: 700 }}>Spending by Category</div>{fltExAll.length === 0 ? <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: 20 }}>No expenses yet</p> : (() => { const t = {}; fltExAll.forEach(e => { t[e.categoryId] = (t[e.categoryId] || 0) + e.amount }); const s = Object.entries(t).sort((a, b) => b[1] - a[1]), mx = s[0]?.[1] || 1; const curM = fm !== "all" ? fm : localDateKey().slice(0, 7); const prevDate = new Date(curM + "-01"); prevDate.setMonth(prevDate.getMonth() - 1); const prevM = prevDate.toISOString().slice(0, 7); const prevT = {}; exAll.filter(e => mk(e.date) === prevM).forEach(e => { prevT[e.categoryId] = (prevT[e.categoryId] || 0) + e.amount }); return s.map(([cid, total]) => { const c = cats.find(x => x.id === cid) || { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#6366F1", neon: "#818CF8" }; const cExps = fltExAll.filter(e => e.categoryId === cid); const realEx = cExps.filter(e => !e.__settlement); const ctag = realEx.length > 0 && realEx.every(isFix) ? "fixed" : "flexible"; const prevTotal = prevT[cid] || 0; const momPct = prevTotal > 0 ? Math.round((total - prevTotal) / prevTotal * 100) : null; const isDrilled = drillCat === cid; const allTx = isDrilled ? [...cExps].sort((a, b) => (b.date || "").localeCompare(a.date || "")) : []; return <div key={cid} style={{ marginBottom: 12 }}><div onClick={() => sDrillCat(isDrilled ? null : cid)} style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}><span style={{ width: 30, display: "flex", justifyContent: "center" }}><DI2 id={c.id} accent={c.neon || c.color} size={20} /></span><div style={{ flex: 1 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><div style={{ display: "flex", alignItems: "center" }}><span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{c.name}</span><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: ctag === "fixed" ? "#A78BFA" : "#FBBF24", background: ctag === "fixed" ? "#A78BFA15" : "#FBBF2415", padding: "2px 6px", borderRadius: 4, marginLeft: 6 }}>{ctag === "fixed" ? "FIXED" : "FLEX"}</span><span style={{ fontSize: 9, color: "var(--muted)", marginLeft: 6, fontFamily: "var(--font-h)" }}>{cExps.length} tx</span></div><div style={{ display: "flex", alignItems: "center", gap: 6 }}>{momPct !== null && <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: momPct > 0 ? "#E07A5F" : "#6BAA75", background: momPct > 0 ? "#E07A5F15" : "#6BAA7515", padding: "1px 5px", borderRadius: 3 }}>{momPct > 0 ? "+" : ""}{momPct}% MoM</span>}<span style={{ fontSize: 13, fontFamily: "var(--font-h)", color: "var(--ts)", fontWeight: 500 }}>{fmt(total)}</span></div></div><div style={{ height: 5, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${(total / mx) * 100}%`, background: c.color, borderRadius: 3 }} /></div></div><span style={{ fontSize: 10, color: "var(--muted)" }}>{isDrilled ? "▲" : "▼"}</span></div>{isDrilled && <div style={{ marginLeft: 42, marginTop: 6, padding: "8px 10px", background: "var(--bg)", borderRadius: 8, border: "1px solid var(--border)", maxHeight: 260, overflowY: "auto" }}>{allTx.length === 0 && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: 8 }}>No entries</div>}{allTx.map(tx => <div key={tx.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, paddingBottom: 6, borderBottom: "1px dashed var(--border)" }}><div style={{ flex: 1, minWidth: 0, marginRight: 8 }}><div style={{ fontSize: 11, color: "var(--ts)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-h)", fontWeight: 600 }}>{tx.note || "(no note)"}{tx.__settlement && <span style={{ marginLeft: 5, fontSize: 8, color: "#D4726A", background: "#D4726A15", padding: "1px 4px", borderRadius: 3, fontWeight: 700 }}>SPLIT</span>}</div><div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 1 }}>{dl(tx.date)}</div></div><span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--text)", fontWeight: 600, flexShrink: 0 }}>{fmt(tx.amount)}</span></div>)}</div>}</div> }) })()}</div>
+        <div style={{ ...cc, padding: 18, marginBottom: 16, position: "relative", overflow: "hidden" }}><div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "#E07A5F" }} /><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "#E07A5F", marginBottom: 16, letterSpacing: "0.5px", fontWeight: 700 }}>Spending by Category</div>{fltExAll.length === 0 ? <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: 20 }}>No expenses yet</p> : (() => { const t = {}; fltExAll.forEach(e => { t[e.categoryId] = (t[e.categoryId] || 0) + e.amount }); const s = Object.entries(t).sort((a, b) => b[1] - a[1]), mx = s[0]?.[1] || 1; const curM = fm !== "all" ? fm : localDateKey().slice(0, 7); const [pY, pM] = curM.split("-").map(Number); const prevM = pM === 1 ? `${pY - 1}-12` : `${pY}-${String(pM - 1).padStart(2, "0")}`; const prevT = {}; exAll.filter(e => mk(e.date) === prevM).forEach(e => { prevT[e.categoryId] = (prevT[e.categoryId] || 0) + e.amount }); return s.map(([cid, total]) => { const c = cats.find(x => x.id === cid) || { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#6366F1", neon: "#818CF8" }; const cExps = fltExAll.filter(e => e.categoryId === cid); const realEx = cExps.filter(e => !e.__settlement); const ctag = realEx.length > 0 && realEx.every(isFix) ? "fixed" : "flexible"; const prevTotal = prevT[cid] || 0; const momPct = fm !== "all" && prevTotal > 0 ? Math.round((total - prevTotal) / prevTotal * 100) : null; const isDrilled = drillCat === cid; const allTx = isDrilled ? [...cExps].sort((a, b) => (b.date || "").localeCompare(a.date || "")) : []; return <div key={cid} style={{ marginBottom: 12 }}><div onClick={() => sDrillCat(isDrilled ? null : cid)} style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}><span style={{ width: 30, display: "flex", justifyContent: "center" }}><DI2 id={c.id} accent={c.neon || c.color} size={20} /></span><div style={{ flex: 1 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><div style={{ display: "flex", alignItems: "center" }}><span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{c.name}</span><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: ctag === "fixed" ? "#A78BFA" : "#FBBF24", background: ctag === "fixed" ? "#A78BFA15" : "#FBBF2415", padding: "2px 6px", borderRadius: 4, marginLeft: 6 }}>{ctag === "fixed" ? "FIXED" : "FLEX"}</span><span style={{ fontSize: 9, color: "var(--muted)", marginLeft: 6, fontFamily: "var(--font-h)" }}>{cExps.length} tx</span></div><div style={{ display: "flex", alignItems: "center", gap: 6 }}>{momPct !== null && <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: momPct > 0 ? "#E07A5F" : "#6BAA75", background: momPct > 0 ? "#E07A5F15" : "#6BAA7515", padding: "1px 5px", borderRadius: 3 }}>{momPct > 0 ? "+" : ""}{momPct}% MoM</span>}<span style={{ fontSize: 13, fontFamily: "var(--font-h)", color: "var(--ts)", fontWeight: 500 }}>{fmt(total)}</span></div></div><div style={{ height: 5, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${(total / mx) * 100}%`, background: c.color, borderRadius: 3 }} /></div></div><span style={{ fontSize: 10, color: "var(--muted)" }}>{isDrilled ? "▲" : "▼"}</span></div>{isDrilled && <div style={{ marginLeft: 42, marginTop: 6, padding: "8px 10px", background: "var(--bg)", borderRadius: 8, border: "1px solid var(--border)", maxHeight: 260, overflowY: "auto" }}>{allTx.length === 0 && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: 8 }}>No entries</div>}{allTx.map(tx => <div key={tx.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, paddingBottom: 6, borderBottom: "1px dashed var(--border)" }}><div style={{ flex: 1, minWidth: 0, marginRight: 8 }}><div style={{ fontSize: 11, color: "var(--ts)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-h)", fontWeight: 600 }}>{tx.note || "(no note)"}{tx.__settlement && <span style={{ marginLeft: 5, fontSize: 8, color: "#D4726A", background: "#D4726A15", padding: "1px 4px", borderRadius: 3, fontWeight: 700 }}>SPLIT</span>}</div><div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 1 }}>{dl(tx.date)}</div></div><span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--text)", fontWeight: 600, flexShrink: 0 }}>{fmt(tx.amount)}</span></div>)}</div>}</div> }) })()}</div>
         </div>}
 
       {tab === "add" && <div className="pse" style={{ paddingTop: 20 }}><div style={{ display: "flex", gap: 6, marginBottom: 16 }}>{[["log", "Log"], ["iou", "IOU · Splits"]].map(([s, lbl]) => <button key={s} onClick={() => sAddSeg(s)} style={{ flex: 1, padding: "9px", borderRadius: 10, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, cursor: "pointer", border: `1.5px solid ${addSeg === s ? "#E07A5F" : "var(--border)"}`, background: addSeg === s ? "#E07A5F" : "var(--card)", color: addSeg === s ? "#fff" : "var(--muted)" }}>{lbl}</button>)}</div>{addSeg === "log" && <AddPage categories={cats} incomeSources={isrc} recurringCats={recCats} onAddExpense={addE} onAddIncome={addI} onAddTransfer={addT} onAddRec={addRec} onError={showT} patterns={quickPatterns} autoRules={autoRules} onLearnRule={rule => { sAutoRules(prev => { if (prev.find(r => r.keyword === rule.keyword)) return prev; return [...prev, rule]; }); }} wallets={wallets} cloudinaryEnabled={!!_creds.cloudName} />}{addSeg === "iou" && <IOUWallet splits={sp} settlements={stl} categories={cats} wallets={wallets} events={evs} fmt={fmt} uid={uid} isUpiLite={isUpiLite} SettleModal={SettleM} onAdd={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); }} onSettle={settle} onSettleNet={settleNet} onSettleEventNet={settleEventNet} onSkip={skipSplit} onUnskip={unskipSplit} onDelete={id => delItem(id, "split")} onError={msg => showT(msg, "error")} />}</div>}
