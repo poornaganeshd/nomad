@@ -26,7 +26,7 @@
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { callText, extractJSON, AiProviderError, configuredProviderCount } from "./_ai-provider.js";
+import { callText, callTextAll, extractJSON, AiProviderError, configuredProviderCount } from "./_ai-provider.js";
 
 type Mode =
   | "voice-parse"
@@ -604,6 +604,74 @@ function sanitize(mode: Mode, parsed: Record<string, unknown>, body: Record<stri
   return parsed;
 }
 
+// One provider's sanitized reconcile verdict for one statement row.
+interface ReconVerdict {
+  index: number;
+  verdict: string;
+  matchId: string | null;
+  categoryId: string | null;
+  cleanNote: string | null;
+  confidence: string;
+  reason: string;
+}
+
+/**
+ * Majority-vote merge of per-provider reconcile verdicts (consensus judging).
+ * Each provider's results are already sanitized. Per row:
+ *   - verdict: most votes wins; ties (incl. 1-1-1) demote to "uncertain".
+ *   - matchId: modal id among the winning "matched" voters.
+ *   - categoryId / cleanNote: first non-null in provider order.
+ *   - confidence: unanimous multi-provider → high, majority → medium, else low;
+ *     a single responder keeps its own confidence (no consensus to measure).
+ *   - agreement: "N/M" = winning votes / providers that judged this row.
+ * Exported for unit tests.
+ */
+export function consensusReconcile(
+  perProvider: { provider: string; results: ReconVerdict[] }[],
+  rowCount: number,
+): ReconVerdict[] {
+  const merged: (ReconVerdict & { agreement: string })[] = [];
+  for (let index = 0; index < rowCount; index++) {
+    const votes = perProvider
+      .map(p => p.results.find(r => r.index === index))
+      .filter((v): v is ReconVerdict => Boolean(v));
+    if (votes.length === 0) continue;
+
+    const tally = new Map<string, number>();
+    votes.forEach(v => tally.set(v.verdict, (tally.get(v.verdict) || 0) + 1));
+    const top = Math.max(...tally.values());
+    const winners = [...tally.entries()].filter(([, n]) => n === top).map(([v]) => v);
+    let verdict = winners.length === 1 ? winners[0] : "uncertain";
+
+    let matchId: string | null = null;
+    if (verdict === "matched") {
+      const ids = new Map<string, number>();
+      votes.filter(v => v.verdict === "matched" && v.matchId).forEach(v => ids.set(v.matchId as string, (ids.get(v.matchId as string) || 0) + 1));
+      const bestId = [...ids.entries()].sort((a, b) => b[1] - a[1])[0];
+      if (bestId) matchId = bestId[0];
+      else verdict = "uncertain"; // matched won but no usable id — sanitize normally prevents this
+    }
+
+    const agree = verdict === "uncertain" && winners.length !== 1 ? 0 : (tally.get(verdict) || 0);
+    const confidence =
+      votes.length === 1 ? votes[0].confidence :
+      agree === votes.length ? "high" :
+      agree > votes.length / 2 ? "medium" : "low";
+    const winningVote = votes.find(v => v.verdict === verdict);
+    merged.push({
+      index,
+      verdict,
+      matchId,
+      categoryId: votes.map(v => v.categoryId).find(c => c !== null) ?? null,
+      cleanNote:  votes.map(v => v.cleanNote).find(n => n !== null) ?? null,
+      confidence,
+      reason: winningVote?.reason || votes[0].reason || "",
+      agreement: `${agree || top}/${votes.length}`,
+    });
+  }
+  return merged;
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
@@ -622,6 +690,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const userPrompt = modeHandler.buildUser(body);
 
   try {
+    // Reconcile judges with CONSENSUS: same prompt to every configured
+    // provider in parallel, then majority-vote per statement row. All other
+    // modes keep the cheaper first-success waterfall.
+    if (mode === "reconcile") {
+      const answers = await callTextAll(userPrompt, modeHandler.systemPrompt);
+      const perProvider: { provider: string; results: ReconVerdict[] }[] = [];
+      for (const a of answers) {
+        try {
+          const parsed = extractJSON(a.content);
+          if (!modeHandler.validate(parsed)) { console.error(`[ai-analyze:reconcile] ${a.provider} invalid shape — dropped`); continue; }
+          const clean = sanitize("reconcile", parsed as Record<string, unknown>, body) as { results: ReconVerdict[] };
+          perProvider.push({ provider: a.provider, results: clean.results });
+        } catch {
+          console.error(`[ai-analyze:reconcile] ${a.provider} returned non-JSON — dropped`);
+        }
+      }
+      if (perProvider.length === 0) {
+        return res.status(502).json({ error: "AI returned non-JSON. Try again." });
+      }
+      const rowCount = ((body.rows as Txn[]) || []).length;
+      return res.status(200).json({
+        results: consensusReconcile(perProvider, rowCount),
+        providers: perProvider.map(p => p.provider),
+      });
+    }
+
     const raw = await callText(userPrompt, modeHandler.systemPrompt);
 
     let parsed: unknown;

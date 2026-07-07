@@ -5,6 +5,10 @@ vi.mock('../_ai-provider.js', () => {
   let nextResponse: string = '{}';
   let nextErrors: string[] | null = null;
   let providerCount = 1;
+  // Per-provider fan-out responses for callTextAll (consensus). When unset,
+  // callTextAll degrades to a single "mock" provider echoing nextResponse so
+  // pre-consensus reconcile tests keep working unchanged.
+  let allResponses: { provider: string; content: string }[] | null = null;
   class AiProviderError extends Error {
     public readonly providerErrors: string[];
     constructor(message: string, providerErrors: string[]) {
@@ -20,14 +24,19 @@ vi.mock('../_ai-provider.js', () => {
       if (nextErrors) throw new AiProviderError('mock failure', nextErrors);
       return nextResponse;
     },
+    callTextAll: async () => {
+      if (nextErrors) throw new AiProviderError('mock failure', nextErrors);
+      return allResponses ?? [{ provider: 'mock', content: nextResponse }];
+    },
     extractJSON: (text: string) => {
       const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
       const match = cleaned.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
       return JSON.parse(match ? match[1] : cleaned);
     },
-    __setNext: (resp: string) => { nextResponse = resp; nextErrors = null; },
+    __setNext: (resp: string) => { nextResponse = resp; nextErrors = null; allResponses = null; },
     __setError: (errs: string[]) => { nextErrors = errs; },
     __setProviderCount: (n: number) => { providerCount = n; },
+    __setAllResponses: (rs: { provider: string; content: string }[]) => { allResponses = rs; nextErrors = null; },
   };
 });
 
@@ -215,5 +224,88 @@ describe('ai-analyze handler', () => {
     const r = await invoke({ mode: 'subscriptions', transactions: [] });
     expect(r.statusCode).toBe(502);
     expect((r.body as { error: string }).error).toMatch(/All AI providers failed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reconcile consensus — majority vote across providers
+// ---------------------------------------------------------------------------
+describe('reconcile consensus', () => {
+  type SetAll = { __setAllResponses: (rs: { provider: string; content: string }[]) => void };
+  const verdictJson = (verdict: string, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ results: [{ index: 0, verdict, matchId: null, categoryId: null, cleanNote: null, confidence: 'high', reason: verdict, ...extra }] });
+  const baseBody = {
+    mode: 'reconcile',
+    rows: [{ date: '2026-06-10', amount: 450, type: 'expense', note: 'UPI-SWIGGY' }],
+    candidates: [{ id: 'real1', date: '2026-06-08', amount: 450, type: 'expense', note: 'swiggy' }],
+    categories: [{ id: 'food', name: 'Food' }],
+  };
+
+  it('majority verdict wins with agreement tag and providers list', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetAll;
+    mod.__setAllResponses([
+      { provider: 'groq',   content: verdictJson('missing', { categoryId: 'food' }) },
+      { provider: 'nvidia', content: verdictJson('missing') },
+      { provider: 'gemini', content: verdictJson('uncertain') },
+    ]);
+    const r = await invoke(baseBody);
+    expect(r.statusCode).toBe(200);
+    const body = r.body as { results: Array<Record<string, unknown>>; providers: string[] };
+    expect(body.providers).toEqual(['groq', 'nvidia', 'gemini']);
+    expect(body.results[0]).toMatchObject({ index: 0, verdict: 'missing', categoryId: 'food', confidence: 'medium', agreement: '2/3' });
+  });
+
+  it('unanimous multi-provider verdict gets high confidence', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetAll;
+    mod.__setAllResponses([
+      { provider: 'groq',   content: verdictJson('missing') },
+      { provider: 'gemini', content: verdictJson('missing') },
+    ]);
+    const r = await invoke(baseBody);
+    expect((r.body as { results: Array<Record<string, unknown>> }).results[0]).toMatchObject({ verdict: 'missing', confidence: 'high', agreement: '2/2' });
+  });
+
+  it('a tie demotes to uncertain with low confidence', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetAll;
+    mod.__setAllResponses([
+      { provider: 'groq',   content: verdictJson('missing') },
+      { provider: 'gemini', content: verdictJson('matched', { matchId: 'real1' }) },
+    ]);
+    const r = await invoke(baseBody);
+    expect((r.body as { results: Array<Record<string, unknown>> }).results[0]).toMatchObject({ verdict: 'uncertain', matchId: null, confidence: 'low' });
+  });
+
+  it('matched majority picks the modal matchId', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetAll;
+    mod.__setAllResponses([
+      { provider: 'groq',   content: verdictJson('matched', { matchId: 'real1' }) },
+      { provider: 'nvidia', content: verdictJson('matched', { matchId: 'real1' }) },
+      { provider: 'gemini', content: verdictJson('missing') },
+    ]);
+    const r = await invoke(baseBody);
+    expect((r.body as { results: Array<Record<string, unknown>> }).results[0]).toMatchObject({ verdict: 'matched', matchId: 'real1', agreement: '2/3' });
+  });
+
+  it('providers returning junk are dropped, survivors still judge', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetAll;
+    mod.__setAllResponses([
+      { provider: 'groq',   content: 'total garbage, not json' },
+      { provider: 'gemini', content: verdictJson('missing') },
+    ]);
+    const r = await invoke(baseBody);
+    expect(r.statusCode).toBe(200);
+    const body = r.body as { results: Array<Record<string, unknown>>; providers: string[] };
+    expect(body.providers).toEqual(['gemini']);
+    expect(body.results[0]).toMatchObject({ verdict: 'missing', agreement: '1/1' });
+  });
+
+  it('502 when every provider returns junk', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetAll;
+    mod.__setAllResponses([
+      { provider: 'groq',   content: 'nope' },
+      { provider: 'gemini', content: 'also nope' },
+    ]);
+    const r = await invoke(baseBody);
+    expect(r.statusCode).toBe(502);
   });
 });
