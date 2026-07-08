@@ -330,10 +330,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   }
 
-  // Validate mimeType is image/* or application/pdf. PDF is forwarded as-is to
-  // the AI provider — Gemini's OpenAI-compat layer accepts it via image_url
-  // with a data:application/pdf payload; Groq/NVIDIA reject and the provider
-  // waterfall falls through to whichever provider can read it.
+  // Validate mimeType is image/* or application/pdf. PDFs are routed by the
+  // provider layer to Gemini's NATIVE generateContent API — no OpenAI-compat
+  // endpoint (Gemini's included) accepts application/pdf via image_url, so
+  // without GEMINI_API_KEY the provider layer returns a clear "use CSV or
+  // screenshots" error instead of a generic all-providers-failed.
   if (!mimeType.startsWith("image/") && mimeType !== "application/pdf") {
     return res.status(400).json({ error: `mimeType must be image/* or application/pdf, got: ${mimeType}` });
   }
