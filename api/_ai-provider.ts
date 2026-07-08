@@ -97,10 +97,11 @@ function visionBody(
   imageBase64: string,
   mimeType: string,
   userPrompt: string,
+  maxTokens = 1024,
 ) {
   return {
     model,
-    max_tokens: 1024,
+    max_tokens: maxTokens,
     temperature: 0.2,
     messages: [
       { role: "system", content: systemPrompt },
@@ -171,6 +172,41 @@ export async function callText(
 }
 
 /**
+ * Fan-out text completion: the same prompt goes to EVERY configured provider
+ * in parallel and all successful answers come back. The waterfall (callText)
+ * settles for the first answer; this exists for consensus judging — e.g. the
+ * reconcile mode majority-votes across providers instead of trusting one.
+ * Providers that fail are dropped silently (their errors are collected).
+ * Throws AiProviderError only when NO provider succeeds.
+ */
+export async function callTextAll(
+  userPrompt: string,
+  systemPrompt = "You are a helpful assistant. Return only valid JSON.",
+): Promise<{ provider: string; content: string }[]> {
+  const providers = getProviders();
+  if (providers.length === 0) throw new AiProviderError("No AI API keys configured.", []);
+
+  const settled = await Promise.allSettled(
+    providers.map(async p => ({
+      provider: p.name,
+      content: await callProvider(p, p.textUrl, textBody(p.textModel, systemPrompt, userPrompt)),
+    })),
+  );
+  const ok: { provider: string; content: string }[] = [];
+  const errors: string[] = [];
+  settled.forEach((s, i) => {
+    if (s.status === "fulfilled") ok.push(s.value);
+    else {
+      const msg = s.reason instanceof Error ? s.reason.message : String(s.reason);
+      errors.push(msg);
+      console.error(`[ai-provider] ${providers[i].name} text (fan-out) failed:`, msg);
+    }
+  });
+  if (ok.length === 0) throw new AiProviderError("All AI providers failed.", errors);
+  return ok;
+}
+
+/**
  * Vision completion with provider waterfall.
  * imageBase64 — raw base64 string (no data: prefix).
  * mimeType    — e.g. "image/jpeg"
@@ -208,6 +244,7 @@ export async function callVisionWithProvider(
   mimeType: string,
   userPrompt: string,
   systemPrompt = "You are a helpful assistant. Return only valid JSON.",
+  opts: { maxTokens?: number } = {},
 ): Promise<{ content: string; provider: string }> {
   const providers = getProviders();
   if (providers.length === 0) throw new AiProviderError("No AI API keys configured.", []);
@@ -215,7 +252,7 @@ export async function callVisionWithProvider(
   const errors: string[] = [];
   for (const p of providers) {
     try {
-      const body = visionBody(p.visionModel, systemPrompt, imageBase64, mimeType, userPrompt);
+      const body = visionBody(p.visionModel, systemPrompt, imageBase64, mimeType, userPrompt, opts.maxTokens);
       const content = await callProvider(p, p.visionUrl, body);
       return { content, provider: p.name };
     } catch (e) {

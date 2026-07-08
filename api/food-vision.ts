@@ -141,6 +141,27 @@ Rules:
 
 const LEDGER_USER_PROMPT = "Extract each ledger row as a transaction. Skip totals and headers.";
 
+const STATEMENT_SYSTEM_PROMPT = `You are an OCR assistant that extracts transactions from an Indian bank or UPI statement (GPay / PhonePe / Paytm transaction history PDF, bank e-statement, or screenshot).
+Return ONLY valid JSON with no markdown fences:
+{
+  "rows": [
+    { "date": "2026-06-14", "amount": 106, "type": "expense", "note": "BESCOM electricity", "ref": "614523998877" },
+    { "date": "2026-06-02", "amount": 10000, "type": "income", "note": "Received from Ravi", "ref": "" }
+  ]
+}
+
+Rules:
+- One entry per transaction row in the statement, in document order.
+- date: ISO YYYY-MM-DD. Convert DD/MM/YYYY, DD-MMM-YYYY, "14 Jun 2026" etc. If unreadable, return "".
+- amount: positive number, currency symbols stripped.
+- type: "expense" for debit / paid / sent / withdrawal, "income" for credit / received / deposit / refund.
+- note: short human description — merchant or counterparty name from the narration, codes stripped (UPI-, POS, NEFT prefixes, merchant IDs).
+- ref: UPI transaction ID / UTR / reference number for that row if printed, else "".
+- Skip opening/closing balance lines, page headers/footers, totals, and summary sections.
+- Cap at 60 rows (earliest to latest if you must truncate, keep the latest).`;
+
+const STATEMENT_USER_PROMPT = "Extract every transaction from this bank/UPI statement with date, amount, direction, short description, and reference number.";
+
 interface FoodResult {
   name: string;
   serving_desc: string;
@@ -192,6 +213,19 @@ interface LedgerResult {
   provider?: string;
 }
 
+interface StatementRow {
+  date:   string;
+  amount: number;
+  type:   "expense" | "income";
+  note:   string;
+  ref:    string;
+}
+
+interface StatementResult {
+  rows:      StatementRow[];
+  provider?: string;
+}
+
 function validateFood(obj: unknown): obj is FoodResult {
   if (!obj || typeof obj !== "object") return false;
   const o = obj as Record<string, unknown>;
@@ -230,6 +264,23 @@ function validateReceiptItems(obj: unknown): obj is ReceiptItemsResult {
   });
 }
 
+function validateStatement(obj: unknown): obj is StatementResult {
+  if (!obj || typeof obj !== "object") return false;
+  const o = obj as Record<string, unknown>;
+  if (!Array.isArray(o.rows)) return false;
+  return o.rows.every(rw => {
+    if (!rw || typeof rw !== "object") return false;
+    const r = rw as Record<string, unknown>;
+    return (
+      typeof r.date === "string" &&
+      typeof r.amount === "number" &&
+      ["expense", "income"].includes(r.type as string) &&
+      typeof r.note === "string" &&
+      (r.ref === undefined || typeof r.ref === "string")
+    );
+  });
+}
+
 function validateLedger(obj: unknown): obj is LedgerResult {
   if (!obj || typeof obj !== "object") return false;
   const o = obj as Record<string, unknown>;
@@ -264,7 +315,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const { imageBase64, mimeType = "image/jpeg", type = "food", categories, wallets } = body as {
     imageBase64?: string;
     mimeType?: string;
-    type?: "food" | "receipt" | "receipt-items" | "ledger";
+    type?: "food" | "receipt" | "receipt-items" | "ledger" | "statement";
     categories?: unknown;
     wallets?: unknown;
   };
@@ -291,20 +342,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     type === "receipt"       ? RECEIPT_SYSTEM_PROMPT       :
     type === "receipt-items" ? RECEIPT_ITEMS_SYSTEM_PROMPT :
     type === "ledger"        ? LEDGER_SYSTEM_PROMPT        :
+    type === "statement"     ? STATEMENT_SYSTEM_PROMPT     :
                                FOOD_SYSTEM_PROMPT;
   const userPrompt =
     type === "receipt"       ? buildReceiptUserPrompt(categories, wallets) :
     type === "receipt-items" ? RECEIPT_ITEMS_USER_PROMPT :
     type === "ledger"        ? LEDGER_USER_PROMPT        :
+    type === "statement"     ? STATEMENT_USER_PROMPT     :
                                FOOD_USER_PROMPT;
   const label =
     type === "receipt"       ? "receipt-ocr"   :
     type === "receipt-items" ? "receipt-items" :
     type === "ledger"        ? "ledger-ocr"    :
+    type === "statement"     ? "statement-ocr" :
                                "food-vision";
 
   try {
-    const { content: raw, provider } = await callVisionWithProvider(imageBase64, mimeType, userPrompt, systemPrompt);
+    // A monthly statement is far longer than a receipt — 1024 tokens truncates
+    // the JSON mid-array. 4096 covers 60 rows comfortably.
+    const { content: raw, provider } = await callVisionWithProvider(
+      imageBase64, mimeType, userPrompt, systemPrompt,
+      type === "statement" ? { maxTokens: 4096 } : {},
+    );
 
     let parsed: unknown;
     try {
@@ -355,6 +414,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json(result);
     }
 
+    if (type === "statement") {
+      if (!validateStatement(parsed)) {
+        console.error(`[${label}] Invalid result shape:`, JSON.stringify(parsed).slice(0, 300));
+        return res.status(502).json({ error: "AI returned unexpected data shape. Try again or use a CSV export." });
+      }
+      const result: StatementResult = {
+        rows: parsed.rows.slice(0, 60)
+          .map(r => ({
+            date:   r.date.trim(),
+            amount: Math.round(r.amount * 100) / 100,
+            type:   r.type,
+            note:   r.note.trim(),
+            ref:    typeof r.ref === "string" ? r.ref.trim() : "",
+          }))
+          .filter(r => /^\d{4}-\d{2}-\d{2}$/.test(r.date) && r.amount > 0),
+        provider,
+      };
+      return res.status(200).json(result);
+    }
+
     if (type === "ledger") {
       if (!validateLedger(parsed)) {
         console.error(`[${label}] Invalid result shape:`, JSON.stringify(parsed).slice(0, 300));
@@ -399,6 +478,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         type === "receipt"       ? "Receipt OCR unavailable — all AI providers failed. Enter manually." :
         type === "receipt-items" ? "Line-item OCR unavailable — all AI providers failed. Enter manually." :
         type === "ledger"        ? "Ledger OCR unavailable — all AI providers failed. Enter manually." :
+        type === "statement"     ? "Statement OCR unavailable — all AI providers failed. Try a CSV export instead." :
                                    "Food analysis unavailable — all AI providers failed. Enter nutrition manually.";
       return res.status(502).json({
         error: errMsg,

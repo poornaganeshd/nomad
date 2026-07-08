@@ -178,6 +178,66 @@ describe('callText', () => {
     expect(err!.providerErrors).toHaveLength(2);
     err!.providerErrors.forEach(msg => expect(typeof msg).toBe('string'));
   });
+});
+
+// ---------------------------------------------------------------------------
+// callTextAll — parallel fan-out for consensus
+// ---------------------------------------------------------------------------
+describe('callTextAll', () => {
+  const origFetch = globalThis.fetch;
+
+  beforeEach(clearKeys);
+  afterEach(() => {
+    clearKeys();
+    globalThis.fetch = origFetch;
+  });
+
+  it('throws AiProviderError when no providers configured', async () => {
+    const { callTextAll, AiProviderError } = await import('../_ai-provider.js');
+    await expect(callTextAll('hello')).rejects.toBeInstanceOf(AiProviderError);
+  });
+
+  it('returns one answer per configured provider', async () => {
+    process.env.GROQ_API_KEY   = 'q-test';
+    process.env.GEMINI_API_KEY = 'g-test';
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: String(url).includes('groq') ? 'groq-says' : 'gemini-says' } }] }),
+    } as unknown as Response));
+
+    const { callTextAll } = await import('../_ai-provider.js');
+    const answers = await callTextAll('test');
+    expect(answers).toHaveLength(2);
+    const byName = Object.fromEntries(answers.map(a => [a.provider, a.content]));
+    expect(byName.groq).toBe('groq-says');
+    expect(byName.gemini).toBe('gemini-says');
+  });
+
+  it('drops failing providers but returns the survivors', async () => {
+    process.env.GROQ_API_KEY   = 'q-test';
+    process.env.GEMINI_API_KEY = 'g-test';
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).includes('groq')) return { ok: false, text: async () => 'quota' } as unknown as Response;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'gemini-only' } }] }) } as unknown as Response;
+    });
+
+    const { callTextAll } = await import('../_ai-provider.js');
+    const answers = await callTextAll('test');
+    expect(answers).toHaveLength(1);
+    expect(answers[0]).toEqual({ provider: 'gemini', content: 'gemini-only' });
+  });
+
+  it('throws AiProviderError when every provider fails', async () => {
+    process.env.GROQ_API_KEY   = 'q-test';
+    process.env.GEMINI_API_KEY = 'g-test';
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, text: async () => 'boom' } as unknown as Response);
+
+    const { callTextAll, AiProviderError } = await import('../_ai-provider.js');
+    let err: InstanceType<typeof AiProviderError> | null = null;
+    try { await callTextAll('test'); } catch (e) { err = e as InstanceType<typeof AiProviderError>; }
+    expect(err).not.toBeNull();
+    expect(err!.providerErrors).toHaveLength(2);
+  });
 
   it('throws when provider returns empty content', async () => {
     process.env.GEMINI_API_KEY = 'g-test';
