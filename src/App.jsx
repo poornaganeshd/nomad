@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, memo, Fragment } from "react";
 import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning, Wallet, Target, Lightning, Envelope, Fire, Sparkle, Lightbulb, ClipboardText, Timer, HandWaving, BellSlash, Robot, Receipt, FilePdf, Trash, Moon, Sun, Scales, Gear, PushPin, Hash, Microphone, CheckCircle, ArrowsLeftRight, CaretLeft, Users, ArrowRight, ArrowUpRight, ArrowDownLeft, PencilSimple, ShareNetwork, Compass } from "@phosphor-icons/react";
 import { IconCheck, IconTrash, IconHistory, IconChevronRight, IconChevronLeft, IconSend, IconAlertTriangle, IconX, IconClock, IconArrowDown, IconArrowUp, IconPlus, IconPlayerSkipForward, IconPencil } from "@tabler/icons-react";
-import { ComposedChart, Bar, Line, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid, PieChart, Pie } from "recharts";
+import { PieChart, Pie, Cell } from "recharts";
 import RoutineApp from "./Routine";
 import { flushSyncQueue, getPendingSyncCount, getPendingSyncSummary, getDeadLetterCount, clearDeadLetter, sendSupabaseRequest, subscribePendingSync, subscribeSyncDrops, isPendingDelete, isPendingUpsert, hasPendingDedupeKey } from "./offlineSync";
 import { checkBillReminders } from "./billReminders";
@@ -231,79 +231,154 @@ function LionM({ balance: bal, dancing, aiMsg, aiLoading, onTap }) {
   return <div style={{ display: "flex", alignItems: "flex-end", gap: 12, padding: "12px 0", cursor: onTap ? "pointer" : "default" }} onClick={onTap}><Lion mood={mood} dancing={dancing} /><div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: "14px 14px 14px 4px", padding: "10px 14px", fontSize: 13, color: "var(--ts)", maxWidth: 220, fontFamily: "var(--font-b)", lineHeight: 1.5 }}>{aiLoading ? <span style={{ color: "var(--muted)", fontStyle: "italic" }}>Thinking…</span> : displayMsg}</div></div>
 }
 
+// ——— Spending Breakdown (v2) ———
+// Mobile-first rebuild: no horizontal scroll, no floating tooltip, no Recharts.
+// Fixed calendar windows per period (14 days / 8 weeks / 6 months / 6 years)
+// paged with ‹ › chevrons; scrub (tap or drag) any bar to pin its detail in a
+// fixed insight header; tap a legend chip to isolate one category. Y-scale is
+// computed from the visible window only, so one big past month can't crush
+// recent bars into invisibility.
+const TREND_WINDOW = { day: 14, week: 8, month: 6, year: 6 };
+const TREND_UNIT = { day: "day", week: "wk", month: "mo", year: "yr" };
+const trendAddDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
+const trendWeekStart = date => { const d = new Date(date); d.setDate(d.getDate() - d.getDay()); return d; };
+const trendKeyOf = (dateStr, period) => {
+  if (period === "day") return dateStr;
+  if (period === "week") return localDateKey(trendWeekStart(new Date(`${dateStr}T00:00:00`)));
+  if (period === "month") return dateStr.slice(0, 7);
+  return dateStr.slice(0, 4);
+};
+// Category lookup with recurring-category + legacy-id fallbacks, so bills logged
+// under RC ids ("sip", "recharge") and orphaned ids ("other_mobfx1oo4pxf") get a
+// readable name instead of a raw id.
+const trendCatOf = (cid, categoryMap) => categoryMap[cid] || RC.find(r => r.id === cid) || (cid === "uncat" ? { id: cid, name: "Uncategorised", color: "#8A8A9A", neon: "#A0A0B0" } : { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#8A8A9A", neon: "#A0A0B0" });
+const trendMD = date => date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+const trendLabelOf = (bucket, period) => {
+  if (period === "day") return bucket.date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  if (period === "week") return `${trendMD(bucket.date)} – ${trendMD(trendAddDays(bucket.date, 6))}`;
+  if (period === "month") return bucket.date.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  return bucket.key;
+};
+const trendTickOf = (bucket, period) => {
+  if (period === "day") return String(bucket.date.getDate());
+  if (period === "week") return trendMD(bucket.date);
+  if (period === "month") return bucket.date.toLocaleDateString("en-US", { month: "short" });
+  return bucket.key;
+};
+const trendNice = v => { const x = Math.max(100, v); const p = Math.pow(10, Math.floor(Math.log10(x))); const u = x / p; const m = u <= 1 ? 1 : u <= 2 ? 2 : u <= 2.5 ? 2.5 : u <= 5 ? 5 : 10; return m * p; };
+const trendFmt = v => { const n = Number(v || 0); if (n >= 100000) return `₹${(n / 100000).toFixed(1)}L`; if (n >= 1000) return `₹${(n / 1000).toFixed(1)}k`; return `₹${Math.round(n)}`; };
+const trendHexA = (hex, a) => { const h = String(hex || "#8A8A9A").replace("#", ""); return `rgba(${parseInt(h.slice(0, 2), 16) || 0},${parseInt(h.slice(2, 4), 16) || 0},${parseInt(h.slice(4, 6), 16) || 0},${a})`; };
+const trendTopPath = (x, y, w, h, r0) => { const r = Math.max(0, Math.min(r0, w / 2, h)); return `M${x},${y + h} L${x},${y + r} Q${x},${y} ${x + r},${y} L${x + w - r},${y} Q${x + w},${y} ${x + w},${y + r} L${x + w},${y + h} Z`; };
+
 function SpendingBreakdown({ expenses, categories, period, onPeriodChange, formatCurrency, darkMode }) {
   const categoryMap = useMemo(
     () => Object.fromEntries((categories || []).map(c => [c.id, c])),
     [categories]
   );
-  const addDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
-  const startOfWeek = date => { const d = new Date(date); d.setDate(d.getDate() - d.getDay()); return d; };
+  const [page, sPage] = useState(0);
+  const [selIdx, sSelIdx] = useState(null);
+  const [isoCat, sIsoCat] = useState(null);
+  useEffect(() => { sPage(0); sSelIdx(null); sIsoCat(null); }, [period]);
 
-  const { data, activeCats, peakKey, yMax } = useMemo(() => {
-    const allDates = (expenses || []).map(e => e.date).filter(Boolean).sort();
-    if (!allDates.length) return { data: [], activeCats: [], peakKey: null, yMax: 1000 };
+  const hasData = (expenses || []).some(e => e?.date);
+
+  // Exact-pixel SVG width from the card itself — no ResponsiveContainer, so bars
+  // can never inflate wider than the screen or park mid-scroll.
+  const wrapRef = useRef(null);
+  const [chartW, sChartW] = useState(0);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    sChartW(el.clientWidth);
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(entries => { const w = entries[0]?.contentRect?.width; if (w) sChartW(w); });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hasData]);
+
+  const { buckets, activeCats, hasPrev } = useMemo(() => {
+    const byKey = new Map();
+    let earliestKey = null;
+    (expenses || []).forEach(e => {
+      if (!e?.date) return;
+      const key = trendKeyOf(e.date, period);
+      if (!earliestKey || key < earliestKey) earliestKey = key;
+      let row = byKey.get(key);
+      if (!row) { row = { total: 0, cats: {} }; byKey.set(key, row); }
+      const cid = e.categoryId || "uncat";
+      row.cats[cid] = roundMoney((row.cats[cid] || 0) + Number(e.amount || 0));
+      row.total = roundMoney(row.total + Number(e.amount || 0));
+    });
+    const n = TREND_WINDOW[period] || 6;
+    const today = new Date();
+    const mk = (key, date) => { const r = byKey.get(key); return { key, date, total: r?.total || 0, cats: r?.cats || {} }; };
     let buckets;
     if (period === "day") {
-      const today = new Date();
-      buckets = Array.from({ length: 60 }, (_, i) => {
-        const date = addDays(today, -(59 - i));
-        const key = localDateKey(date);
-        return { key, label: new Date(`${key}T00:00:00`).toLocaleDateString("en-US", { day: "numeric", month: "short" }) };
-      });
+      const end = trendAddDays(today, -(page * n));
+      buckets = Array.from({ length: n }, (_, i) => { const d = trendAddDays(end, -(n - 1 - i)); return mk(localDateKey(d), d); });
     } else if (period === "week") {
-      const cur = startOfWeek(new Date());
-      buckets = Array.from({ length: 26 }, (_, i) => {
-        const start = addDays(cur, -(7 * (25 - i)));
-        const key = localDateKey(start);
-        return { key, label: new Date(`${key}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" }) };
-      });
+      const end = trendAddDays(trendWeekStart(today), -(page * n * 7));
+      buckets = Array.from({ length: n }, (_, i) => { const d = trendAddDays(end, -7 * (n - 1 - i)); return mk(localDateKey(d), d); });
     } else if (period === "month") {
-      buckets = [...new Set(allDates.map(d => d.slice(0, 7)))].sort().slice(-24).map(key => {
-        const [y, m] = key.split("-");
-        return { key, label: new Date(Number(y), Number(m) - 1, 1).toLocaleDateString("en-US", { month: "short", year: "2-digit" }) };
-      });
+      buckets = Array.from({ length: n }, (_, i) => { const d = new Date(today.getFullYear(), today.getMonth() - page * n - (n - 1 - i), 1); return mk(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`, d); });
     } else {
-      buckets = [...new Set(allDates.map(d => d.slice(0, 4)))].sort().slice(-8).map(key => ({ key, label: key }));
+      const endY = today.getFullYear() - page * n;
+      buckets = Array.from({ length: n }, (_, i) => { const y = endY - (n - 1 - i); return mk(String(y), new Date(y, 0, 1)); });
     }
-    const catIds = [...new Set((expenses || []).map(e => e.categoryId).filter(Boolean))];
-    const rows = new Map(buckets.map(b => [b.key, { ...b, total: 0, ...Object.fromEntries(catIds.map(id => [id, 0])) }]));
-    (expenses || []).forEach(expense => {
-      if (!expense?.date) return;
-      let key = expense.date;
-      if (period === "week") { const d = new Date(`${expense.date}T00:00:00`); d.setDate(d.getDate() - d.getDay()); key = localDateKey(d); }
-      else if (period === "month") key = expense.date.slice(0, 7);
-      else if (period === "year") key = expense.date.slice(0, 4);
-      const row = rows.get(key);
-      if (!row) return;
-      row[expense.categoryId] = roundMoney((row[expense.categoryId] || 0) + Number(expense.amount || 0));
-      row.total = roundMoney(row.total + Number(expense.amount || 0));
-    });
-    const raw = [...rows.values()];
-    const activeCatIds = catIds.filter(id => raw.some(r => Number(r[id] || 0) > 0));
-    const activeCatsData = activeCatIds.map(id => categoryMap[id] || { id, name: id, color: "#999" });
-    const chartData = raw.map(row => ({ ...row, topCat: [...activeCatIds].reverse().find(id => Number(row[id] || 0) > 0) || null }));
-    const peak = chartData.reduce((best, row) => row.total > (best?.total || 0) ? row : best, null);
-    const maxTotal = Math.max(0, ...chartData.map(r => r.total || 0));
-    return { data: chartData, activeCats: activeCatsData, peakKey: peak?.key || null, yMax: Math.max(1000, Math.ceil(maxTotal * 1.18 / 100) * 100) };
-  }, [expenses, period, categoryMap]);
+    const sums = {};
+    buckets.forEach(b => Object.entries(b.cats).forEach(([cid, v]) => { sums[cid] = (sums[cid] || 0) + Number(v || 0); }));
+    const activeCats = Object.entries(sums).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).map(([cid]) => trendCatOf(cid, categoryMap));
+    return { buckets, activeCats, hasPrev: !!earliestKey && buckets[0].key > earliestKey };
+  }, [expenses, period, page, categoryMap]);
 
-  // Sideways scroll: with 60 day / 26 week / 24 month buckets the bars no longer
-  // fit one screen. Chart gets an explicit px width (36px per bucket, min 100%)
-  // inside an overflow-x wrapper, anchored to the newest bucket on the right.
-  const scrollRef = useRef(null);
-  // rAF: anchor AFTER Recharts/ResponsiveContainer has laid out, otherwise
-  // scrollWidth is measured pre-inflation and the chart parks mid-scroll.
-  useEffect(() => { const id = requestAnimationFrame(() => { const el = scrollRef.current; if (el) el.scrollLeft = el.scrollWidth; }); return () => cancelAnimationFrame(id); }, [period, data.length]);
-  const chartW = Math.max(data.length * 36, 280);
-  const fmtY = v => { const n = Number(v || 0); if (n >= 100000) return `\u20b9${(n / 100000).toFixed(1)}L`; if (n >= 1000) return `\u20b9${(n / 1000).toFixed(1)}k`; return `\u20b9${Math.round(n)}`; };
-  const lineStroke = darkMode ? "rgba(255,255,255,0.6)" : "rgba(44,42,36,0.4)";
-  const ttBg = darkMode ? "#1A1917" : "#FAFAF7", ttBorder = darkMode ? "#2A2926" : "#DDD9D0", ttText = darkMode ? "#E8E4DC" : "#2C2A24", ttMuted = darkMode ? "#7A7870" : "#9A9488";
+  const n = buckets.length;
+  const val = b => (isoCat ? Number(b.cats[isoCat] || 0) : b.total);
+  const vals = buckets.map(val);
+  const yTop = trendNice(Math.max(...vals, 0));
+  const nz = vals.filter(v => v > 0);
+  const avg = nz.length ? nz.reduce((a, b) => a + b, 0) / nz.length : 0;
+  let sel = selIdx == null ? -1 : Math.min(selIdx, n - 1);
+  if (sel < 0) { sel = n - 1; for (let i = n - 1; i >= 0; i--) { if (vals[i] > 0) { sel = i; break; } } }
+  const selB = buckets[sel];
+  const selVal = vals[sel];
+  const prevVal = sel > 0 ? vals[sel - 1] : null;
+  const delta = prevVal != null && prevVal > 0 ? Math.round((selVal - prevVal) / prevVal * 100) : null;
+  const isNewSel = prevVal === 0 && selVal > 0;
+  const selSegs = activeCats.map(cat => ({ cat, v: Number(selB?.cats[cat.id] || 0) })).filter(s => s.v > 0);
+  const chipCats = isoCat && !activeCats.some(c => c.id === isoCat) ? [...activeCats, trendCatOf(isoCat, categoryMap)] : activeCats;
+  const isoCatObj = isoCat ? trendCatOf(isoCat, categoryMap) : null;
+
+  const H = 176, padT = 16, padB = 20, plotH = H - padT - padB;
+  const step = n > 0 && chartW > 0 ? chartW / n : 0;
+  const gap = period === "day" ? 5 : 9;
+  const barW = Math.max(6, Math.min(step - gap, 46));
+  const bx = i => i * step + (step - barW) / 2;
+  const yOf = v => padT + plotH * (1 - Math.min(1, v / yTop));
+  const gridStroke = darkMode ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.07)";
+  const bandFill = darkMode ? "rgba(56,189,248,0.12)" : "rgba(56,189,248,0.10)";
+
+  const pick = e => {
+    if (!step) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const i = Math.max(0, Math.min(n - 1, Math.floor((e.clientX - r.left) / step)));
+    if (i !== sel) { hapticSelection(); sSelIdx(i); }
+  };
+  const onDown = e => { try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* older webviews */ } pick(e); };
+  const onMove = e => { if ((e.buttons & 1) || e.pointerType === "touch") pick(e); };
+
+  const first = buckets[0], last = buckets[n - 1];
+  const y2 = d => String(d.getFullYear()).slice(2);
+  const rangeLabel = !n ? "" : period === "day" ? `${trendMD(first.date)} – ${trendMD(last.date)}`
+    : period === "week" ? `${trendMD(first.date)} – ${trendMD(trendAddDays(last.date, 6))}`
+    : period === "month" ? `${first.date.toLocaleDateString("en-US", { month: "short" })} ${y2(first.date) !== y2(last.date) ? `’${y2(first.date)} ` : ""}– ${last.date.toLocaleDateString("en-US", { month: "short" })} ’${y2(last.date)}`
+    : `${first.key} – ${last.key}`;
+  const pagerBtn = disabled => ({ width: 26, height: 26, borderRadius: 13, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--ts)", fontSize: 15, lineHeight: "22px", padding: 0, fontFamily: "var(--font-h)", cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.25 : 1 });
 
   const tabs = (
     <div style={{ display: "flex", gap: 2, background: darkMode ? "rgba(56,189,248,0.08)" : "rgba(56,189,248,0.12)", borderRadius: 20, padding: 3 }}>
       {["Day", "Week", "Month", "Year"].map(tab => {
         const v = tab.toLowerCase(), active = period === v;
-        return <button key={v} onClick={() => { hapticSelection(); onPeriodChange(v); }} style={{ padding: "5px 11px", borderRadius: 16, border: "none", background: active ? "#38bdf8" : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? (darkMode ? "#0a1628" : "#fff") : darkMode ? "rgba(56,189,248,0.6)" : "rgba(0,90,130,0.7)", cursor: "pointer", transition: "all 0.15s" }}>{tab}</button>;
+        return <button key={v} onClick={() => { hapticSelection(); onPeriodChange(v); }} style={{ padding: "5px 10px", borderRadius: 16, border: "none", whiteSpace: "nowrap", background: active ? "#38bdf8" : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? (darkMode ? "#0a1628" : "#fff") : darkMode ? "rgba(56,189,248,0.6)" : "rgba(0,90,130,0.7)", cursor: "pointer", transition: "all 0.15s" }}>{tab}</button>;
       })}
     </div>
   );
@@ -311,59 +386,90 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
   return (
     <div style={{ ...cc, padding: "18px 14px", marginBottom: 16, position: "relative", overflow: "hidden" }}>
       <div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "#38bdf8" }} />
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, gap: 12 }}>
-        <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "#38bdf8", letterSpacing: "0.04em", fontWeight: 600 }}>Spending Breakdown</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 10, flexWrap: "wrap", rowGap: 8 }}>
+        <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "#38bdf8", letterSpacing: "0.04em", fontWeight: 600, whiteSpace: "nowrap" }}>Spending Breakdown</div>
         {tabs}
       </div>
-      {!data.length || !activeCats.length ? (
+      {!hasData ? (
         <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: "28px 0 8px", fontFamily: "var(--font-b)" }}>Add transactions to see trends</p>
       ) : (
         <>
-          <div ref={scrollRef} style={{ width: "100%", overflowX: "auto", overflowY: "hidden", WebkitOverflowScrolling: "touch", touchAction: "pan-x pan-y", overscrollBehaviorX: "contain" }}>
-          <div style={{ width: chartW, minWidth: "100%", height: 260 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={data} margin={{ top: 8, right: 8, left: -4, bottom: 0 }} barCategoryGap="30%">
-                <CartesianGrid stroke={darkMode ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.06)"} vertical={false} />
-                <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "var(--font-h)" }} />
-                <YAxis tickLine={false} axisLine={false} width={48} domain={[0, yMax]} tickFormatter={fmtY} tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "var(--font-h)" }} tickCount={5} />
-                <Tooltip content={({ active, payload }) => {
-                  if (!active || !payload?.length) return null;
-                  const row = payload[0]?.payload;
-                  const entries = payload.filter(p => activeCats.some(c => c.id === p.dataKey) && Number(p.value || 0) > 0);
+          <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 10, margin: "0 2px 10px" }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600, letterSpacing: "0.4px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isoCatObj ? `${isoCatObj.name} · ` : ""}{selB ? trendLabelOf(selB, period) : ""}</div>
+              <div style={{ fontFamily: "var(--font-h)", fontSize: 20, fontWeight: 800, color: "var(--text)", lineHeight: 1.3 }}>{formatCurrency(selVal)}</div>
+            </div>
+            <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+              {delta !== null ? (
+                <span style={{ fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 700, color: delta > 0 ? "#E07A5F" : delta < 0 ? "#6BAA75" : "var(--muted)", background: delta > 0 ? "#E07A5F15" : delta < 0 ? "#6BAA7515" : "var(--bg)", padding: "2px 6px", borderRadius: 4, whiteSpace: "nowrap" }}>{delta > 0 ? "▲ +" : delta < 0 ? "▼ " : ""}{delta}% vs prev</span>
+              ) : isNewSel ? (
+                <span style={{ fontSize: 8.5, fontFamily: "var(--font-h)", fontWeight: 700, color: "#7B8CDE", background: "#7B8CDE15", padding: "2px 6px", borderRadius: 4, letterSpacing: "0.3px" }}>NEW</span>
+              ) : null}
+              {nz.length >= 2 && <span style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", whiteSpace: "nowrap" }}>avg {trendFmt(avg)}/{TREND_UNIT[period]}</span>}
+            </div>
+          </div>
+          <div ref={wrapRef} style={{ width: "100%" }}>
+            {chartW > 0 && n > 0 && (
+              <svg data-chart="spend-trend" width={chartW} height={H} style={{ display: "block", touchAction: "pan-y" }}>
+                <rect x={sel * step + 1} y={4} width={Math.max(step - 2, 4)} height={H - 4} rx={8} fill={bandFill} />
+                <line x1={0} x2={chartW} y1={yOf(yTop)} y2={yOf(yTop)} stroke={gridStroke} />
+                <line x1={0} x2={chartW} y1={yOf(yTop / 2)} y2={yOf(yTop / 2)} stroke={gridStroke} />
+                <line x1={0} x2={chartW} y1={padT + plotH} y2={padT + plotH} stroke="var(--border)" />
+                <text x={chartW - 2} y={yOf(yTop) - 4} textAnchor="end" fontSize={8.5} fill="var(--muted)" fontFamily="var(--font-h)" opacity={0.85}>{trendFmt(yTop)}</text>
+                <text x={chartW - 2} y={yOf(yTop / 2) - 4} textAnchor="end" fontSize={8.5} fill="var(--muted)" fontFamily="var(--font-h)" opacity={0.85}>{trendFmt(yTop / 2)}</text>
+                {buckets.map((b, i) => {
+                  const v = vals[i];
+                  if (v <= 0) return <rect key={b.key} x={bx(i)} y={padT + plotH - 2} width={barW} height={2} rx={1} fill="var(--border)" />;
+                  if (isoCat) { const h = (v / yTop) * plotH; return <path key={b.key} d={trendTopPath(bx(i), padT + plotH - h, barW, h, 4)} fill={isoCatObj.color} opacity={i === sel ? 1 : 0.75} />; }
+                  let acc = 0;
+                  const segs = [];
+                  activeCats.forEach(cat => { const cv = Number(b.cats[cat.id] || 0); if (cv <= 0) return; segs.push({ cat, y0: acc, y1: acc + cv }); acc += cv; });
                   return (
-                    <div style={{ background: ttBg, borderRadius: 10, border: `0.5px solid ${ttBorder}`, padding: "10px 12px", minWidth: 155, boxShadow: "0 8px 24px rgba(0,0,0,0.12)" }}>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: ttText, fontFamily: "var(--font-h)", marginBottom: 7 }}>{row.label}</div>
-                      <div style={{ display: "grid", gap: 5 }}>
-                        {entries.map(p => { const cat = activeCats.find(c => c.id === p.dataKey); return <div key={p.dataKey} style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}><div style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 7, height: 7, borderRadius: 2, background: cat?.color || "#999", flexShrink: 0 }} /><span style={{ color: ttMuted, fontSize: 11, fontFamily: "var(--font-b)" }}>{cat?.name || p.dataKey}</span></div><span style={{ color: ttText, fontSize: 11, fontFamily: "var(--font-b)", fontWeight: 700 }}>{formatCurrency(p.value)}</span></div>; })}
-                        {entries.length > 1 && <><div style={{ height: 1, background: ttBorder, margin: "2px 0" }} /><div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}><span style={{ color: ttMuted, fontSize: 11, fontFamily: "var(--font-b)" }}>Total</span><span style={{ color: "#C17A5A", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 700 }}>{formatCurrency(row.total)}</span></div></>}
-                      </div>
-                    </div>
+                    <g key={b.key} opacity={i === sel ? 1 : 0.8}>
+                      {segs.map((s, si) => {
+                        const yPx = padT + plotH * (1 - Math.min(1, s.y1 / yTop));
+                        const hPx = ((s.y1 - s.y0) / yTop) * plotH;
+                        return si === segs.length - 1
+                          ? <path key={s.cat.id} d={trendTopPath(bx(i), yPx, barW, hPx, 4)} fill={s.cat.color} />
+                          : <rect key={s.cat.id} x={bx(i)} y={yPx} width={barW} height={hPx + 0.4} fill={s.cat.color} />;
+                      })}
+                    </g>
                   );
-                }} cursor={{ fill: "rgba(201,123,99,0.06)" }} />
-                {activeCats.map(cat => (
-                  <Bar key={cat.id} dataKey={cat.id} name={cat.name} stackId="e" fill={cat.color} maxBarSize={32} isAnimationActive={false}>
-                    {data.map((row, idx) => <Cell key={`${cat.id}-${idx}`} radius={row.topCat === cat.id ? [4, 4, 0, 0] : [0, 0, 0, 0]} />)}
-                  </Bar>
+                })}
+                {nz.length >= 2 && avg > 0 && <line x1={0} x2={chartW} y1={yOf(avg)} y2={yOf(avg)} stroke="#C17A5A" strokeWidth={1} strokeDasharray="4 4" opacity={0.75} />}
+                {buckets.map((b, i) => (
+                  <text key={b.key} x={i * step + step / 2} y={H - 5} textAnchor="middle" fontSize={8.5} fontFamily="var(--font-h)" fill={i === sel ? "var(--text)" : "var(--muted)"} fontWeight={i === sel ? 700 : 400}>{trendTickOf(b, period)}</text>
                 ))}
-                <Line type="monotone" dataKey="total" stroke={lineStroke} strokeDasharray="5 4" strokeWidth={1.5} isAnimationActive={false}
-                  dot={({ cx, cy, payload }) => {
-                    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
-                    return <circle key={payload?.key} cx={cx} cy={cy} r={payload?.key === peakKey && payload?.total > 0 ? 6 : 2.5} fill="#C17A5A" />;
-                  }}
-                  activeDot={{ r: 5, fill: "#C17A5A" }}
-                />
-              </ComposedChart>
-            </ResponsiveContainer>
+                <rect x={0} y={0} width={chartW} height={H} fill="transparent" style={{ cursor: "pointer" }} onPointerDown={onDown} onPointerMove={onMove} />
+              </svg>
+            )}
           </div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, marginTop: 8 }}>
+            <button aria-label="Older" disabled={!hasPrev} onClick={() => { if (!hasPrev) return; hapticSelection(); sPage(p => p + 1); sSelIdx(null); }} style={pagerBtn(!hasPrev)}>‹</button>
+            <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600, letterSpacing: "0.3px", minWidth: 110, textAlign: "center" }}>{rangeLabel}</span>
+            <button aria-label="Newer" disabled={page === 0} onClick={() => { if (page === 0) return; hapticSelection(); sPage(p => Math.max(0, p - 1)); sSelIdx(null); }} style={pagerBtn(page === 0)}>›</button>
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
-            {activeCats.map(cat => (
-              <div key={cat.id} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "var(--bg)", border: "0.5px solid var(--border)", borderRadius: 20, padding: "3px 9px" }}>
-                <span style={{ width: 7, height: 7, borderRadius: 2, background: cat.color, flexShrink: 0 }} />
-                <span style={{ color: "var(--muted)", fontSize: 10, fontFamily: "var(--font-b)" }}>{cat.name}</span>
-              </div>
-            ))}
-          </div>
+          {!isoCat && selVal > 0 && selSegs.length > 1 && (
+            <div style={{ display: "flex", height: 9, borderRadius: 5, overflow: "hidden", margin: "10px 2px 0", gap: 2 }}>
+              {selSegs.map(s => <div key={s.cat.id} style={{ flex: s.v, background: s.cat.color, minWidth: 3, borderRadius: 2 }} />)}
+            </div>
+          )}
+          {chipCats.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
+              {chipCats.map(cat => {
+                const on = isoCat === cat.id;
+                const inSel = Number(selB?.cats[cat.id] || 0);
+                return (
+                  <button key={cat.id} onClick={() => { hapticSelection(); sIsoCat(on ? null : cat.id); sSelIdx(null); }} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: on ? trendHexA(cat.color, 0.14) : "var(--bg)", border: `1px solid ${on ? cat.color : "var(--border)"}`, borderRadius: 20, padding: "3px 9px", cursor: "pointer", opacity: isoCat && !on ? 0.45 : 1, transition: "all 0.15s" }}>
+                    <span style={{ width: 7, height: 7, borderRadius: 2, background: cat.color, flexShrink: 0 }} />
+                    <span style={{ color: on ? "var(--text)" : "var(--muted)", fontSize: 10, fontFamily: "var(--font-b)", fontWeight: on ? 700 : 400 }}>{cat.name}</span>
+                    {inSel > 0 && <span style={{ color: "var(--ts)", fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 700 }}>{trendFmt(inSel)}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <div style={{ fontSize: 9, color: "var(--muted)", textAlign: "center", marginTop: 8, opacity: 0.75, fontFamily: "var(--font-b)" }}>tap or drag the bars to inspect · tap a chip to focus one category</div>
         </>
       )}
     </div>
@@ -371,13 +477,13 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
 }
 
 
-// Category Share — donut + ranked category bars for a picked period, with
-// change-vs-previous-period chips and tap-to-drill transaction lists. Additive
-// view: complements SpendingBreakdown (time buckets) and the month-filtered
-// "Spending by Category" card without touching either.
+// Category Share — pure proportion view: interactive donut, nothing else.
+// The ranked per-category bar list was removed ("Spending by Category" already
+// covers ranked amounts); tap a slice or its legend chip to see amount, share
+// and change-vs-previous-period pinned in the donut centre.
 function CategoryBreakdown({ expenses, categories, formatCurrency }) {
   const [range, sRange] = useState("month");
-  const [openCat, sOpenCat] = useState(null);
+  const [selCid, sSelCid] = useState(null);
   const { rows, total, prevLabel } = useMemo(() => {
     const today = new Date();
     const y = today.getFullYear(), m = today.getMonth(), d = today.getDate();
@@ -388,32 +494,33 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
     else if (range === "3m") { curStart = new Date(y, m - 2, 1); prevStart = new Date(y, m - 5, 1); prevEnd = curStart; prevLabel = "vs prior 3 mo"; }
     else { curStart = new Date(y, 0, 1); prevStart = new Date(y - 1, 0, 1); prevEnd = curStart; prevLabel = "vs last year"; }
     const curStartKey = key(curStart), curEndKey = key(new Date(y, m, d + 1)), prevStartKey = key(prevStart), prevEndKey = key(prevEnd);
-    const cur = {}, prev = {}, txs = {};
+    const cur = {}, prev = {};
     let total = 0;
     (expenses || []).forEach(e => {
       if (!e?.date) return;
       const cid = e.categoryId || "uncat";
-      if (e.date >= curStartKey && e.date < curEndKey) { const amt = Number(e.amount || 0); cur[cid] = roundMoney((cur[cid] || 0) + amt); total = roundMoney(total + amt); (txs[cid] = txs[cid] || []).push(e); }
+      if (e.date >= curStartKey && e.date < curEndKey) { const amt = Number(e.amount || 0); cur[cid] = roundMoney((cur[cid] || 0) + amt); total = roundMoney(total + amt); }
       else if (e.date >= prevStartKey && e.date < prevEndKey) prev[cid] = roundMoney((prev[cid] || 0) + Number(e.amount || 0));
     });
     const rows = Object.entries(cur).sort((a, b) => b[1] - a[1]).map(([cid, amt]) => {
-      const cat = categories.find(x => x.id === cid) || (cid === "uncat" ? { id: cid, name: "Uncategorised", color: "#8A8A9A", neon: "#A0A0B0" } : { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#6366F1", neon: "#818CF8" });
+      const cat = categories.find(x => x.id === cid) || RC.find(x => x.id === cid) || (cid === "uncat" ? { id: cid, name: "Uncategorised", color: "#8A8A9A", neon: "#A0A0B0" } : { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#6366F1", neon: "#818CF8" });
       const prevAmt = prev[cid] || 0;
-      return { cid, cat, amt, pct: total > 0 ? Math.round(amt / total * 100) : 0, delta: prevAmt > 0 ? Math.round((amt - prevAmt) / prevAmt * 100) : null, isNew: prevAmt === 0 && amt > 0, txs: (txs[cid] || []).sort((a, b) => (b.date || "").localeCompare(a.date || "")) };
+      return { cid, cat, amt, pct: total > 0 ? Math.round(amt / total * 100) : 0, delta: prevAmt > 0 ? Math.round((amt - prevAmt) / prevAmt * 100) : null, isNew: prevAmt === 0 && amt > 0 };
     });
     return { rows, total, prevLabel };
   }, [expenses, categories, range]);
-  const maxAmt = rows[0]?.amt || 1;
+  const sel = selCid ? rows.find(r => r.cid === selCid) : null;
   const accent = "#F4A261";
+  const toggleCat = cid => { hapticSelection(); sSelCid(c => (c === cid ? null : cid)); };
   return (
     <div style={{ ...cc, padding: "18px 14px", marginBottom: 16, position: "relative", overflow: "hidden" }}>
       <div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: accent }} />
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, gap: 12 }}>
-        <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: accent, letterSpacing: "0.04em", fontWeight: 600 }}>Category Share</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 10, flexWrap: "wrap", rowGap: 8 }}>
+        <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: accent, letterSpacing: "0.04em", fontWeight: 600, whiteSpace: "nowrap" }}>Category Share</div>
         <div style={{ display: "flex", gap: 2, background: "rgba(244,162,97,0.12)", borderRadius: 20, padding: 3 }}>
-          {[["week", "Week"], ["month", "Month"], ["3m", "3 Mo"], ["year", "Year"]].map(([v, lbl]) => {
+          {[["week", "Week"], ["month", "Month"], ["3m", "3M"], ["year", "Year"]].map(([v, lbl]) => {
             const active = range === v;
-            return <button key={v} onClick={() => { hapticSelection(); sRange(v); sOpenCat(null); }} style={{ padding: "5px 10px", borderRadius: 16, border: "none", background: active ? accent : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? "#fff" : "rgba(244,162,97,0.85)", cursor: "pointer", transition: "all 0.15s" }}>{lbl}</button>;
+            return <button key={v} onClick={() => { hapticSelection(); sRange(v); sSelCid(null); }} style={{ padding: "5px 10px", borderRadius: 16, border: "none", whiteSpace: "nowrap", background: active ? accent : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? "#fff" : "rgba(244,162,97,0.85)", cursor: "pointer", transition: "all 0.15s" }}>{lbl}</button>;
           })}
         </div>
       </div>
@@ -421,57 +528,45 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
         <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: "28px 0 8px", fontFamily: "var(--font-b)" }}>No expenses in this period</p>
       ) : (
         <>
-          <div style={{ position: "relative", width: 176, height: 176, margin: "0 auto 14px" }}>
-            <PieChart width={176} height={176}>
-              <Pie data={rows.map(r => ({ name: r.cat.name, value: r.amt }))} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={57} outerRadius={80} paddingAngle={rows.length > 1 ? 2 : 0} cornerRadius={3} stroke="none" isAnimationActive={false}>
-                {rows.map(r => <Cell key={r.cid} fill={r.cat.color} />)}
+          <div style={{ position: "relative", width: 208, height: 208, margin: "2px auto 6px" }}>
+            <PieChart width={208} height={208}>
+              <Pie data={rows.map(r => ({ name: r.cat.name, value: r.amt }))} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={64} outerRadius={96} paddingAngle={rows.length > 1 ? 2 : 0} cornerRadius={3} stroke="none" isAnimationActive={false} onClick={(_, idx) => { const r = rows[idx]; if (r) toggleCat(r.cid); }}>
+                {rows.map(r => <Cell key={r.cid} fill={r.cat.color} fillOpacity={selCid && r.cid !== selCid ? 0.3 : 1} style={{ cursor: "pointer", outline: "none" }} />)}
               </Pie>
             </PieChart>
-            <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
-              <span style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{formatCurrency(total)}</span>
-              <span style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", letterSpacing: "0.4px" }}>{rows.length} {rows.length === 1 ? "category" : "categories"}</span>
+            <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none", textAlign: "center" }}>
+              {sel ? (
+                <>
+                  <span style={{ display: "flex", alignItems: "center", gap: 4, maxWidth: 104 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: sel.cat.color, flexShrink: 0 }} /><span style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ts)", fontFamily: "var(--font-h)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sel.cat.name}</span></span>
+                  <span style={{ fontFamily: "var(--font-h)", fontSize: 16, fontWeight: 800, color: "var(--text)", marginTop: 2 }}>{formatCurrency(sel.amt)}</span>
+                  <span style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", marginTop: 1 }}>{sel.pct}% of spend</span>
+                  {sel.delta !== null ? (
+                    <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: sel.delta > 0 ? "#E07A5F" : sel.delta < 0 ? "#6BAA75" : "var(--muted)", background: sel.delta > 0 ? "#E07A5F15" : sel.delta < 0 ? "#6BAA7515" : "var(--bg)", padding: "1px 6px", borderRadius: 3, marginTop: 3, whiteSpace: "nowrap" }}>{sel.delta > 0 ? "▲ +" : sel.delta < 0 ? "▼ " : ""}{sel.delta}% {prevLabel}</span>
+                  ) : sel.isNew ? (
+                    <span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 700, color: "#7B8CDE", background: "#7B8CDE15", padding: "1px 6px", borderRadius: 3, marginTop: 3, letterSpacing: "0.3px" }}>NEW</span>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <span style={{ fontFamily: "var(--font-h)", fontSize: 16, fontWeight: 800, color: "var(--text)" }}>{formatCurrency(total)}</span>
+                  <span style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", letterSpacing: "0.4px", marginTop: 1 }}>{rows.length} {rows.length === 1 ? "category" : "categories"}</span>
+                  <span style={{ fontSize: 8.5, color: "var(--muted)", fontFamily: "var(--font-b)", opacity: 0.75, marginTop: 3 }}>tap a slice</span>
+                </>
+              )}
             </div>
           </div>
-          {rows.map(r => {
-            const drilled = openCat === r.cid;
-            const shown = drilled ? r.txs.slice(0, 15) : [];
-            return (
-              <div key={r.cid} style={{ marginBottom: 10 }}>
-                <div onClick={() => { hapticSelection(); sOpenCat(drilled ? null : r.cid); }} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-                  <span style={{ width: 26, display: "flex", justifyContent: "center", flexShrink: 0 }}><DI2 id={r.cat.id} accent={r.cat.neon || r.cat.color} size={18} /></span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                        <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.cat.name}</span>
-                        <span style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", flexShrink: 0 }}>{r.pct}%</span>
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                        {r.delta !== null && <span title={prevLabel} style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: r.delta > 0 ? "#E07A5F" : "#6BAA75", background: r.delta > 0 ? "#E07A5F15" : "#6BAA7515", padding: "1px 5px", borderRadius: 3 }}>{r.delta > 0 ? "▲ +" : r.delta < 0 ? "▼ " : ""}{r.delta}%</span>}
-                        {r.isNew && <span title={prevLabel} style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 700, color: "#7B8CDE", background: "#7B8CDE15", padding: "1px 5px", borderRadius: 3, letterSpacing: "0.3px" }}>NEW</span>}
-                        <span style={{ fontSize: 12.5, fontFamily: "var(--font-h)", color: "var(--ts)", fontWeight: 600 }}>{formatCurrency(r.amt)}</span>
-                      </div>
-                    </div>
-                    <div style={{ height: 5, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${(r.amt / maxAmt) * 100}%`, background: r.cat.color, borderRadius: 3 }} /></div>
-                  </div>
-                  <span style={{ fontSize: 10, color: "var(--muted)", flexShrink: 0 }}>{drilled ? "▲" : "▼"}</span>
-                </div>
-                {drilled && (
-                  <div style={{ marginLeft: 36, marginTop: 6, padding: "8px 10px", background: "var(--bg)", borderRadius: 8, border: "1px solid var(--border)", maxHeight: 240, overflowY: "auto" }}>
-                    {shown.map(tx => (
-                      <div key={tx.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, paddingBottom: 6, borderBottom: "1px dashed var(--border)" }}>
-                        <div style={{ flex: 1, minWidth: 0, marginRight: 8 }}>
-                          <div style={{ fontSize: 11, color: "var(--ts)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-h)", fontWeight: 600 }}>{tx.note || "(no note)"}</div>
-                          <div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 1 }}>{dl(tx.date)}</div>
-                        </div>
-                        <span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--text)", fontWeight: 600, flexShrink: 0 }}>{formatCurrency(tx.amount)}</span>
-                      </div>
-                    ))}
-                    {r.txs.length > shown.length && <div style={{ fontSize: 10, color: "var(--muted)", textAlign: "center", paddingTop: 2, fontFamily: "var(--font-h)" }}>+{r.txs.length - shown.length} more in History</div>}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, justifyContent: "center" }}>
+            {rows.map(r => {
+              const on = selCid === r.cid;
+              return (
+                <button key={r.cid} onClick={() => toggleCat(r.cid)} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: on ? trendHexA(r.cat.color, 0.14) : "var(--bg)", border: `1px solid ${on ? r.cat.color : "var(--border)"}`, borderRadius: 20, padding: "3px 9px", cursor: "pointer", opacity: selCid && !on ? 0.5 : 1, transition: "all 0.15s" }}>
+                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: r.cat.color, flexShrink: 0 }} />
+                  <span style={{ color: on ? "var(--text)" : "var(--muted)", fontSize: 10, fontFamily: "var(--font-b)", fontWeight: on ? 700 : 400 }}>{r.cat.name}</span>
+                  <span style={{ color: "var(--muted)", fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700 }}>{r.pct}%</span>
+                </button>
+              );
+            })}
+          </div>
         </>
       )}
     </div>
