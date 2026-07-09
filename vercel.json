@@ -1,6 +1,9 @@
 {
   "functions": {
-    "api/*.ts": {
+    "api/food-vision.ts": {
+      "maxDuration": 60
+    },
+    "api/ai-chat.ts": {
       "maxDuration": 60
     }
   },

@@ -244,14 +244,15 @@ const trendAddDays = (date, days) => { const d = new Date(date); d.setDate(d.get
 const trendWeekStart = date => { const d = new Date(date); d.setDate(d.getDate() - d.getDay()); return d; };
 const trendKeyOf = (dateStr, period) => {
   if (period === "day") return dateStr;
-  if (period === "week") return localDateKey(trendWeekStart(new Date(`${dateStr}T00:00:00`)));
+  if (period === "week") return localDateKey(trendWeekStart(new Date(`${dateStr}T12:00:00`)));
   if (period === "month") return dateStr.slice(0, 7);
   return dateStr.slice(0, 4);
 };
 // Category lookup with recurring-category + legacy-id fallbacks, so bills logged
 // under RC ids ("sip", "recharge") and orphaned ids ("other_mobfx1oo4pxf") get a
-// readable name instead of a raw id.
-const trendCatOf = (cid, categoryMap) => categoryMap[cid] || RC.find(r => r.id === cid) || (cid === "uncat" ? { id: cid, name: "Uncategorised", color: "#8A8A9A", neon: "#A0A0B0" } : { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#8A8A9A", neon: "#A0A0B0" });
+// readable name instead of a raw id. Delegates to resolveRecCategory — the
+// single-source cats→RC lookup (CLAUDE.md) — adding only orphan-id prettifying.
+const trendCatOf = (cid, catList) => { const id = cid || "uncat"; return resolveRecCategory(id, [catList, RC], id === "uncat" ? "Uncategorised" : id.split("_")[0].replace(/^\w/, l => l.toUpperCase())); };
 const trendMD = date => date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 const trendLabelOf = (bucket, period) => {
   if (period === "day") return bucket.date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
@@ -271,10 +272,6 @@ const trendHexA = (hex, a) => { const h = String(hex || "#8A8A9A").replace("#", 
 const trendTopPath = (x, y, w, h, r0) => { const r = Math.max(0, Math.min(r0, w / 2, h)); return `M${x},${y + h} L${x},${y + r} Q${x},${y} ${x + r},${y} L${x + w - r},${y} Q${x + w},${y} ${x + w},${y + r} L${x + w},${y + h} Z`; };
 
 function SpendingBreakdown({ expenses, categories, period, onPeriodChange, formatCurrency, darkMode }) {
-  const categoryMap = useMemo(
-    () => Object.fromEntries((categories || []).map(c => [c.id, c])),
-    [categories]
-  );
   const [page, sPage] = useState(0);
   const [selIdx, sSelIdx] = useState(null);
   const [isoCat, sIsoCat] = useState(null);
@@ -296,6 +293,10 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
     return () => ro.disconnect();
   }, [hasData]);
 
+  // Key the window on the calendar day (noon-anchored), not a Date captured
+  // inside the memo — a PWA left open past midnight would otherwise keep
+  // bucketing "today" into yesterday's window until some other dep changed.
+  const todayKey = localDateKey();
   const { buckets, activeCats, hasPrev } = useMemo(() => {
     const byKey = new Map();
     let earliestKey = null;
@@ -310,7 +311,7 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
       row.total = roundMoney(row.total + Number(e.amount || 0));
     });
     const n = TREND_WINDOW[period] || 6;
-    const today = new Date();
+    const today = new Date(`${todayKey}T12:00:00`);
     const mk = (key, date) => { const r = byKey.get(key); return { key, date, total: r?.total || 0, cats: r?.cats || {} }; };
     let buckets;
     if (period === "day") {
@@ -327,9 +328,9 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
     }
     const sums = {};
     buckets.forEach(b => Object.entries(b.cats).forEach(([cid, v]) => { sums[cid] = (sums[cid] || 0) + Number(v || 0); }));
-    const activeCats = Object.entries(sums).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).map(([cid]) => trendCatOf(cid, categoryMap));
+    const activeCats = Object.entries(sums).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).map(([cid]) => trendCatOf(cid, categories));
     return { buckets, activeCats, hasPrev: !!earliestKey && buckets[0].key > earliestKey };
-  }, [expenses, period, page, categoryMap]);
+  }, [expenses, period, page, categories, todayKey]);
 
   const n = buckets.length;
   const val = b => (isoCat ? Number(b.cats[isoCat] || 0) : b.total);
@@ -343,10 +344,9 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
   const selVal = vals[sel];
   const prevVal = sel > 0 ? vals[sel - 1] : null;
   const delta = prevVal != null && prevVal > 0 ? Math.round((selVal - prevVal) / prevVal * 100) : null;
-  const isNewSel = prevVal === 0 && selVal > 0;
   const selSegs = activeCats.map(cat => ({ cat, v: Number(selB?.cats[cat.id] || 0) })).filter(s => s.v > 0);
-  const chipCats = isoCat && !activeCats.some(c => c.id === isoCat) ? [...activeCats, trendCatOf(isoCat, categoryMap)] : activeCats;
-  const isoCatObj = isoCat ? trendCatOf(isoCat, categoryMap) : null;
+  const chipCats = isoCat && !activeCats.some(c => c.id === isoCat) ? [...activeCats, trendCatOf(isoCat, categories)] : activeCats;
+  const isoCatObj = isoCat ? trendCatOf(isoCat, categories) : null;
 
   const H = 176, padT = 16, padB = 20, plotH = H - padT - padB;
   const step = n > 0 && chartW > 0 ? chartW / n : 0;
@@ -400,11 +400,9 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
               <div style={{ fontFamily: "var(--font-h)", fontSize: 20, fontWeight: 800, color: "var(--text)", lineHeight: 1.3 }}>{formatCurrency(selVal)}</div>
             </div>
             <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
-              {delta !== null ? (
+              {delta !== null && (
                 <span style={{ fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 700, color: delta > 0 ? "#E07A5F" : delta < 0 ? "#6BAA75" : "var(--muted)", background: delta > 0 ? "#E07A5F15" : delta < 0 ? "#6BAA7515" : "var(--bg)", padding: "2px 6px", borderRadius: 4, whiteSpace: "nowrap" }}>{delta > 0 ? "▲ +" : delta < 0 ? "▼ " : ""}{delta}% vs prev</span>
-              ) : isNewSel ? (
-                <span style={{ fontSize: 8.5, fontFamily: "var(--font-h)", fontWeight: 700, color: "#7B8CDE", background: "#7B8CDE15", padding: "2px 6px", borderRadius: 4, letterSpacing: "0.3px" }}>NEW</span>
-              ) : null}
+              )}
               {nz.length >= 2 && <span style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", whiteSpace: "nowrap" }}>avg {trendFmt(avg)}/{TREND_UNIT[period]}</span>}
             </div>
           </div>
@@ -420,15 +418,15 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
                 {buckets.map((b, i) => {
                   const v = vals[i];
                   if (v <= 0) return <rect key={b.key} x={bx(i)} y={padT + plotH - 2} width={barW} height={2} rx={1} fill="var(--border)" />;
-                  if (isoCat) { const h = (v / yTop) * plotH; return <path key={b.key} d={trendTopPath(bx(i), padT + plotH - h, barW, h, 4)} fill={isoCatObj.color} opacity={i === sel ? 1 : 0.75} />; }
+                  if (isoCat) { const y = yOf(v); return <path key={b.key} d={trendTopPath(bx(i), y, barW, padT + plotH - y, 4)} fill={isoCatObj.color} opacity={i === sel ? 1 : 0.75} />; }
                   let acc = 0;
                   const segs = [];
                   activeCats.forEach(cat => { const cv = Number(b.cats[cat.id] || 0); if (cv <= 0) return; segs.push({ cat, y0: acc, y1: acc + cv }); acc += cv; });
                   return (
                     <g key={b.key} opacity={i === sel ? 1 : 0.8}>
                       {segs.map((s, si) => {
-                        const yPx = padT + plotH * (1 - Math.min(1, s.y1 / yTop));
-                        const hPx = ((s.y1 - s.y0) / yTop) * plotH;
+                        const yPx = yOf(s.y1);
+                        const hPx = yOf(s.y0) - yPx;
                         return si === segs.length - 1
                           ? <path key={s.cat.id} d={trendTopPath(bx(i), yPx, barW, hPx, 4)} fill={s.cat.color} />
                           : <rect key={s.cat.id} x={bx(i)} y={yPx} width={barW} height={hPx + 0.4} fill={s.cat.color} />;
@@ -503,7 +501,7 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
       else if (e.date >= prevStartKey && e.date < prevEndKey) prev[cid] = roundMoney((prev[cid] || 0) + Number(e.amount || 0));
     });
     const rows = Object.entries(cur).sort((a, b) => b[1] - a[1]).map(([cid, amt]) => {
-      const cat = categories.find(x => x.id === cid) || RC.find(x => x.id === cid) || (cid === "uncat" ? { id: cid, name: "Uncategorised", color: "#8A8A9A", neon: "#A0A0B0" } : { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#6366F1", neon: "#818CF8" });
+      const cat = trendCatOf(cid, categories);
       const prevAmt = prev[cid] || 0;
       return { cid, cat, amt, pct: total > 0 ? Math.round(amt / total * 100) : 0, delta: prevAmt > 0 ? Math.round((amt - prevAmt) / prevAmt * 100) : null, isNew: prevAmt === 0 && amt > 0 };
     });
@@ -3276,14 +3274,20 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
       // so filter questions ("over ₹500 from cash last month") are answerable.
       // UI: theme-var colors (dark-mode safe), real icons, coverage badge,
       // voice input, copy-on-answer.
+      // Everything below is render-path work over the full ledger — bail
+      // before any of it while the sheet is closed (the common case), or every
+      // App re-render pays for redaction/sorts it immediately throws away.
+      if (!chatOpen) return null;
       const today = localDateKey();
       const cm = today.slice(0, 7);
       const myEx = ex.filter(e => !isTrackedExp(e));
       const wNameOf = id => wallets.find(w => w.id === id)?.name || id || "?";
-      const cNameOf = id => cats.find(c => c.id === id)?.name || RC.find(r => r.id === id)?.name || id || "Other";
+      const cNameOf = id => trendCatOf(id, cats).name;
       const sNameOf = id => isrc.find(s => s.id === id)?.name || id || "?";
-      const expRows = redactTransactions(myEx).sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 500).map(e => ({ d: e.date, a: e.amount, c: cNameOf(e.categoryId), w: wNameOf(e.walletId), n: (e.note || "").slice(0, 48) }));
-      const incRows = redactTransactions(inc).sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 200).map(i => ({ d: i.date, a: i.amount, s: sNameOf(i.sourceId), w: wNameOf(i.walletId), n: (i.note || "").slice(0, 48) }));
+      // Sort + cap BEFORE redacting: redactTransactions runs 8 regexes per
+      // note, so it must only see the rows that actually get sent.
+      const expRows = redactTransactions([...myEx].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 500)).map(e => ({ d: e.date, a: e.amount, c: cNameOf(e.categoryId), w: wNameOf(e.walletId), n: (e.note || "").slice(0, 48) }));
+      const incRows = redactTransactions([...inc].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 200)).map(i => ({ d: i.date, a: i.amount, s: sNameOf(i.sourceId), w: wNameOf(i.walletId), n: (i.note || "").slice(0, 48) }));
       const monthExpense = roundMoney(myEx.filter(e => (e.date || "").startsWith(cm)).reduce((s, e) => s + e.amount, 0));
       const monthIncome = roundMoney(inc.filter(i => (i.date || "").startsWith(cm)).reduce((s, i) => s + i.amount, 0));
       const allTimeExpense = roundMoney(myEx.reduce((s, e) => s + e.amount, 0));
@@ -3296,15 +3300,18 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
       const recurringBills = activeRec.slice(0, 20).map(r => ({ name: r.name || "bill", amount: r.amount, due: getRecurringDueDate(r, today) }));
       const iou = { owedToMe: roundMoney(sp.filter(s => s.direction === "owed" && !s.settled).reduce((t, s) => t + s.amount, 0)), iOwe: roundMoney(sp.filter(s => s.direction === "owe" && !s.settled).reduce((t, s) => t + s.amount, 0)) };
       const totalTx = myEx.length + inc.length;
-      const monLbl = k => { if (!k) return "?"; const d = new Date(`${k}T00:00:00`); return `${d.toLocaleDateString("en-US", { month: "short" })} ’${String(d.getFullYear()).slice(2)}`; };
-      const covLabel = totalTx === 0 ? "No data yet" : `${totalTx} txns · ${monLbl(expRows[expRows.length - 1]?.d)} – ${monLbl(expRows[0]?.d || today)}`;
+      // Single source for the coverage extremes — the header badge and the
+      // coverage object sent to the model must describe the same range.
+      const oldestD = expRows[expRows.length - 1]?.d || null, newestD = expRows[0]?.d || null;
+      const monLbl = k => { if (!k) return "?"; const d = new Date(`${k}T12:00:00`); return `${d.toLocaleDateString("en-US", { month: "short" })} ’${String(d.getFullYear()).slice(2)}`; };
+      const covLabel = totalTx === 0 ? "No data yet" : oldestD ? `${totalTx} txns · ${monLbl(oldestD)} – ${monLbl(newestD)}` : `${totalTx} txns`;
       const sendChat = async (q) => {
         if (!q.trim() || chatLoading) return;
         sChatMsgs(p => [...p, { role: "user", content: q.trim() }]);
         sChatInput("");
         sChatLoading(true);
         try {
-          const r = await fetch("/api/ai-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q.trim(), context: { today, month: cm, monthIncome, monthExpense, allTimeIncome, allTimeExpense, expenses: expRows, incomes: incRows, coverage: { from: expRows[expRows.length - 1]?.d || null, to: expRows[0]?.d || null, total: myEx.length, sent: expRows.length }, topCategories: topCats, walletBalances: wBals, recurringBills, recurringCount: activeRec.length, iou, streak: finStreak } }) });
+          const r = await fetch("/api/ai-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q.trim(), context: { today, month: cm, monthIncome, monthExpense, allTimeIncome, allTimeExpense, expenses: expRows, incomes: incRows, coverage: { from: oldestD, to: newestD, total: myEx.length, sent: expRows.length }, topCategories: topCats, walletBalances: wBals, recurringBills, recurringCount: activeRec.length, iou, streak: finStreak } }) });
           const d = await r.json();
           sChatMsgs(p => [...p, { role: "assistant", content: r.ok ? d.answer : (d.error || "Something went wrong.") }]);
         } catch {
@@ -3327,7 +3334,10 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
           sChatMic(true);
         } catch { sChatMic(false); }
       };
-      const copyMsg = t => { try { navigator.clipboard?.writeText(String(t || "")); showT("Copied to clipboard", "success"); } catch { /* clipboard unavailable */ } };
+      const copyMsg = t => {
+        if (!navigator.clipboard?.writeText) { showT("Clipboard unavailable in this browser", "error"); return; }
+        navigator.clipboard.writeText(String(t || "")).then(() => showT("Copied to clipboard", "success")).catch(() => showT("Copy failed", "error"));
+      };
       const QUICK_QS = ["Everything over ₹500 last month", "How much did I spend from cash this month?", "Compare this month vs last month", "Which bills are due soon?"];
       const chatView = chatMsgs.length > 0 ? "chat" : "home";
       const iconBtn = (disabled) => ({ width: 38, height: 38, borderRadius: 10, border: "1.5px solid var(--border)", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center", cursor: disabled ? "not-allowed" : "pointer", flexShrink: 0, padding: 0 });

@@ -475,7 +475,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   } catch (err) {
     if (err instanceof AiProviderError) {
       console.error(`[${label}] All providers failed:`, err.providerErrors);
-      const errMsg =
+      // The provider layer throws an actionable message when a PDF arrives and
+      // no PDF-capable provider is configured — surface it verbatim instead of
+      // the generic per-type string, or the "add GEMINI_API_KEY / use CSV"
+      // guidance never reaches the user.
+      const pdfGate = err.providerErrors.includes("no PDF-capable provider configured");
+      const errMsg = pdfGate ? err.message :
         type === "receipt"       ? "Receipt OCR unavailable — all AI providers failed. Enter manually." :
         type === "receipt-items" ? "Line-item OCR unavailable — all AI providers failed. Enter manually." :
         type === "ledger"        ? "Ledger OCR unavailable — all AI providers failed. Enter manually." :

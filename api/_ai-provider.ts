@@ -27,6 +27,8 @@ interface Provider {
   textModel: string;
   visionModel: string;
   apiKey: string;
+  /** Can this provider read application/pdf input? (Routes via its native API.) */
+  supportsPdf?: boolean;
 }
 
 function getProviders(): Provider[] {
@@ -51,9 +53,14 @@ function getProviders(): Provider[] {
       name: "gemini",
       textUrl:   "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
       visionUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-      textModel:   "gemini-2.5-flash",
-      visionModel: "gemini-2.5-flash",
+      // Stay on 2.0-flash: 2.5-flash enables "thinking" by default and its
+      // reasoning tokens count against max_tokens/maxOutputTokens, which
+      // starves long JSON outputs (statement OCR) into empty/truncated
+      // responses. Revisit only with an explicit thinking budget of 0.
+      textModel:   "gemini-2.0-flash",
+      visionModel: "gemini-2.0-flash",
       apiKey: process.env.GEMINI_API_KEY ?? "",
+      supportsPdf: true,
     },
   ];
   return all.filter(p => p.apiKey.length > 0);
@@ -83,10 +90,10 @@ export function extractJSON<T>(text: string): T {
 }
 
 /** Build an OpenAI-compatible request body for a text-only prompt. */
-function textBody(model: string, systemPrompt: string, userPrompt: string) {
+function textBody(model: string, systemPrompt: string, userPrompt: string, maxTokens = 1024) {
   return {
     model,
-    max_tokens: 1024,   // 512 was too small for multi-insight responses
+    max_tokens: maxTokens,   // 512 was too small for multi-insight responses
     temperature: 0.2,
     messages: [
       { role: "system", content: systemPrompt },
@@ -159,7 +166,7 @@ async function callProvider(
 export async function callText(
   userPrompt: string,
   systemPrompt = "You are a helpful assistant. Return only valid JSON.",
-  opts: { maxTokens?: number } = {},
+  opts: { maxTokens?: number; timeoutMs?: number } = {},
 ): Promise<string> {
   const providers = getProviders();
   if (providers.length === 0) throw new AiProviderError("No AI API keys configured.", []);
@@ -167,8 +174,8 @@ export async function callText(
   const errors: string[] = [];
   for (const p of providers) {
     try {
-      const body = { ...textBody(p.textModel, systemPrompt, userPrompt), max_tokens: opts.maxTokens ?? 1024 };
-      return await callProvider(p, p.textUrl, body);
+      const body = textBody(p.textModel, systemPrompt, userPrompt, opts.maxTokens);
+      return await callProvider(p, p.textUrl, body, opts.timeoutMs);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       errors.push(msg);
@@ -226,6 +233,7 @@ async function callGeminiNative(
   userPrompt: string,
   systemPrompt: string,
   maxTokens = 1024,
+  timeoutMs = VISION_TIMEOUT_MS,
 ): Promise<string> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${provider.visionModel}:generateContent?key=${provider.apiKey}`;
   const res = await fetch(url, {
@@ -236,7 +244,7 @@ async function callGeminiNative(
       contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64 } }, { text: userPrompt }] }],
       generationConfig: { temperature: 0.2, maxOutputTokens: maxTokens },
     }),
-    signal: AbortSignal.timeout(VISION_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     const err = await res.text().catch(() => "(unreadable)");
@@ -280,7 +288,7 @@ export async function callVisionWithProvider(
   if (providers.length === 0) throw new AiProviderError("No AI API keys configured.", []);
 
   const isPdf = mimeType === "application/pdf";
-  const usable = isPdf ? providers.filter(p => p.name === "gemini") : providers;
+  const usable = isPdf ? providers.filter(p => p.supportsPdf) : providers;
   if (usable.length === 0) {
     throw new AiProviderError(
       "PDF reading needs Gemini (add GEMINI_API_KEY). Meanwhile: attach a CSV export, or screenshots of the statement pages.",
@@ -288,15 +296,21 @@ export async function callVisionWithProvider(
     );
   }
 
+  // Per-attempt budget must leave room for the rest of the waterfall: Vercel
+  // kills the whole function at 60s (vercel.json maxDuration), so with 3
+  // providers a flat 45s each would never reach the last one. Split the
+  // budget across attempts, full 45s when only one provider is eligible.
+  const attemptTimeout = Math.max(15_000, Math.floor(VISION_TIMEOUT_MS / usable.length));
+
   const errors: string[] = [];
   for (const p of usable) {
     try {
       if (isPdf) {
-        const content = await callGeminiNative(p, imageBase64, mimeType, userPrompt, systemPrompt, opts.maxTokens);
+        const content = await callGeminiNative(p, imageBase64, mimeType, userPrompt, systemPrompt, opts.maxTokens, attemptTimeout);
         return { content, provider: p.name };
       }
       const body = visionBody(p.visionModel, systemPrompt, imageBase64, mimeType, userPrompt, opts.maxTokens);
-      const content = await callProvider(p, p.visionUrl, body, VISION_TIMEOUT_MS);
+      const content = await callProvider(p, p.visionUrl, body, attemptTimeout);
       return { content, provider: p.name };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

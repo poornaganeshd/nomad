@@ -30,7 +30,6 @@
  *       streak?:         number
  *       // legacy shape (lion one-liner still sends these):
  *       totalIncome?: number  totalExpense?: number
- *       recentExpenses?: Array<{ date, amount, category, note }>
  *     }
  *   }
  *
@@ -57,7 +56,6 @@ interface TopCategory { name: string; amount: number; pct: number; }
 interface WalletBalance { name: string; balance: number; }
 interface CompactExpense { d?: string; a?: number; c?: string; w?: string; n?: string; }
 interface CompactIncome { d?: string; a?: number; s?: string; w?: string; n?: string; }
-interface LegacyRecent { date?: string; amount?: number; category?: string; note?: string; }
 
 interface ChatContext {
   today?:          string;
@@ -78,7 +76,6 @@ interface ChatContext {
   // legacy fields — the lion mascot one-liner still posts this shape
   totalIncome?:    number;
   totalExpense?:   number;
-  recentExpenses?: LegacyRecent[];
 }
 
 // Keep the prompt inside a sane token budget: rows are ~45 chars each, so
@@ -87,6 +84,10 @@ const MAX_EXPENSE_ROWS = 500;
 const MAX_INCOME_ROWS  = 200;
 
 const rupee = (n: number) => `₹${Math.round(n)}`;
+// Row fields land in a pipe-separated, newline-terminated table; a note (or a
+// user-named category/wallet) containing "|" or a newline would inject phantom
+// columns/rows and corrupt the model's parsing.
+const cell = (v: unknown) => String(v ?? "").replace(/[|\r\n]+/g, " ").trim();
 
 function buildPrompt(question: string, ctx: ChatContext): string {
   const today = ctx.today || new Date().toISOString().slice(0, 10);
@@ -129,17 +130,19 @@ function buildPrompt(question: string, ctx: ChatContext): string {
     const totalNote = cov.total && cov.total > exp.length ? ` of ${cov.total} total (oldest omitted)` : "";
     sections.push(`EXPENSE ROWS — ${exp.length} rows${totalNote}, newest first, covering ${from} → ${to}.
 Format: date|amount|category|wallet|note
-${exp.map(e => `${e.d}|${e.a}|${e.c || "?"}|${e.w || "?"}|${e.n || ""}`).join("\n")}`);
-  } else if (ctx.recentExpenses?.length) {
-    // legacy shape fallback
-    sections.push(`RECENT EXPENSES:\n${ctx.recentExpenses.slice(0, 30).map(e => `  ${e.date}  ₹${e.amount}  ${e.category}  ${e.note || ""}`).join("\n")}`);
+${exp.map(e => `${e.d}|${e.a}|${cell(e.c) || "?"}|${cell(e.w) || "?"}|${cell(e.n)}`).join("\n")}`);
+  } else {
+    // No expense rows in this request (e.g. the lion mascot one-liner sends
+    // summaries only) — tell the model so the "compute from rows" instruction
+    // doesn't make it complain about missing data.
+    sections.push("(No expense rows were included in this request — answer from the summaries above and any income rows below.)");
   }
 
   const inc = (ctx.incomes || []).slice(0, MAX_INCOME_ROWS);
   if (inc.length) {
     sections.push(`INCOME ROWS — ${inc.length} rows, newest first.
 Format: date|amount|source|wallet|note
-${inc.map(i => `${i.d}|${i.a}|${i.s || "?"}|${i.w || "?"}|${i.n || ""}`).join("\n")}`);
+${inc.map(i => `${i.d}|${i.a}|${cell(i.s) || "?"}|${cell(i.w) || "?"}|${cell(i.n)}`).join("\n")}`);
   }
 
   return `${sections.join("\n\n")}\n\nUser question: ${question.trim()}`;
@@ -165,8 +168,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     // 1024 tokens truncates a 15-line transaction listing mid-table; 1600
-    // covers the largest allowed answer with headroom.
-    const raw = await callText(prompt, SYSTEM_PROMPT, { maxTokens: 1600 });
+    // covers the largest allowed answer with headroom. The 500-row prompt
+    // also needs more than the default 15s generation budget — but stay at
+    // 20s/attempt so a 3-provider waterfall still fits Vercel's 60s cap.
+    const raw = await callText(prompt, SYSTEM_PROMPT, { maxTokens: 1600, timeoutMs: 20_000 });
     return res.status(200).json({ answer: raw.trim() });
 
   } catch (err) {
