@@ -281,6 +281,18 @@ CREATE TABLE IF NOT EXISTS notification_prefs (
 
 ALTER TABLE notification_prefs DISABLE ROW LEVEL SECURITY;
 
+-- Web Push browser subscriptions (one row per device/browser that tapped
+-- "Enable on this device"). The send-reports cron sends the daily due-bill
+-- digest to every row via the Web Push protocol; 404/410 rows are pruned.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint      TEXT        PRIMARY KEY,
+  subscription  JSONB       NOT NULL,
+  user_agent    TEXT,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE push_subscriptions DISABLE ROW LEVEL SECURITY;
+
 -- ── 3. USER REGISTRY (owner's Supabase only) ─────────────────
 
 CREATE TABLE IF NOT EXISTS user_registry (

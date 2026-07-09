@@ -36,6 +36,38 @@ const cacheResponse = async (request, response) => {
   return response;
 };
 
+// ── Web Push ────────────────────────────────────────────────────────────────
+// The server (send-reports cron / /api/push test) sends a JSON payload:
+// { title, body, tag, url }. Render it as a system notification — this is what
+// puts NOMAD reminders in the phone's notification shade with the app closed.
+self.addEventListener('push', (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch { data = { body: event.data ? event.data.text() : '' }; }
+  const title = data.title || 'NOMAD';
+  event.waitUntil(self.registration.showNotification(title, {
+    body: data.body || '',
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    tag: data.tag || 'nomad-reminder',
+    renotify: !!data.tag,
+    data: { url: data.url || '/' },
+  }));
+});
+
+// Tap → focus an open NOMAD tab if there is one, else open a fresh one.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || '/';
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      for (const client of list) {
+        if ('focus' in client) return client.focus();
+      }
+      return self.clients.openWindow(url);
+    })
+  );
+});
+
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 

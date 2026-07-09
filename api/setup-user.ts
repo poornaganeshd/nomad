@@ -45,9 +45,17 @@ CREATE TABLE IF NOT EXISTS notification_prefs (
   updated_at     TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint      TEXT        PRIMARY KEY,
+  subscription  JSONB       NOT NULL,
+  user_agent    TEXT,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
 ALTER TABLE report_schedules    DISABLE ROW LEVEL SECURITY;
 ALTER TABLE report_delivery_log DISABLE ROW LEVEL SECURITY;
 ALTER TABLE notification_prefs  DISABLE ROW LEVEL SECURITY;
+ALTER TABLE push_subscriptions  DISABLE ROW LEVEL SECURITY;
 
 ALTER TABLE report_schedules ADD COLUMN IF NOT EXISTS custom_days         INTEGER;
 ALTER TABLE report_schedules ADD COLUMN IF NOT EXISTS send_hour           INTEGER NOT NULL DEFAULT 6;
