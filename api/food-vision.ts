@@ -330,10 +330,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   }
 
-  // Validate mimeType is image/* or application/pdf. PDF is forwarded as-is to
-  // the AI provider — Gemini's OpenAI-compat layer accepts it via image_url
-  // with a data:application/pdf payload; Groq/NVIDIA reject and the provider
-  // waterfall falls through to whichever provider can read it.
+  // Validate mimeType is image/* or application/pdf. PDFs are routed by the
+  // provider layer to Gemini's NATIVE generateContent API — no OpenAI-compat
+  // endpoint (Gemini's included) accepts application/pdf via image_url, so
+  // without GEMINI_API_KEY the provider layer returns a clear "use CSV or
+  // screenshots" error instead of a generic all-providers-failed.
   if (!mimeType.startsWith("image/") && mimeType !== "application/pdf") {
     return res.status(400).json({ error: `mimeType must be image/* or application/pdf, got: ${mimeType}` });
   }
@@ -474,7 +475,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   } catch (err) {
     if (err instanceof AiProviderError) {
       console.error(`[${label}] All providers failed:`, err.providerErrors);
-      const errMsg =
+      // The provider layer throws an actionable message when a PDF arrives and
+      // no PDF-capable provider is configured — surface it verbatim instead of
+      // the generic per-type string, or the "add GEMINI_API_KEY / use CSV"
+      // guidance never reaches the user.
+      const pdfGate = err.providerErrors.includes("no PDF-capable provider configured");
+      const errMsg = pdfGate ? err.message :
         type === "receipt"       ? "Receipt OCR unavailable — all AI providers failed. Enter manually." :
         type === "receipt-items" ? "Line-item OCR unavailable — all AI providers failed. Enter manually." :
         type === "ledger"        ? "Ledger OCR unavailable — all AI providers failed. Enter manually." :

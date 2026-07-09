@@ -10,10 +10,15 @@
  *   callVision(imageBase64, mimeType, prompt) — vision (image + text)
  *
  * All three providers expose an OpenAI-compatible REST API, so one
- * request builder covers all of them.
+ * request builder covers all of them — EXCEPT application/pdf input,
+ * which only Gemini reads and only via its native generateContent API
+ * (callGeminiNative below).
  */
 
 const TIMEOUT_MS = 15_000;
+// Vision OCR (multi-page statements especially) regularly needs longer than a
+// text completion — give it its own budget instead of failing at 15s.
+const VISION_TIMEOUT_MS = 45_000;
 
 interface Provider {
   name: string;
@@ -22,6 +27,8 @@ interface Provider {
   textModel: string;
   visionModel: string;
   apiKey: string;
+  /** Can this provider read application/pdf input? (Routes via its native API.) */
+  supportsPdf?: boolean;
 }
 
 function getProviders(): Provider[] {
@@ -46,9 +53,14 @@ function getProviders(): Provider[] {
       name: "gemini",
       textUrl:   "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
       visionUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      // Stay on 2.0-flash: 2.5-flash enables "thinking" by default and its
+      // reasoning tokens count against max_tokens/maxOutputTokens, which
+      // starves long JSON outputs (statement OCR) into empty/truncated
+      // responses. Revisit only with an explicit thinking budget of 0.
       textModel:   "gemini-2.0-flash",
       visionModel: "gemini-2.0-flash",
       apiKey: process.env.GEMINI_API_KEY ?? "",
+      supportsPdf: true,
     },
   ];
   return all.filter(p => p.apiKey.length > 0);
@@ -78,10 +90,10 @@ export function extractJSON<T>(text: string): T {
 }
 
 /** Build an OpenAI-compatible request body for a text-only prompt. */
-function textBody(model: string, systemPrompt: string, userPrompt: string) {
+function textBody(model: string, systemPrompt: string, userPrompt: string, maxTokens = 1024) {
   return {
     model,
-    max_tokens: 1024,   // 512 was too small for multi-insight responses
+    max_tokens: maxTokens,   // 512 was too small for multi-insight responses
     temperature: 0.2,
     messages: [
       { role: "system", content: systemPrompt },
@@ -123,6 +135,7 @@ async function callProvider(
   provider: Provider,
   url: string,
   body: object,
+  timeoutMs = TIMEOUT_MS,
 ): Promise<string> {
   const res = await fetch(url, {
     method: "POST",
@@ -131,7 +144,7 @@ async function callProvider(
       Authorization: `Bearer ${provider.apiKey}`,
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!res.ok) {
@@ -153,6 +166,7 @@ async function callProvider(
 export async function callText(
   userPrompt: string,
   systemPrompt = "You are a helpful assistant. Return only valid JSON.",
+  opts: { maxTokens?: number; timeoutMs?: number } = {},
 ): Promise<string> {
   const providers = getProviders();
   if (providers.length === 0) throw new AiProviderError("No AI API keys configured.", []);
@@ -160,8 +174,8 @@ export async function callText(
   const errors: string[] = [];
   for (const p of providers) {
     try {
-      const body = textBody(p.textModel, systemPrompt, userPrompt);
-      return await callProvider(p, p.textUrl, body);
+      const body = textBody(p.textModel, systemPrompt, userPrompt, opts.maxTokens);
+      return await callProvider(p, p.textUrl, body, opts.timeoutMs);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       errors.push(msg);
@@ -207,9 +221,45 @@ export async function callTextAll(
 }
 
 /**
+ * PDF documents can't ride the OpenAI-compatible `image_url` shape — Groq and
+ * NVIDIA vision models are image-only, and Gemini's OpenAI-compat layer also
+ * rejects data:application/pdf. Gemini's NATIVE generateContent API does read
+ * PDFs (inline_data), so PDF requests route there exclusively.
+ */
+async function callGeminiNative(
+  provider: Provider,
+  base64: string,
+  mimeType: string,
+  userPrompt: string,
+  systemPrompt: string,
+  maxTokens = 1024,
+  timeoutMs = VISION_TIMEOUT_MS,
+): Promise<string> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${provider.visionModel}:generateContent?key=${provider.apiKey}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      system_instruction: { parts: [{ text: systemPrompt }] },
+      contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64 } }, { text: userPrompt }] }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: maxTokens },
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => "(unreadable)");
+    throw new Error(`gemini-native HTTP ${res.status}: ${err.slice(0, 200)}`);
+  }
+  const data = await res.json() as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+  const content = (data?.candidates?.[0]?.content?.parts ?? []).map(p => p.text ?? "").join("");
+  if (!content) throw new Error("gemini-native: empty response");
+  return content;
+}
+
+/**
  * Vision completion with provider waterfall.
  * imageBase64 — raw base64 string (no data: prefix).
- * mimeType    — e.g. "image/jpeg"
+ * mimeType    — e.g. "image/jpeg" or "application/pdf"
  * Returns raw string content from the model.
  */
 export async function callVision(
@@ -218,26 +268,14 @@ export async function callVision(
   userPrompt: string,
   systemPrompt = "You are a helpful assistant. Return only valid JSON.",
 ): Promise<string> {
-  const providers = getProviders();
-  if (providers.length === 0) throw new AiProviderError("No AI API keys configured.", []);
-
-  const errors: string[] = [];
-  for (const p of providers) {
-    try {
-      const body = visionBody(p.visionModel, systemPrompt, imageBase64, mimeType, userPrompt);
-      return await callProvider(p, p.visionUrl, body);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      errors.push(msg);
-      console.error(`[ai-provider] ${p.name} vision failed:`, msg);
-    }
-  }
-  throw new AiProviderError("All AI providers failed.", errors);
+  const { content } = await callVisionWithProvider(imageBase64, mimeType, userPrompt, systemPrompt);
+  return content;
 }
 
 /**
  * Vision completion with provider waterfall — returns content AND provider name.
  * Use this when the caller wants to surface which provider answered (e.g. food-vision.ts).
+ * PDFs go straight to Gemini's native API (the only configured provider that reads them).
  */
 export async function callVisionWithProvider(
   imageBase64: string,
@@ -249,11 +287,30 @@ export async function callVisionWithProvider(
   const providers = getProviders();
   if (providers.length === 0) throw new AiProviderError("No AI API keys configured.", []);
 
+  const isPdf = mimeType === "application/pdf";
+  const usable = isPdf ? providers.filter(p => p.supportsPdf) : providers;
+  if (usable.length === 0) {
+    throw new AiProviderError(
+      "PDF reading needs Gemini (add GEMINI_API_KEY). Meanwhile: attach a CSV export, or screenshots of the statement pages.",
+      ["no PDF-capable provider configured"],
+    );
+  }
+
+  // Per-attempt budget must leave room for the rest of the waterfall: Vercel
+  // kills the whole function at 60s (vercel.json maxDuration), so with 3
+  // providers a flat 45s each would never reach the last one. Split the
+  // budget across attempts, full 45s when only one provider is eligible.
+  const attemptTimeout = Math.max(15_000, Math.floor(VISION_TIMEOUT_MS / usable.length));
+
   const errors: string[] = [];
-  for (const p of providers) {
+  for (const p of usable) {
     try {
+      if (isPdf) {
+        const content = await callGeminiNative(p, imageBase64, mimeType, userPrompt, systemPrompt, opts.maxTokens, attemptTimeout);
+        return { content, provider: p.name };
+      }
       const body = visionBody(p.visionModel, systemPrompt, imageBase64, mimeType, userPrompt, opts.maxTokens);
-      const content = await callProvider(p, p.visionUrl, body);
+      const content = await callProvider(p, p.visionUrl, body, attemptTimeout);
       return { content, provider: p.name };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

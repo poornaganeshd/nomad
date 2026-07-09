@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, memo, Fragment } from "react";
-import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning, Wallet, Target, Lightning, Envelope, Fire, Sparkle, Lightbulb, ClipboardText, Timer, HandWaving, BellSlash, Robot, Receipt, FilePdf, Trash, Moon, Sun, Scales, Gear, PushPin, Hash, Microphone, CheckCircle, ArrowsLeftRight, CaretLeft, Users, ArrowRight, ArrowUpRight, ArrowDownLeft, PencilSimple, ShareNetwork, Compass } from "@phosphor-icons/react";
+import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning, Wallet, Target, Lightning, Envelope, Fire, Sparkle, Lightbulb, ClipboardText, Timer, HandWaving, BellSlash, Robot, Receipt, FilePdf, Trash, Moon, Sun, Scales, Gear, PushPin, Hash, Microphone, CheckCircle, ArrowsLeftRight, CaretLeft, Users, ArrowRight, ArrowUpRight, ArrowDownLeft, PencilSimple, ShareNetwork, Compass, Paperclip, PaperPlaneTilt, CopySimple } from "@phosphor-icons/react";
 import { IconCheck, IconTrash, IconHistory, IconChevronRight, IconChevronLeft, IconSend, IconAlertTriangle, IconX, IconClock, IconArrowDown, IconArrowUp, IconPlus, IconPlayerSkipForward, IconPencil } from "@tabler/icons-react";
-import { ComposedChart, Bar, Line, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid, PieChart, Pie } from "recharts";
+import { PieChart, Pie, Cell } from "recharts";
 import RoutineApp from "./Routine";
 import { flushSyncQueue, getPendingSyncCount, getPendingSyncSummary, getDeadLetterCount, clearDeadLetter, sendSupabaseRequest, subscribePendingSync, subscribeSyncDrops, isPendingDelete, isPendingUpsert, hasPendingDedupeKey } from "./offlineSync";
 import { checkBillReminders } from "./billReminders";
@@ -231,79 +231,154 @@ function LionM({ balance: bal, dancing, aiMsg, aiLoading, onTap }) {
   return <div style={{ display: "flex", alignItems: "flex-end", gap: 12, padding: "12px 0", cursor: onTap ? "pointer" : "default" }} onClick={onTap}><Lion mood={mood} dancing={dancing} /><div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: "14px 14px 14px 4px", padding: "10px 14px", fontSize: 13, color: "var(--ts)", maxWidth: 220, fontFamily: "var(--font-b)", lineHeight: 1.5 }}>{aiLoading ? <span style={{ color: "var(--muted)", fontStyle: "italic" }}>Thinking…</span> : displayMsg}</div></div>
 }
 
-function SpendingBreakdown({ expenses, categories, period, onPeriodChange, formatCurrency, darkMode }) {
-  const categoryMap = useMemo(
-    () => Object.fromEntries((categories || []).map(c => [c.id, c])),
-    [categories]
-  );
-  const addDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
-  const startOfWeek = date => { const d = new Date(date); d.setDate(d.getDate() - d.getDay()); return d; };
+// ——— Spending Breakdown (v2) ———
+// Mobile-first rebuild: no horizontal scroll, no floating tooltip, no Recharts.
+// Fixed calendar windows per period (14 days / 8 weeks / 6 months / 6 years)
+// paged with ‹ › chevrons; scrub (tap or drag) any bar to pin its detail in a
+// fixed insight header; tap a legend chip to isolate one category. Y-scale is
+// computed from the visible window only, so one big past month can't crush
+// recent bars into invisibility.
+const TREND_WINDOW = { day: 14, week: 8, month: 6, year: 6 };
+const TREND_UNIT = { day: "day", week: "wk", month: "mo", year: "yr" };
+const trendAddDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
+const trendWeekStart = date => { const d = new Date(date); d.setDate(d.getDate() - d.getDay()); return d; };
+const trendKeyOf = (dateStr, period) => {
+  if (period === "day") return dateStr;
+  if (period === "week") return localDateKey(trendWeekStart(new Date(`${dateStr}T12:00:00`)));
+  if (period === "month") return dateStr.slice(0, 7);
+  return dateStr.slice(0, 4);
+};
+// Category lookup with recurring-category + legacy-id fallbacks, so bills logged
+// under RC ids ("sip", "recharge") and orphaned ids ("other_mobfx1oo4pxf") get a
+// readable name instead of a raw id. Delegates to resolveRecCategory — the
+// single-source cats→RC lookup (CLAUDE.md) — adding only orphan-id prettifying.
+const trendCatOf = (cid, catList) => { const id = cid || "uncat"; return resolveRecCategory(id, [catList, RC], id === "uncat" ? "Uncategorised" : id.split("_")[0].replace(/^\w/, l => l.toUpperCase())); };
+const trendMD = date => date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+const trendLabelOf = (bucket, period) => {
+  if (period === "day") return bucket.date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  if (period === "week") return `${trendMD(bucket.date)} – ${trendMD(trendAddDays(bucket.date, 6))}`;
+  if (period === "month") return bucket.date.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  return bucket.key;
+};
+const trendTickOf = (bucket, period) => {
+  if (period === "day") return String(bucket.date.getDate());
+  if (period === "week") return trendMD(bucket.date);
+  if (period === "month") return bucket.date.toLocaleDateString("en-US", { month: "short" });
+  return bucket.key;
+};
+const trendNice = v => { const x = Math.max(100, v); const p = Math.pow(10, Math.floor(Math.log10(x))); const u = x / p; const m = u <= 1 ? 1 : u <= 2 ? 2 : u <= 2.5 ? 2.5 : u <= 5 ? 5 : 10; return m * p; };
+const trendFmt = v => { const n = Number(v || 0); if (n >= 100000) return `₹${(n / 100000).toFixed(1)}L`; if (n >= 1000) return `₹${(n / 1000).toFixed(1)}k`; return `₹${Math.round(n)}`; };
+const trendHexA = (hex, a) => { const h = String(hex || "#8A8A9A").replace("#", ""); return `rgba(${parseInt(h.slice(0, 2), 16) || 0},${parseInt(h.slice(2, 4), 16) || 0},${parseInt(h.slice(4, 6), 16) || 0},${a})`; };
+const trendTopPath = (x, y, w, h, r0) => { const r = Math.max(0, Math.min(r0, w / 2, h)); return `M${x},${y + h} L${x},${y + r} Q${x},${y} ${x + r},${y} L${x + w - r},${y} Q${x + w},${y} ${x + w},${y + r} L${x + w},${y + h} Z`; };
 
-  const { data, activeCats, peakKey, yMax } = useMemo(() => {
-    const allDates = (expenses || []).map(e => e.date).filter(Boolean).sort();
-    if (!allDates.length) return { data: [], activeCats: [], peakKey: null, yMax: 1000 };
+function SpendingBreakdown({ expenses, categories, period, onPeriodChange, formatCurrency, darkMode }) {
+  const [page, sPage] = useState(0);
+  const [selIdx, sSelIdx] = useState(null);
+  const [isoCat, sIsoCat] = useState(null);
+  useEffect(() => { sPage(0); sSelIdx(null); sIsoCat(null); }, [period]);
+
+  const hasData = (expenses || []).some(e => e?.date);
+
+  // Exact-pixel SVG width from the card itself — no ResponsiveContainer, so bars
+  // can never inflate wider than the screen or park mid-scroll.
+  const wrapRef = useRef(null);
+  const [chartW, sChartW] = useState(0);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    sChartW(el.clientWidth);
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(entries => { const w = entries[0]?.contentRect?.width; if (w) sChartW(w); });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hasData]);
+
+  // Key the window on the calendar day (noon-anchored), not a Date captured
+  // inside the memo — a PWA left open past midnight would otherwise keep
+  // bucketing "today" into yesterday's window until some other dep changed.
+  const todayKey = localDateKey();
+  const { buckets, activeCats, hasPrev } = useMemo(() => {
+    const byKey = new Map();
+    let earliestKey = null;
+    (expenses || []).forEach(e => {
+      if (!e?.date) return;
+      const key = trendKeyOf(e.date, period);
+      if (!earliestKey || key < earliestKey) earliestKey = key;
+      let row = byKey.get(key);
+      if (!row) { row = { total: 0, cats: {} }; byKey.set(key, row); }
+      const cid = e.categoryId || "uncat";
+      row.cats[cid] = roundMoney((row.cats[cid] || 0) + Number(e.amount || 0));
+      row.total = roundMoney(row.total + Number(e.amount || 0));
+    });
+    const n = TREND_WINDOW[period] || 6;
+    const today = new Date(`${todayKey}T12:00:00`);
+    const mk = (key, date) => { const r = byKey.get(key); return { key, date, total: r?.total || 0, cats: r?.cats || {} }; };
     let buckets;
     if (period === "day") {
-      const today = new Date();
-      buckets = Array.from({ length: 60 }, (_, i) => {
-        const date = addDays(today, -(59 - i));
-        const key = localDateKey(date);
-        return { key, label: new Date(`${key}T00:00:00`).toLocaleDateString("en-US", { day: "numeric", month: "short" }) };
-      });
+      const end = trendAddDays(today, -(page * n));
+      buckets = Array.from({ length: n }, (_, i) => { const d = trendAddDays(end, -(n - 1 - i)); return mk(localDateKey(d), d); });
     } else if (period === "week") {
-      const cur = startOfWeek(new Date());
-      buckets = Array.from({ length: 26 }, (_, i) => {
-        const start = addDays(cur, -(7 * (25 - i)));
-        const key = localDateKey(start);
-        return { key, label: new Date(`${key}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" }) };
-      });
+      const end = trendAddDays(trendWeekStart(today), -(page * n * 7));
+      buckets = Array.from({ length: n }, (_, i) => { const d = trendAddDays(end, -7 * (n - 1 - i)); return mk(localDateKey(d), d); });
     } else if (period === "month") {
-      buckets = [...new Set(allDates.map(d => d.slice(0, 7)))].sort().slice(-24).map(key => {
-        const [y, m] = key.split("-");
-        return { key, label: new Date(Number(y), Number(m) - 1, 1).toLocaleDateString("en-US", { month: "short", year: "2-digit" }) };
-      });
+      buckets = Array.from({ length: n }, (_, i) => { const d = new Date(today.getFullYear(), today.getMonth() - page * n - (n - 1 - i), 1); return mk(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`, d); });
     } else {
-      buckets = [...new Set(allDates.map(d => d.slice(0, 4)))].sort().slice(-8).map(key => ({ key, label: key }));
+      const endY = today.getFullYear() - page * n;
+      buckets = Array.from({ length: n }, (_, i) => { const y = endY - (n - 1 - i); return mk(String(y), new Date(y, 0, 1)); });
     }
-    const catIds = [...new Set((expenses || []).map(e => e.categoryId).filter(Boolean))];
-    const rows = new Map(buckets.map(b => [b.key, { ...b, total: 0, ...Object.fromEntries(catIds.map(id => [id, 0])) }]));
-    (expenses || []).forEach(expense => {
-      if (!expense?.date) return;
-      let key = expense.date;
-      if (period === "week") { const d = new Date(`${expense.date}T00:00:00`); d.setDate(d.getDate() - d.getDay()); key = localDateKey(d); }
-      else if (period === "month") key = expense.date.slice(0, 7);
-      else if (period === "year") key = expense.date.slice(0, 4);
-      const row = rows.get(key);
-      if (!row) return;
-      row[expense.categoryId] = roundMoney((row[expense.categoryId] || 0) + Number(expense.amount || 0));
-      row.total = roundMoney(row.total + Number(expense.amount || 0));
-    });
-    const raw = [...rows.values()];
-    const activeCatIds = catIds.filter(id => raw.some(r => Number(r[id] || 0) > 0));
-    const activeCatsData = activeCatIds.map(id => categoryMap[id] || { id, name: id, color: "#999" });
-    const chartData = raw.map(row => ({ ...row, topCat: [...activeCatIds].reverse().find(id => Number(row[id] || 0) > 0) || null }));
-    const peak = chartData.reduce((best, row) => row.total > (best?.total || 0) ? row : best, null);
-    const maxTotal = Math.max(0, ...chartData.map(r => r.total || 0));
-    return { data: chartData, activeCats: activeCatsData, peakKey: peak?.key || null, yMax: Math.max(1000, Math.ceil(maxTotal * 1.18 / 100) * 100) };
-  }, [expenses, period, categoryMap]);
+    const sums = {};
+    buckets.forEach(b => Object.entries(b.cats).forEach(([cid, v]) => { sums[cid] = (sums[cid] || 0) + Number(v || 0); }));
+    const activeCats = Object.entries(sums).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).map(([cid]) => trendCatOf(cid, categories));
+    return { buckets, activeCats, hasPrev: !!earliestKey && buckets[0].key > earliestKey };
+  }, [expenses, period, page, categories, todayKey]);
 
-  // Sideways scroll: with 60 day / 26 week / 24 month buckets the bars no longer
-  // fit one screen. Chart gets an explicit px width (36px per bucket, min 100%)
-  // inside an overflow-x wrapper, anchored to the newest bucket on the right.
-  const scrollRef = useRef(null);
-  // rAF: anchor AFTER Recharts/ResponsiveContainer has laid out, otherwise
-  // scrollWidth is measured pre-inflation and the chart parks mid-scroll.
-  useEffect(() => { const id = requestAnimationFrame(() => { const el = scrollRef.current; if (el) el.scrollLeft = el.scrollWidth; }); return () => cancelAnimationFrame(id); }, [period, data.length]);
-  const chartW = Math.max(data.length * 36, 280);
-  const fmtY = v => { const n = Number(v || 0); if (n >= 100000) return `\u20b9${(n / 100000).toFixed(1)}L`; if (n >= 1000) return `\u20b9${(n / 1000).toFixed(1)}k`; return `\u20b9${Math.round(n)}`; };
-  const lineStroke = darkMode ? "rgba(255,255,255,0.6)" : "rgba(44,42,36,0.4)";
-  const ttBg = darkMode ? "#1A1917" : "#FAFAF7", ttBorder = darkMode ? "#2A2926" : "#DDD9D0", ttText = darkMode ? "#E8E4DC" : "#2C2A24", ttMuted = darkMode ? "#7A7870" : "#9A9488";
+  const n = buckets.length;
+  const val = b => (isoCat ? Number(b.cats[isoCat] || 0) : b.total);
+  const vals = buckets.map(val);
+  const yTop = trendNice(Math.max(...vals, 0));
+  const nz = vals.filter(v => v > 0);
+  const avg = nz.length ? nz.reduce((a, b) => a + b, 0) / nz.length : 0;
+  let sel = selIdx == null ? -1 : Math.min(selIdx, n - 1);
+  if (sel < 0) { sel = n - 1; for (let i = n - 1; i >= 0; i--) { if (vals[i] > 0) { sel = i; break; } } }
+  const selB = buckets[sel];
+  const selVal = vals[sel];
+  const prevVal = sel > 0 ? vals[sel - 1] : null;
+  const delta = prevVal != null && prevVal > 0 ? Math.round((selVal - prevVal) / prevVal * 100) : null;
+  const selSegs = activeCats.map(cat => ({ cat, v: Number(selB?.cats[cat.id] || 0) })).filter(s => s.v > 0);
+  const chipCats = isoCat && !activeCats.some(c => c.id === isoCat) ? [...activeCats, trendCatOf(isoCat, categories)] : activeCats;
+  const isoCatObj = isoCat ? trendCatOf(isoCat, categories) : null;
+
+  const H = 176, padT = 16, padB = 20, plotH = H - padT - padB;
+  const step = n > 0 && chartW > 0 ? chartW / n : 0;
+  const gap = period === "day" ? 5 : 9;
+  const barW = Math.max(6, Math.min(step - gap, 46));
+  const bx = i => i * step + (step - barW) / 2;
+  const yOf = v => padT + plotH * (1 - Math.min(1, v / yTop));
+  const gridStroke = darkMode ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.07)";
+  const bandFill = darkMode ? "rgba(56,189,248,0.12)" : "rgba(56,189,248,0.10)";
+
+  const pick = e => {
+    if (!step) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const i = Math.max(0, Math.min(n - 1, Math.floor((e.clientX - r.left) / step)));
+    if (i !== sel) { hapticSelection(); sSelIdx(i); }
+  };
+  const onDown = e => { try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* older webviews */ } pick(e); };
+  const onMove = e => { if ((e.buttons & 1) || e.pointerType === "touch") pick(e); };
+
+  const first = buckets[0], last = buckets[n - 1];
+  const y2 = d => String(d.getFullYear()).slice(2);
+  const rangeLabel = !n ? "" : period === "day" ? `${trendMD(first.date)} – ${trendMD(last.date)}`
+    : period === "week" ? `${trendMD(first.date)} – ${trendMD(trendAddDays(last.date, 6))}`
+    : period === "month" ? `${first.date.toLocaleDateString("en-US", { month: "short" })} ${y2(first.date) !== y2(last.date) ? `’${y2(first.date)} ` : ""}– ${last.date.toLocaleDateString("en-US", { month: "short" })} ’${y2(last.date)}`
+    : `${first.key} – ${last.key}`;
+  const pagerBtn = disabled => ({ width: 26, height: 26, borderRadius: 13, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--ts)", fontSize: 15, lineHeight: "22px", padding: 0, fontFamily: "var(--font-h)", cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.25 : 1 });
 
   const tabs = (
     <div style={{ display: "flex", gap: 2, background: darkMode ? "rgba(56,189,248,0.08)" : "rgba(56,189,248,0.12)", borderRadius: 20, padding: 3 }}>
       {["Day", "Week", "Month", "Year"].map(tab => {
         const v = tab.toLowerCase(), active = period === v;
-        return <button key={v} onClick={() => { hapticSelection(); onPeriodChange(v); }} style={{ padding: "5px 11px", borderRadius: 16, border: "none", background: active ? "#38bdf8" : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? (darkMode ? "#0a1628" : "#fff") : darkMode ? "rgba(56,189,248,0.6)" : "rgba(0,90,130,0.7)", cursor: "pointer", transition: "all 0.15s" }}>{tab}</button>;
+        return <button key={v} onClick={() => { hapticSelection(); onPeriodChange(v); }} style={{ padding: "5px 10px", borderRadius: 16, border: "none", whiteSpace: "nowrap", background: active ? "#38bdf8" : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? (darkMode ? "#0a1628" : "#fff") : darkMode ? "rgba(56,189,248,0.6)" : "rgba(0,90,130,0.7)", cursor: "pointer", transition: "all 0.15s" }}>{tab}</button>;
       })}
     </div>
   );
@@ -311,59 +386,88 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
   return (
     <div style={{ ...cc, padding: "18px 14px", marginBottom: 16, position: "relative", overflow: "hidden" }}>
       <div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "#38bdf8" }} />
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, gap: 12 }}>
-        <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "#38bdf8", letterSpacing: "0.04em", fontWeight: 600 }}>Spending Breakdown</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 10, flexWrap: "wrap", rowGap: 8 }}>
+        <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "#38bdf8", letterSpacing: "0.04em", fontWeight: 600, whiteSpace: "nowrap" }}>Spending Breakdown</div>
         {tabs}
       </div>
-      {!data.length || !activeCats.length ? (
+      {!hasData ? (
         <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: "28px 0 8px", fontFamily: "var(--font-b)" }}>Add transactions to see trends</p>
       ) : (
         <>
-          <div ref={scrollRef} style={{ width: "100%", overflowX: "auto", overflowY: "hidden", WebkitOverflowScrolling: "touch", touchAction: "pan-x pan-y", overscrollBehaviorX: "contain" }}>
-          <div style={{ width: chartW, minWidth: "100%", height: 260 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={data} margin={{ top: 8, right: 8, left: -4, bottom: 0 }} barCategoryGap="30%">
-                <CartesianGrid stroke={darkMode ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.06)"} vertical={false} />
-                <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "var(--font-h)" }} />
-                <YAxis tickLine={false} axisLine={false} width={48} domain={[0, yMax]} tickFormatter={fmtY} tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "var(--font-h)" }} tickCount={5} />
-                <Tooltip content={({ active, payload }) => {
-                  if (!active || !payload?.length) return null;
-                  const row = payload[0]?.payload;
-                  const entries = payload.filter(p => activeCats.some(c => c.id === p.dataKey) && Number(p.value || 0) > 0);
+          <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 10, margin: "0 2px 10px" }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600, letterSpacing: "0.4px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isoCatObj ? `${isoCatObj.name} · ` : ""}{selB ? trendLabelOf(selB, period) : ""}</div>
+              <div style={{ fontFamily: "var(--font-h)", fontSize: 20, fontWeight: 800, color: "var(--text)", lineHeight: 1.3 }}>{formatCurrency(selVal)}</div>
+            </div>
+            <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+              {delta !== null && (
+                <span style={{ fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 700, color: delta > 0 ? "#E07A5F" : delta < 0 ? "#6BAA75" : "var(--muted)", background: delta > 0 ? "#E07A5F15" : delta < 0 ? "#6BAA7515" : "var(--bg)", padding: "2px 6px", borderRadius: 4, whiteSpace: "nowrap" }}>{delta > 0 ? "▲ +" : delta < 0 ? "▼ " : ""}{delta}% vs prev</span>
+              )}
+              {nz.length >= 2 && <span style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", whiteSpace: "nowrap" }}>avg {trendFmt(avg)}/{TREND_UNIT[period]}</span>}
+            </div>
+          </div>
+          <div ref={wrapRef} style={{ width: "100%" }}>
+            {chartW > 0 && n > 0 && (
+              <svg data-chart="spend-trend" width={chartW} height={H} style={{ display: "block", touchAction: "pan-y" }}>
+                <rect x={sel * step + 1} y={4} width={Math.max(step - 2, 4)} height={H - 4} rx={8} fill={bandFill} />
+                <line x1={0} x2={chartW} y1={yOf(yTop)} y2={yOf(yTop)} stroke={gridStroke} />
+                <line x1={0} x2={chartW} y1={yOf(yTop / 2)} y2={yOf(yTop / 2)} stroke={gridStroke} />
+                <line x1={0} x2={chartW} y1={padT + plotH} y2={padT + plotH} stroke="var(--border)" />
+                <text x={chartW - 2} y={yOf(yTop) - 4} textAnchor="end" fontSize={8.5} fill="var(--muted)" fontFamily="var(--font-h)" opacity={0.85}>{trendFmt(yTop)}</text>
+                <text x={chartW - 2} y={yOf(yTop / 2) - 4} textAnchor="end" fontSize={8.5} fill="var(--muted)" fontFamily="var(--font-h)" opacity={0.85}>{trendFmt(yTop / 2)}</text>
+                {buckets.map((b, i) => {
+                  const v = vals[i];
+                  if (v <= 0) return <rect key={b.key} x={bx(i)} y={padT + plotH - 2} width={barW} height={2} rx={1} fill="var(--border)" />;
+                  if (isoCat) { const y = yOf(v); return <path key={b.key} d={trendTopPath(bx(i), y, barW, padT + plotH - y, 4)} fill={isoCatObj.color} opacity={i === sel ? 1 : 0.75} />; }
+                  let acc = 0;
+                  const segs = [];
+                  activeCats.forEach(cat => { const cv = Number(b.cats[cat.id] || 0); if (cv <= 0) return; segs.push({ cat, y0: acc, y1: acc + cv }); acc += cv; });
                   return (
-                    <div style={{ background: ttBg, borderRadius: 10, border: `0.5px solid ${ttBorder}`, padding: "10px 12px", minWidth: 155, boxShadow: "0 8px 24px rgba(0,0,0,0.12)" }}>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: ttText, fontFamily: "var(--font-h)", marginBottom: 7 }}>{row.label}</div>
-                      <div style={{ display: "grid", gap: 5 }}>
-                        {entries.map(p => { const cat = activeCats.find(c => c.id === p.dataKey); return <div key={p.dataKey} style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}><div style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 7, height: 7, borderRadius: 2, background: cat?.color || "#999", flexShrink: 0 }} /><span style={{ color: ttMuted, fontSize: 11, fontFamily: "var(--font-b)" }}>{cat?.name || p.dataKey}</span></div><span style={{ color: ttText, fontSize: 11, fontFamily: "var(--font-b)", fontWeight: 700 }}>{formatCurrency(p.value)}</span></div>; })}
-                        {entries.length > 1 && <><div style={{ height: 1, background: ttBorder, margin: "2px 0" }} /><div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}><span style={{ color: ttMuted, fontSize: 11, fontFamily: "var(--font-b)" }}>Total</span><span style={{ color: "#C17A5A", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 700 }}>{formatCurrency(row.total)}</span></div></>}
-                      </div>
-                    </div>
+                    <g key={b.key} opacity={i === sel ? 1 : 0.8}>
+                      {segs.map((s, si) => {
+                        const yPx = yOf(s.y1);
+                        const hPx = yOf(s.y0) - yPx;
+                        return si === segs.length - 1
+                          ? <path key={s.cat.id} d={trendTopPath(bx(i), yPx, barW, hPx, 4)} fill={s.cat.color} />
+                          : <rect key={s.cat.id} x={bx(i)} y={yPx} width={barW} height={hPx + 0.4} fill={s.cat.color} />;
+                      })}
+                    </g>
                   );
-                }} cursor={{ fill: "rgba(201,123,99,0.06)" }} />
-                {activeCats.map(cat => (
-                  <Bar key={cat.id} dataKey={cat.id} name={cat.name} stackId="e" fill={cat.color} maxBarSize={32} isAnimationActive={false}>
-                    {data.map((row, idx) => <Cell key={`${cat.id}-${idx}`} radius={row.topCat === cat.id ? [4, 4, 0, 0] : [0, 0, 0, 0]} />)}
-                  </Bar>
+                })}
+                {nz.length >= 2 && avg > 0 && <line x1={0} x2={chartW} y1={yOf(avg)} y2={yOf(avg)} stroke="#C17A5A" strokeWidth={1} strokeDasharray="4 4" opacity={0.75} />}
+                {buckets.map((b, i) => (
+                  <text key={b.key} x={i * step + step / 2} y={H - 5} textAnchor="middle" fontSize={8.5} fontFamily="var(--font-h)" fill={i === sel ? "var(--text)" : "var(--muted)"} fontWeight={i === sel ? 700 : 400}>{trendTickOf(b, period)}</text>
                 ))}
-                <Line type="monotone" dataKey="total" stroke={lineStroke} strokeDasharray="5 4" strokeWidth={1.5} isAnimationActive={false}
-                  dot={({ cx, cy, payload }) => {
-                    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
-                    return <circle key={payload?.key} cx={cx} cy={cy} r={payload?.key === peakKey && payload?.total > 0 ? 6 : 2.5} fill="#C17A5A" />;
-                  }}
-                  activeDot={{ r: 5, fill: "#C17A5A" }}
-                />
-              </ComposedChart>
-            </ResponsiveContainer>
+                <rect x={0} y={0} width={chartW} height={H} fill="transparent" style={{ cursor: "pointer" }} onPointerDown={onDown} onPointerMove={onMove} />
+              </svg>
+            )}
           </div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, marginTop: 8 }}>
+            <button aria-label="Older" disabled={!hasPrev} onClick={() => { if (!hasPrev) return; hapticSelection(); sPage(p => p + 1); sSelIdx(null); }} style={pagerBtn(!hasPrev)}>‹</button>
+            <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600, letterSpacing: "0.3px", minWidth: 110, textAlign: "center" }}>{rangeLabel}</span>
+            <button aria-label="Newer" disabled={page === 0} onClick={() => { if (page === 0) return; hapticSelection(); sPage(p => Math.max(0, p - 1)); sSelIdx(null); }} style={pagerBtn(page === 0)}>›</button>
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
-            {activeCats.map(cat => (
-              <div key={cat.id} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "var(--bg)", border: "0.5px solid var(--border)", borderRadius: 20, padding: "3px 9px" }}>
-                <span style={{ width: 7, height: 7, borderRadius: 2, background: cat.color, flexShrink: 0 }} />
-                <span style={{ color: "var(--muted)", fontSize: 10, fontFamily: "var(--font-b)" }}>{cat.name}</span>
-              </div>
-            ))}
-          </div>
+          {!isoCat && selVal > 0 && selSegs.length > 1 && (
+            <div style={{ display: "flex", height: 9, borderRadius: 5, overflow: "hidden", margin: "10px 2px 0", gap: 2 }}>
+              {selSegs.map(s => <div key={s.cat.id} style={{ flex: s.v, background: s.cat.color, minWidth: 3, borderRadius: 2 }} />)}
+            </div>
+          )}
+          {chipCats.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
+              {chipCats.map(cat => {
+                const on = isoCat === cat.id;
+                const inSel = Number(selB?.cats[cat.id] || 0);
+                return (
+                  <button key={cat.id} onClick={() => { hapticSelection(); sIsoCat(on ? null : cat.id); sSelIdx(null); }} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: on ? trendHexA(cat.color, 0.14) : "var(--bg)", border: `1px solid ${on ? cat.color : "var(--border)"}`, borderRadius: 20, padding: "3px 9px", cursor: "pointer", opacity: isoCat && !on ? 0.45 : 1, transition: "all 0.15s" }}>
+                    <span style={{ width: 7, height: 7, borderRadius: 2, background: cat.color, flexShrink: 0 }} />
+                    <span style={{ color: on ? "var(--text)" : "var(--muted)", fontSize: 10, fontFamily: "var(--font-b)", fontWeight: on ? 700 : 400 }}>{cat.name}</span>
+                    {inSel > 0 && <span style={{ color: "var(--ts)", fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 700 }}>{trendFmt(inSel)}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <div style={{ fontSize: 9, color: "var(--muted)", textAlign: "center", marginTop: 8, opacity: 0.75, fontFamily: "var(--font-b)" }}>tap or drag the bars to inspect · tap a chip to focus one category</div>
         </>
       )}
     </div>
@@ -371,13 +475,13 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
 }
 
 
-// Category Share — donut + ranked category bars for a picked period, with
-// change-vs-previous-period chips and tap-to-drill transaction lists. Additive
-// view: complements SpendingBreakdown (time buckets) and the month-filtered
-// "Spending by Category" card without touching either.
+// Category Share — pure proportion view: interactive donut, nothing else.
+// The ranked per-category bar list was removed ("Spending by Category" already
+// covers ranked amounts); tap a slice or its legend chip to see amount, share
+// and change-vs-previous-period pinned in the donut centre.
 function CategoryBreakdown({ expenses, categories, formatCurrency }) {
   const [range, sRange] = useState("month");
-  const [openCat, sOpenCat] = useState(null);
+  const [selCid, sSelCid] = useState(null);
   const { rows, total, prevLabel } = useMemo(() => {
     const today = new Date();
     const y = today.getFullYear(), m = today.getMonth(), d = today.getDate();
@@ -388,32 +492,33 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
     else if (range === "3m") { curStart = new Date(y, m - 2, 1); prevStart = new Date(y, m - 5, 1); prevEnd = curStart; prevLabel = "vs prior 3 mo"; }
     else { curStart = new Date(y, 0, 1); prevStart = new Date(y - 1, 0, 1); prevEnd = curStart; prevLabel = "vs last year"; }
     const curStartKey = key(curStart), curEndKey = key(new Date(y, m, d + 1)), prevStartKey = key(prevStart), prevEndKey = key(prevEnd);
-    const cur = {}, prev = {}, txs = {};
+    const cur = {}, prev = {};
     let total = 0;
     (expenses || []).forEach(e => {
       if (!e?.date) return;
       const cid = e.categoryId || "uncat";
-      if (e.date >= curStartKey && e.date < curEndKey) { const amt = Number(e.amount || 0); cur[cid] = roundMoney((cur[cid] || 0) + amt); total = roundMoney(total + amt); (txs[cid] = txs[cid] || []).push(e); }
+      if (e.date >= curStartKey && e.date < curEndKey) { const amt = Number(e.amount || 0); cur[cid] = roundMoney((cur[cid] || 0) + amt); total = roundMoney(total + amt); }
       else if (e.date >= prevStartKey && e.date < prevEndKey) prev[cid] = roundMoney((prev[cid] || 0) + Number(e.amount || 0));
     });
     const rows = Object.entries(cur).sort((a, b) => b[1] - a[1]).map(([cid, amt]) => {
-      const cat = categories.find(x => x.id === cid) || (cid === "uncat" ? { id: cid, name: "Uncategorised", color: "#8A8A9A", neon: "#A0A0B0" } : { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#6366F1", neon: "#818CF8" });
+      const cat = trendCatOf(cid, categories);
       const prevAmt = prev[cid] || 0;
-      return { cid, cat, amt, pct: total > 0 ? Math.round(amt / total * 100) : 0, delta: prevAmt > 0 ? Math.round((amt - prevAmt) / prevAmt * 100) : null, isNew: prevAmt === 0 && amt > 0, txs: (txs[cid] || []).sort((a, b) => (b.date || "").localeCompare(a.date || "")) };
+      return { cid, cat, amt, pct: total > 0 ? Math.round(amt / total * 100) : 0, delta: prevAmt > 0 ? Math.round((amt - prevAmt) / prevAmt * 100) : null, isNew: prevAmt === 0 && amt > 0 };
     });
     return { rows, total, prevLabel };
   }, [expenses, categories, range]);
-  const maxAmt = rows[0]?.amt || 1;
+  const sel = selCid ? rows.find(r => r.cid === selCid) : null;
   const accent = "#F4A261";
+  const toggleCat = cid => { hapticSelection(); sSelCid(c => (c === cid ? null : cid)); };
   return (
     <div style={{ ...cc, padding: "18px 14px", marginBottom: 16, position: "relative", overflow: "hidden" }}>
       <div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: accent }} />
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, gap: 12 }}>
-        <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: accent, letterSpacing: "0.04em", fontWeight: 600 }}>Category Share</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 10, flexWrap: "wrap", rowGap: 8 }}>
+        <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: accent, letterSpacing: "0.04em", fontWeight: 600, whiteSpace: "nowrap" }}>Category Share</div>
         <div style={{ display: "flex", gap: 2, background: "rgba(244,162,97,0.12)", borderRadius: 20, padding: 3 }}>
-          {[["week", "Week"], ["month", "Month"], ["3m", "3 Mo"], ["year", "Year"]].map(([v, lbl]) => {
+          {[["week", "Week"], ["month", "Month"], ["3m", "3M"], ["year", "Year"]].map(([v, lbl]) => {
             const active = range === v;
-            return <button key={v} onClick={() => { hapticSelection(); sRange(v); sOpenCat(null); }} style={{ padding: "5px 10px", borderRadius: 16, border: "none", background: active ? accent : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? "#fff" : "rgba(244,162,97,0.85)", cursor: "pointer", transition: "all 0.15s" }}>{lbl}</button>;
+            return <button key={v} onClick={() => { hapticSelection(); sRange(v); sSelCid(null); }} style={{ padding: "5px 10px", borderRadius: 16, border: "none", whiteSpace: "nowrap", background: active ? accent : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? "#fff" : "rgba(244,162,97,0.85)", cursor: "pointer", transition: "all 0.15s" }}>{lbl}</button>;
           })}
         </div>
       </div>
@@ -421,57 +526,45 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
         <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: "28px 0 8px", fontFamily: "var(--font-b)" }}>No expenses in this period</p>
       ) : (
         <>
-          <div style={{ position: "relative", width: 176, height: 176, margin: "0 auto 14px" }}>
-            <PieChart width={176} height={176}>
-              <Pie data={rows.map(r => ({ name: r.cat.name, value: r.amt }))} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={57} outerRadius={80} paddingAngle={rows.length > 1 ? 2 : 0} cornerRadius={3} stroke="none" isAnimationActive={false}>
-                {rows.map(r => <Cell key={r.cid} fill={r.cat.color} />)}
+          <div style={{ position: "relative", width: 208, height: 208, margin: "2px auto 6px" }}>
+            <PieChart width={208} height={208}>
+              <Pie data={rows.map(r => ({ name: r.cat.name, value: r.amt }))} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={64} outerRadius={96} paddingAngle={rows.length > 1 ? 2 : 0} cornerRadius={3} stroke="none" isAnimationActive={false} onClick={(_, idx) => { const r = rows[idx]; if (r) toggleCat(r.cid); }}>
+                {rows.map(r => <Cell key={r.cid} fill={r.cat.color} fillOpacity={selCid && r.cid !== selCid ? 0.3 : 1} style={{ cursor: "pointer", outline: "none" }} />)}
               </Pie>
             </PieChart>
-            <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
-              <span style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{formatCurrency(total)}</span>
-              <span style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", letterSpacing: "0.4px" }}>{rows.length} {rows.length === 1 ? "category" : "categories"}</span>
+            <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none", textAlign: "center" }}>
+              {sel ? (
+                <>
+                  <span style={{ display: "flex", alignItems: "center", gap: 4, maxWidth: 104 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: sel.cat.color, flexShrink: 0 }} /><span style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ts)", fontFamily: "var(--font-h)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sel.cat.name}</span></span>
+                  <span style={{ fontFamily: "var(--font-h)", fontSize: 16, fontWeight: 800, color: "var(--text)", marginTop: 2 }}>{formatCurrency(sel.amt)}</span>
+                  <span style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", marginTop: 1 }}>{sel.pct}% of spend</span>
+                  {sel.delta !== null ? (
+                    <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: sel.delta > 0 ? "#E07A5F" : sel.delta < 0 ? "#6BAA75" : "var(--muted)", background: sel.delta > 0 ? "#E07A5F15" : sel.delta < 0 ? "#6BAA7515" : "var(--bg)", padding: "1px 6px", borderRadius: 3, marginTop: 3, whiteSpace: "nowrap" }}>{sel.delta > 0 ? "▲ +" : sel.delta < 0 ? "▼ " : ""}{sel.delta}% {prevLabel}</span>
+                  ) : sel.isNew ? (
+                    <span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 700, color: "#7B8CDE", background: "#7B8CDE15", padding: "1px 6px", borderRadius: 3, marginTop: 3, letterSpacing: "0.3px" }}>NEW</span>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <span style={{ fontFamily: "var(--font-h)", fontSize: 16, fontWeight: 800, color: "var(--text)" }}>{formatCurrency(total)}</span>
+                  <span style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", letterSpacing: "0.4px", marginTop: 1 }}>{rows.length} {rows.length === 1 ? "category" : "categories"}</span>
+                  <span style={{ fontSize: 8.5, color: "var(--muted)", fontFamily: "var(--font-b)", opacity: 0.75, marginTop: 3 }}>tap a slice</span>
+                </>
+              )}
             </div>
           </div>
-          {rows.map(r => {
-            const drilled = openCat === r.cid;
-            const shown = drilled ? r.txs.slice(0, 15) : [];
-            return (
-              <div key={r.cid} style={{ marginBottom: 10 }}>
-                <div onClick={() => { hapticSelection(); sOpenCat(drilled ? null : r.cid); }} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-                  <span style={{ width: 26, display: "flex", justifyContent: "center", flexShrink: 0 }}><DI2 id={r.cat.id} accent={r.cat.neon || r.cat.color} size={18} /></span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                        <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.cat.name}</span>
-                        <span style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", flexShrink: 0 }}>{r.pct}%</span>
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                        {r.delta !== null && <span title={prevLabel} style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: r.delta > 0 ? "#E07A5F" : "#6BAA75", background: r.delta > 0 ? "#E07A5F15" : "#6BAA7515", padding: "1px 5px", borderRadius: 3 }}>{r.delta > 0 ? "▲ +" : r.delta < 0 ? "▼ " : ""}{r.delta}%</span>}
-                        {r.isNew && <span title={prevLabel} style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 700, color: "#7B8CDE", background: "#7B8CDE15", padding: "1px 5px", borderRadius: 3, letterSpacing: "0.3px" }}>NEW</span>}
-                        <span style={{ fontSize: 12.5, fontFamily: "var(--font-h)", color: "var(--ts)", fontWeight: 600 }}>{formatCurrency(r.amt)}</span>
-                      </div>
-                    </div>
-                    <div style={{ height: 5, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${(r.amt / maxAmt) * 100}%`, background: r.cat.color, borderRadius: 3 }} /></div>
-                  </div>
-                  <span style={{ fontSize: 10, color: "var(--muted)", flexShrink: 0 }}>{drilled ? "▲" : "▼"}</span>
-                </div>
-                {drilled && (
-                  <div style={{ marginLeft: 36, marginTop: 6, padding: "8px 10px", background: "var(--bg)", borderRadius: 8, border: "1px solid var(--border)", maxHeight: 240, overflowY: "auto" }}>
-                    {shown.map(tx => (
-                      <div key={tx.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, paddingBottom: 6, borderBottom: "1px dashed var(--border)" }}>
-                        <div style={{ flex: 1, minWidth: 0, marginRight: 8 }}>
-                          <div style={{ fontSize: 11, color: "var(--ts)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-h)", fontWeight: 600 }}>{tx.note || "(no note)"}</div>
-                          <div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 1 }}>{dl(tx.date)}</div>
-                        </div>
-                        <span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--text)", fontWeight: 600, flexShrink: 0 }}>{formatCurrency(tx.amount)}</span>
-                      </div>
-                    ))}
-                    {r.txs.length > shown.length && <div style={{ fontSize: 10, color: "var(--muted)", textAlign: "center", paddingTop: 2, fontFamily: "var(--font-h)" }}>+{r.txs.length - shown.length} more in History</div>}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, justifyContent: "center" }}>
+            {rows.map(r => {
+              const on = selCid === r.cid;
+              return (
+                <button key={r.cid} onClick={() => toggleCat(r.cid)} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: on ? trendHexA(r.cat.color, 0.14) : "var(--bg)", border: `1px solid ${on ? r.cat.color : "var(--border)"}`, borderRadius: 20, padding: "3px 9px", cursor: "pointer", opacity: selCid && !on ? 0.5 : 1, transition: "all 0.15s" }}>
+                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: r.cat.color, flexShrink: 0 }} />
+                  <span style={{ color: on ? "var(--text)" : "var(--muted)", fontSize: 10, fontFamily: "var(--font-b)", fontWeight: on ? 700 : 400 }}>{r.cat.name}</span>
+                  <span style={{ color: "var(--muted)", fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700 }}>{r.pct}%</span>
+                </button>
+              );
+            })}
+          </div>
         </>
       )}
     </div>
@@ -1540,6 +1633,8 @@ export default function Nomad() {
   const [chatMsgs, sChatMsgs] = useState([]);
   const [chatInput, sChatInput] = useState("");
   const [chatLoading, sChatLoading] = useState(false);
+  const [chatMic, sChatMic] = useState(false);
+  const chatRecRef = useRef(null);
   const [lionMsg, sLionMsg] = useState(""); const [lionMsgLoading, sLionMsgLoading] = useState(false);
   const [walletsMgrOpen, sWalletsMgrOpen] = useState(false);
   const [newWalletName, sNewWalletName] = useState(""), [newWalletColor, sNewWalletColor] = useState("#A78BFA"), [newWalletUL, sNewWalletUL] = useState(false);
@@ -3171,7 +3266,132 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
 
     </div>}
 
-    {module === "finance" && (() => { const cm = localDateKey().slice(0, 7); const totalInc = inc.reduce((s, i) => s + i.amount, 0); const myEx = ex.filter(e => !isTrackedExp(e)); const totalExp = myEx.reduce((s, e) => s + e.amount, 0); const catTotals = {}; myEx.forEach(e => { catTotals[e.categoryId] = (catTotals[e.categoryId] || 0) + e.amount; }); const topCats = Object.entries(catTotals).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([id, amt]) => ({ name: cats.find(c => c.id === id)?.name || id, amount: amt, pct: totalExp > 0 ? Math.round(amt / totalExp * 100) : 0 })); const wBals = wallets.map(w => ({ name: w.name, balance: roundMoney(wBal[w.id] || 0) })); const allTxRedacted = redactTransactions(ex).map(e => ({ date: e.date, amount: e.amount, category: cats.find(c => c.id === e.categoryId)?.name || e.categoryId || "Unknown", note: e.note || "" })).sort((a, b) => (b.date || "").localeCompare(a.date || "")); const sendChat = async (q) => { if (!q.trim() || chatLoading) return; const userMsg = { role: "user", content: q.trim() }; sChatMsgs(p => [...p, userMsg]); sChatInput(""); sChatLoading(true); try { const r = await fetch("/api/ai-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q.trim(), context: { month: cm, totalIncome: totalInc, totalExpense: totalExp, topCategories: topCats, recentExpenses: allTxRedacted.slice(0, 300), totalTransactions: ex.length + inc.length, walletBalances: wBals, recurringCount: rec.filter(r => r.active !== false).length, streak: finStreak } }) }); const d = await r.json(); sChatMsgs(p => [...p, { role: "assistant", content: r.ok ? d.answer : (d.error || "Something went wrong.") }]); } catch { sChatMsgs(p => [...p, { role: "assistant", content: "Network error — check your connection." }]); } finally { sChatLoading(false); } }; const QUICK_QS = ["Where am I overspending?", "How's my savings rate?", "Any unusual spending?", "Can I afford a big purchase?"]; const chatView = chatMsgs.length > 0 ? "chat" : "home"; return <><style>{`@keyframes chatBounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.4; } 30% { transform: translateY(-6px); opacity: 1; } } @keyframes chatSlideUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } } @keyframes chatFadeIn { from { opacity: 0; } to { opacity: 1; } } @keyframes chatExpand { from { opacity: 0; transform: scale(0.92) translateY(20px); transform-origin: bottom center; } to { opacity: 1; transform: scale(1) translateY(0); transform-origin: bottom center; } }`}</style>{chatOpen && <div style={{ position: "fixed", inset: 0, background: "rgba(44,40,32,0.45)", zIndex: 54, display: "flex", flexDirection: "column", justifyContent: "flex-end", animation: "chatFadeIn 0.2s ease" }} onClick={(e) => { if (e.target === e.currentTarget) sChatOpen(false); }}><div style={{ background: "#F5F0EB", borderRadius: "24px 24px 0 0", height: "82%", display: "flex", flexDirection: "column", overflow: "hidden", animation: "chatExpand 0.28s cubic-bezier(0.34,1.56,0.64,1) forwards" }}><div style={{ padding: "16px 20px 12px", borderBottom: "1px solid #D9D0C4", display: "flex", alignItems: "center", justifyContent: "space-between", background: "#FFFFFF" }}><div style={{ display: "flex", alignItems: "center", gap: 10 }}><Lion mood="happy" size={36} /><div><div style={{ fontSize: 15, fontWeight: 700, color: "#D4704A", letterSpacing: 0.5 }}>Ask NOMAD</div><div style={{ fontSize: 11, color: "#8C8278" }}>All-time data · always honest</div></div></div><div style={{ display: "flex", gap: 8, alignItems: "center" }}>{chatMsgs.length > 0 && <button onClick={() => { sChatMsgs([]); sChatInput(""); }} style={{ fontSize: 12, color: "#8C8278", background: "none", border: "none", cursor: "pointer", padding: "4px 8px", borderRadius: 8, fontFamily: "inherit" }}>Clear</button>}<button onClick={() => sChatOpen(false)} style={{ width: 28, height: 28, borderRadius: "50%", background: "#EAE4DC", border: "none", cursor: "pointer", fontSize: 14, color: "#8C8278", display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button></div></div><div style={{ flex: 1, overflowY: "auto", padding: "16px 16px 8px", display: "flex", flexDirection: "column" }}>{chatView === "home" ? <><div style={{ display: "flex", gap: 10, marginBottom: 20, animation: "chatSlideUp 0.3s ease forwards" }}><div style={{ flexShrink: 0, marginTop: 2 }}><Lion mood="happy" size={28} /></div><div style={{ background: "#FFFFFF", borderRadius: "4px 16px 16px 16px", padding: "12px 14px", fontSize: 13.5, color: "#2C2820", lineHeight: 1.6, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", maxWidth: "80%" }}>Ask anything about your finances. I'm grounded in your <strong>full transaction history</strong>.</div></div><div style={{ fontSize: 11, letterSpacing: 1.5, color: "#8C8278", marginBottom: 10, paddingLeft: 2 }}>QUICK QUESTIONS</div>{QUICK_QS.map((q, i) => <button key={q} onClick={() => sendChat(q)} style={{ background: "#FFFFFF", border: "1px solid #D9D0C4", borderRadius: 14, padding: "12px 16px", textAlign: "left", fontSize: 13.5, color: "#2C2820", cursor: "pointer", marginBottom: 8, fontFamily: "'Georgia', serif", lineHeight: 1.4, animation: `chatSlideUp 0.3s ease ${i * 0.07}s forwards`, opacity: 0 }}>{q}</button>)}<div style={{ fontSize: 11.5, color: "#8C8278", marginTop: 8, paddingLeft: 2, lineHeight: 1.5, fontFamily: "'Georgia', serif" }}>📎 Attach your bank/UPI statement (CSV or PDF) and I'll find transactions you forgot to log.</div></> : <>{chatMsgs.map((m, i) => <Fragment key={i}><div style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 10, animation: "chatSlideUp 0.3s ease forwards", opacity: 0 }}>{m.role === "assistant" && <div style={{ flexShrink: 0, marginRight: 8, marginTop: 2 }}><Lion mood="happy" size={28} /></div>}<div style={{ maxWidth: "76%", padding: "10px 13px", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "4px 16px 16px 16px", background: m.role === "user" ? "#D4704A" : "#FFFFFF", color: m.role === "user" ? "#FFFFFF" : "#2C2820", fontSize: 13.5, lineHeight: 1.55, boxShadow: m.role === "user" ? "0 2px 8px rgba(212,112,74,0.25)" : "0 1px 4px rgba(0,0,0,0.08)", fontFamily: "'Georgia', serif" }} dangerouslySetInnerHTML={{ __html: String(m.content || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>") }} /></div>{m.action === "recon" && <div style={{ display: "flex", justifyContent: "flex-start", margin: "-2px 0 12px 36px" }}><button onClick={() => { sChatOpen(false); sTab("settings"); showT("Review & import is under RECONCILE BANK STATEMENT", "info"); }} style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: "#7B8CDE", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", boxShadow: "0 2px 8px rgba(123,140,222,0.3)" }}>Review & import →</button></div>}</Fragment>)}{chatLoading && <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 10 }}><div style={{ flexShrink: 0, marginRight: 8, marginTop: 2 }}><Lion mood="happy" size={28} /></div><div style={{ background: "#FFFFFF", borderRadius: "4px 16px 16px 16px", padding: "10px 13px", boxShadow: "0 1px 4px rgba(0,0,0,0.08)" }}><div style={{ display: "flex", gap: 4, alignItems: "center", padding: "4px 0" }}>{[0,1,2].map(j => <div key={j} style={{ width: 7, height: 7, borderRadius: "50%", background: "#D4704A", animation: `chatBounce 1.2s ease-in-out ${j * 0.2}s infinite` }} />)}</div></div></div>}</>}</div><div style={{ padding: "10px 12px", borderTop: "1px solid #D9D0C4", display: "flex", gap: 8, background: "#FFFFFF" }}><label title="Attach bank/UPI statement (CSV or PDF) to find unlogged transactions" style={{ width: 38, borderRadius: 10, border: "1.5px solid #D9D0C4", background: chatLoading ? "#EAE4DC" : "#F5F0EB", display: "flex", alignItems: "center", justifyContent: "center", cursor: chatLoading ? "not-allowed" : "pointer", fontSize: 16, flexShrink: 0 }}>📎<input type="file" accept=".csv,.pdf,application/pdf" disabled={chatLoading} onChange={e => { if (e.target.files[0]) handleChatFile(e.target.files[0]); e.target.value = ""; }} style={{ display: "none" }} /></label><input value={chatInput} onChange={e => sChatInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(chatInput); } }} placeholder="Ask about your finances…" style={{ flex: 1, padding: "9px 12px", borderRadius: 10, border: "1.5px solid #D9D0C4", background: "#F5F0EB", color: "#2C2820", fontSize: 13, fontFamily: "'Georgia', serif", outline: "none" }} /><button onClick={() => sendChat(chatInput)} disabled={chatLoading || !chatInput.trim()} style={{ padding: "9px 14px", borderRadius: 10, border: "none", background: chatLoading || !chatInput.trim() ? "#D9D0C4" : "#D4704A", color: "#fff", fontSize: 16, fontWeight: 700, cursor: chatLoading || !chatInput.trim() ? "not-allowed" : "pointer" }}>→</button></div></div></div>}</>; })()}
+    {module === "finance" && (() => {
+      // ——— Ask NOMAD (v2) ———
+      // The model now receives the FULL redacted ledger (every expense/income
+      // row with wallet + category names, capped at 500/200 newest), month and
+      // all-time summaries, recurring bills with due dates and pending IOUs —
+      // so filter questions ("over ₹500 from cash last month") are answerable.
+      // UI: theme-var colors (dark-mode safe), real icons, coverage badge,
+      // voice input, copy-on-answer.
+      // Everything below is render-path work over the full ledger — bail
+      // before any of it while the sheet is closed (the common case), or every
+      // App re-render pays for redaction/sorts it immediately throws away.
+      if (!chatOpen) return null;
+      const today = localDateKey();
+      const cm = today.slice(0, 7);
+      const myEx = ex.filter(e => !isTrackedExp(e));
+      const wNameOf = id => wallets.find(w => w.id === id)?.name || id || "?";
+      const cNameOf = id => trendCatOf(id, cats).name;
+      const sNameOf = id => isrc.find(s => s.id === id)?.name || id || "?";
+      // Sort + cap BEFORE redacting: redactTransactions runs 8 regexes per
+      // note, so it must only see the rows that actually get sent.
+      const expRows = redactTransactions([...myEx].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 500)).map(e => ({ d: e.date, a: e.amount, c: cNameOf(e.categoryId), w: wNameOf(e.walletId), n: (e.note || "").slice(0, 48) }));
+      const incRows = redactTransactions([...inc].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 200)).map(i => ({ d: i.date, a: i.amount, s: sNameOf(i.sourceId), w: wNameOf(i.walletId), n: (i.note || "").slice(0, 48) }));
+      const monthExpense = roundMoney(myEx.filter(e => (e.date || "").startsWith(cm)).reduce((s, e) => s + e.amount, 0));
+      const monthIncome = roundMoney(inc.filter(i => (i.date || "").startsWith(cm)).reduce((s, i) => s + i.amount, 0));
+      const allTimeExpense = roundMoney(myEx.reduce((s, e) => s + e.amount, 0));
+      const allTimeIncome = roundMoney(inc.reduce((s, i) => s + i.amount, 0));
+      const catTotals = {};
+      myEx.forEach(e => { catTotals[e.categoryId] = (catTotals[e.categoryId] || 0) + e.amount; });
+      const topCats = Object.entries(catTotals).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([id, amt]) => ({ name: cNameOf(id), amount: amt, pct: allTimeExpense > 0 ? Math.round(amt / allTimeExpense * 100) : 0 }));
+      const wBals = wallets.map(w => ({ name: w.name, balance: roundMoney(wBal[w.id] || 0) }));
+      const activeRec = rec.filter(r => r.active !== false);
+      const recurringBills = activeRec.slice(0, 20).map(r => ({ name: r.name || "bill", amount: r.amount, due: getRecurringDueDate(r, today) }));
+      const iou = { owedToMe: roundMoney(sp.filter(s => s.direction === "owed" && !s.settled).reduce((t, s) => t + s.amount, 0)), iOwe: roundMoney(sp.filter(s => s.direction === "owe" && !s.settled).reduce((t, s) => t + s.amount, 0)) };
+      const totalTx = myEx.length + inc.length;
+      // Single source for the coverage extremes — the header badge and the
+      // coverage object sent to the model must describe the same range.
+      const oldestD = expRows[expRows.length - 1]?.d || null, newestD = expRows[0]?.d || null;
+      const monLbl = k => { if (!k) return "?"; const d = new Date(`${k}T12:00:00`); return `${d.toLocaleDateString("en-US", { month: "short" })} ’${String(d.getFullYear()).slice(2)}`; };
+      const covLabel = totalTx === 0 ? "No data yet" : oldestD ? `${totalTx} txns · ${monLbl(oldestD)} – ${monLbl(newestD)}` : `${totalTx} txns`;
+      const sendChat = async (q) => {
+        if (!q.trim() || chatLoading) return;
+        sChatMsgs(p => [...p, { role: "user", content: q.trim() }]);
+        sChatInput("");
+        sChatLoading(true);
+        try {
+          const r = await fetch("/api/ai-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q.trim(), context: { today, month: cm, monthIncome, monthExpense, allTimeIncome, allTimeExpense, expenses: expRows, incomes: incRows, coverage: { from: oldestD, to: newestD, total: myEx.length, sent: expRows.length }, topCategories: topCats, walletBalances: wBals, recurringBills, recurringCount: activeRec.length, iou, streak: finStreak } }) });
+          const d = await r.json();
+          sChatMsgs(p => [...p, { role: "assistant", content: r.ok ? d.answer : (d.error || "Something went wrong.") }]);
+        } catch {
+          sChatMsgs(p => [...p, { role: "assistant", content: "Network error — check your connection." }]);
+        } finally { sChatLoading(false); }
+      };
+      const micSupported = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+      const toggleMic = () => {
+        if (chatMic) { try { chatRecRef.current?.stop(); } catch { /* already stopped */ } sChatMic(false); return; }
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SR) return;
+        try {
+          const r = new SR();
+          r.lang = "en-IN"; r.interimResults = false; r.maxAlternatives = 1; r.continuous = false;
+          r.onresult = ev => { const t = ev.results?.[0]?.[0]?.transcript || ""; if (t) sChatInput(p => (p ? p + " " : "") + t); sChatMic(false); };
+          r.onerror = () => sChatMic(false);
+          r.onend = () => sChatMic(false);
+          chatRecRef.current = r;
+          r.start();
+          sChatMic(true);
+        } catch { sChatMic(false); }
+      };
+      const copyMsg = t => {
+        if (!navigator.clipboard?.writeText) { showT("Clipboard unavailable in this browser", "error"); return; }
+        navigator.clipboard.writeText(String(t || "")).then(() => showT("Copied to clipboard", "success")).catch(() => showT("Copy failed", "error"));
+      };
+      const QUICK_QS = ["Everything over ₹500 last month", "How much did I spend from cash this month?", "Compare this month vs last month", "Which bills are due soon?"];
+      const chatView = chatMsgs.length > 0 ? "chat" : "home";
+      const iconBtn = (disabled) => ({ width: 38, height: 38, borderRadius: 10, border: "1.5px solid var(--border)", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center", cursor: disabled ? "not-allowed" : "pointer", flexShrink: 0, padding: 0 });
+      return <>
+        <style>{`@keyframes chatBounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.4; } 30% { transform: translateY(-6px); opacity: 1; } } @keyframes chatSlideUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } } @keyframes chatFadeIn { from { opacity: 0; } to { opacity: 1; } } @keyframes chatExpand { from { opacity: 0; transform: scale(0.92) translateY(20px); transform-origin: bottom center; } to { opacity: 1; transform: scale(1) translateY(0); transform-origin: bottom center; } } @keyframes chatMicPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(224,82,82,0.35); } 50% { box-shadow: 0 0 0 6px rgba(224,82,82,0); } }`}</style>
+        {chatOpen && <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 54, display: "flex", flexDirection: "column", justifyContent: "flex-end", animation: "chatFadeIn 0.2s ease" }} onClick={(e) => { if (e.target === e.currentTarget) sChatOpen(false); }}>
+          <div style={{ background: "var(--bg)", borderRadius: "24px 24px 0 0", height: "82%", display: "flex", flexDirection: "column", overflow: "hidden", animation: "chatExpand 0.28s cubic-bezier(0.34,1.56,0.64,1) forwards", borderTop: "1px solid var(--border)" }}>
+            <div style={{ padding: "14px 16px 12px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: "var(--card)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                <Lion mood="happy" size={36} />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: "#D4704A", letterSpacing: 0.5, fontFamily: "var(--font-h)" }}>Ask NOMAD</div>
+                  <div style={{ fontSize: 10.5, color: "var(--muted)", fontFamily: "var(--font-h)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{covLabel}</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+                {chatMsgs.length > 0 && <button onClick={() => { sChatMsgs([]); sChatInput(""); }} style={{ fontSize: 12, color: "var(--muted)", background: "none", border: "none", cursor: "pointer", padding: "4px 8px", borderRadius: 8, fontFamily: "var(--font-h)" }}>Clear</button>}
+                <button onClick={() => sChatOpen(false)} style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--bg)", border: "1px solid var(--border)", cursor: "pointer", color: "var(--muted)", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}><IconX size={15} /></button>
+              </div>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 16px 8px", display: "flex", flexDirection: "column" }}>
+              {chatView === "home" ? <>
+                <div style={{ display: "flex", gap: 10, marginBottom: 20, animation: "chatSlideUp 0.3s ease forwards" }}>
+                  <div style={{ flexShrink: 0, marginTop: 2 }}><Lion mood="happy" size={28} /></div>
+                  <div style={{ background: "var(--card)", borderRadius: "4px 16px 16px 16px", padding: "12px 14px", fontSize: 13.5, color: "var(--text)", lineHeight: 1.6, border: "1px solid var(--border)", maxWidth: "80%", fontFamily: "var(--font-b)" }}>Ask anything — I can <strong>filter, total and compare</strong> every transaction you have logged: by wallet, category, amount or date.</div>
+                </div>
+                <div style={{ fontSize: 11, letterSpacing: 1.5, color: "var(--muted)", marginBottom: 10, paddingLeft: 2, fontFamily: "var(--font-h)" }}>QUICK QUESTIONS</div>
+                {QUICK_QS.map((q, i) => <button key={q} onClick={() => sendChat(q)} style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 14, padding: "12px 16px", textAlign: "left", fontSize: 13.5, color: "var(--text)", cursor: "pointer", marginBottom: 8, fontFamily: "var(--font-b)", lineHeight: 1.4, animation: `chatSlideUp 0.3s ease ${i * 0.07}s forwards`, opacity: 0 }}>{q}</button>)}
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--muted)", marginTop: 8, paddingLeft: 2, lineHeight: 1.5, fontFamily: "var(--font-b)" }}><Paperclip size={13} weight="bold" style={{ flexShrink: 0 }} /><span>Attach your bank/UPI statement (CSV or PDF) and I will find transactions you forgot to log.</span></div>
+              </> : <>
+                {chatMsgs.map((m, i) => <Fragment key={i}>
+                  <div style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: m.role === "assistant" ? 4 : 10, animation: "chatSlideUp 0.3s ease forwards", opacity: 0 }}>
+                    {m.role === "assistant" && <div style={{ flexShrink: 0, marginRight: 8, marginTop: 2 }}><Lion mood="happy" size={28} /></div>}
+                    <div style={{ maxWidth: "76%", padding: "10px 13px", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "4px 16px 16px 16px", background: m.role === "user" ? "#D4704A" : "var(--card)", color: m.role === "user" ? "#FFFFFF" : "var(--text)", border: m.role === "user" ? "none" : "1px solid var(--border)", fontSize: 13.5, lineHeight: 1.55, boxShadow: m.role === "user" ? "0 2px 8px rgba(212,112,74,0.25)" : "none", fontFamily: "var(--font-b)" }} dangerouslySetInnerHTML={{ __html: String(m.content || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>") }} />
+                  </div>
+                  {m.role === "assistant" && <div style={{ display: "flex", justifyContent: "flex-start", margin: "0 0 10px 36px" }}><button onClick={() => copyMsg(m.content)} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: "var(--muted)", background: "none", border: "none", cursor: "pointer", padding: "2px 4px", fontFamily: "var(--font-h)" }}><CopySimple size={12} />Copy</button></div>}
+                  {m.action === "recon" && <div style={{ display: "flex", justifyContent: "flex-start", margin: "-2px 0 12px 36px" }}><button onClick={() => { sChatOpen(false); sTab("settings"); showT("Review & import is under RECONCILE BANK STATEMENT", "info"); }} style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: "#7B8CDE", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "var(--font-h)", boxShadow: "0 2px 8px rgba(123,140,222,0.3)" }}>Review & import →</button></div>}
+                </Fragment>)}
+                {chatLoading && <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 10 }}><div style={{ flexShrink: 0, marginRight: 8, marginTop: 2 }}><Lion mood="happy" size={28} /></div><div style={{ background: "var(--card)", borderRadius: "4px 16px 16px 16px", padding: "10px 13px", border: "1px solid var(--border)" }}><div style={{ display: "flex", gap: 4, alignItems: "center", padding: "4px 0" }}>{[0, 1, 2].map(j => <div key={j} style={{ width: 7, height: 7, borderRadius: "50%", background: "#D4704A", animation: `chatBounce 1.2s ease-in-out ${j * 0.2}s infinite` }} />)}</div></div></div>}
+              </>}
+            </div>
+            <div style={{ padding: "10px 12px calc(env(safe-area-inset-bottom, 0px) + 10px)", borderTop: "1px solid var(--border)", display: "flex", gap: 7, background: "var(--card)", alignItems: "center" }}>
+              <label title="Attach bank/UPI statement (CSV or PDF) to find unlogged transactions" style={{ ...iconBtn(chatLoading), opacity: chatLoading ? 0.5 : 1 }}>
+                <Paperclip size={17} weight="bold" color="var(--muted)" />
+                <input type="file" accept=".csv,.pdf,application/pdf" disabled={chatLoading} onChange={e => { if (e.target.files[0]) handleChatFile(e.target.files[0]); e.target.value = ""; }} style={{ display: "none" }} />
+              </label>
+              <input value={chatInput} onChange={e => sChatInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(chatInput); } }} placeholder={chatMic ? "Listening…" : "Ask about your finances…"} style={{ flex: 1, minWidth: 0, padding: "10px 12px", borderRadius: 10, border: `1.5px solid ${chatMic ? "#E05252" : "var(--border)"}`, background: "var(--bg)", color: "var(--text)", fontSize: 13, fontFamily: "var(--font-b)", outline: "none" }} />
+              {micSupported && <button onClick={toggleMic} title={chatMic ? "Stop listening" : "Speak your question"} style={{ ...iconBtn(false), border: `1.5px solid ${chatMic ? "#E05252" : "var(--border)"}`, background: chatMic ? "rgba(224,82,82,0.12)" : "var(--bg)", animation: chatMic ? "chatMicPulse 1.4s ease infinite" : "none" }}><Microphone size={17} weight={chatMic ? "fill" : "regular"} color={chatMic ? "#E05252" : "var(--muted)"} /></button>}
+              <button onClick={() => sendChat(chatInput)} disabled={chatLoading || !chatInput.trim()} style={{ width: 38, height: 38, borderRadius: 10, border: "none", background: chatLoading || !chatInput.trim() ? "var(--border)" : "#D4704A", color: "#fff", cursor: chatLoading || !chatInput.trim() ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, padding: 0 }}><PaperPlaneTilt size={16} weight="fill" /></button>
+            </div>
+          </div>
+        </div>}
+      </>;
+    })()}
     {module === "finance" && dlBanner && deadLetterCount > 0 && <div style={{ position: "fixed", bottom: 84, left: 0, right: 0, maxWidth: 430, margin: "0 auto", background: "#D4726A", color: "#fff", padding: "10px 14px", display: "flex", alignItems: "center", gap: 8, zIndex: 49, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, boxShadow: "0 -2px 10px rgba(212,114,106,0.4)" }}><span style={{ flex: 1 }}>⚠ {deadLetterCount} change{deadLetterCount === 1 ? "" : "s"} failed to sync</span><button onClick={() => { sTab("settings"); sDlBanner(false); }} style={{ background: "rgba(255,255,255,0.25)", border: "none", borderRadius: 8, color: "#fff", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, padding: "4px 10px", cursor: "pointer" }}>Fix ›</button><button onClick={() => sDlBanner(false)} style={{ background: "none", border: "none", color: "#fff", fontSize: 18, cursor: "pointer", padding: "0 2px", lineHeight: 1, opacity: 0.8 }}>✕</button></div>}
 {module === "finance" && <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 430, margin: "0 auto", zIndex: 50, paddingBottom: "env(safe-area-inset-bottom)" }}><div style={{ position: "relative", height: 76 }}><svg width="100%" height="76" viewBox="0 0 430 76" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, display: "block", filter: "drop-shadow(0 -2px 12px rgba(0,0,0,0.07))" }}><path d="M0,18 L158,18 C184,18 185,52 215,52 C245,52 246,18 272,18 L430,18 L430,76 L0,76 Z" fill="var(--nav-bg)" stroke="var(--border)" strokeWidth="1" /></svg><div style={{ position: "absolute", inset: "18px 0 0 0", display: "flex" }}>{[{ id: "dashboard", label: "Home" }, { id: "events", label: "Events" }, { id: "__fab", label: "" }, { id: "history", label: "History" }, { id: "settings", label: "Settings" }].map(n => n.id === "__fab" ? <div key="__fab" style={{ flex: 1 }} /> : <button key={n.id} onClick={() => { hapticSelection(); sTab(n.id); }} style={{ flex: 1, padding: "8px 0 0", border: "none", background: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, cursor: "pointer", opacity: tab === n.id ? 1 : 0.45 }}><div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>{tab === n.id && <span key={"rip" + n.id} style={{ position: "absolute", top: "50%", left: "50%", width: 30, height: 30, borderRadius: "50%", background: "#E07A5F", pointerEvents: "none", animation: "ripple 0.6s ease-out forwards" }} />}<NI type={n.id} active={tab === n.id} />{n.id === "settings" && deadLetterCount > 0 && <div style={{ position: "absolute", top: -2, right: -2, width: 8, height: 8, borderRadius: "50%", background: "#D4726A", border: "2px solid var(--nav-bg)" }} />}</div><span style={{ fontFamily: "var(--font-h)", fontSize: 9, color: tab === n.id ? "#E07A5F" : "var(--muted)", fontWeight: tab === n.id ? 600 : 400 }}>{n.label}</span></button>)}</div><button onClick={() => { hapticLight(); sTab("add"); }} aria-label="Add" style={{ position: "absolute", top: -18, left: "50%", width: 58, height: 58, borderRadius: "50%", border: "none", background: tab === "add" ? "#D4704A" : "#E07A5F", color: "#fff", cursor: "pointer", boxShadow: "0 8px 20px rgba(224,122,95,0.42), 0 2px 6px rgba(224,122,95,0.28)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", transform: `translateX(-50%) scale(${tab === "add" ? 0.94 : 1})`, transition: "transform 0.18s cubic-bezier(0.34,1.56,0.64,1), background 0.18s ease" }}>{tab === "add" && <span key="fabrip" style={{ position: "absolute", top: "50%", left: "50%", width: 58, height: 58, borderRadius: "50%", background: "rgba(255,255,255,0.45)", pointerEvents: "none", animation: "navsplash 0.6s ease-out forwards" }} />}<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round" style={{ position: "relative", zIndex: 1 }}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg></button></div></div>}
 

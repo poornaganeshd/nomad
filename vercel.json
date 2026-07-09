@@ -1,4 +1,12 @@
 {
+  "functions": {
+    "api/food-vision.ts": {
+      "maxDuration": 60
+    },
+    "api/ai-chat.ts": {
+      "maxDuration": 60
+    }
+  },
   "crons": [
     {
       "path": "/api/send-reports",
