@@ -21,6 +21,9 @@
  *   goal-coach         Budgets vs spend → coaching message
  *   reconcile          Unmatched bank-statement rows + nearby logged txns →
  *                      per-row verdict (missing / fuzzy-matched) + category
+ *   statement-parse    Raw bank/UPI statement TEXT (extracted on-device from a
+ *                      PDF/CSV) → structured transaction rows. Provider-neutral
+ *                      replacement for Gemini-only vision OCR.
  *
  * All callers should redact PII with src/redactor.js before sending.
  */
@@ -43,7 +46,8 @@ type Mode =
   | "note-items"
   | "smart-reminders"
   | "goal-coach"
-  | "reconcile";
+  | "reconcile"
+  | "statement-parse";
 
 interface Wallet   { id: string; name: string; }
 interface Category { id: string; name: string; }
@@ -537,6 +541,37 @@ Give a verdict for every statement row.`;
     },
     validate: (p) => Boolean(p && typeof p === "object" && Array.isArray((p as Record<string, unknown>).results)),
   },
+
+  "statement-parse": {
+    systemPrompt: `You extract transactions from the raw TEXT of an Indian bank or UPI statement (GPay / PhonePe / Paytm transaction history, bank e-statement, or passbook). The text was pulled from a PDF, so columns may be jumbled and rows may wrap — reconstruct one entry per transaction.
+Return ONLY valid JSON with no markdown fences:
+{
+  "rows": [
+    { "date": "2026-06-14", "amount": 106, "type": "expense", "note": "BESCOM electricity", "ref": "614523998877" },
+    { "date": "2026-06-02", "amount": 10000, "type": "income", "note": "Received from Ravi", "ref": "" }
+  ]
+}
+
+Rules:
+- One entry per transaction, in document order.
+- date: ISO YYYY-MM-DD. Convert DD/MM/YYYY, DD-MMM-YYYY, "14 Jun 2026" etc. If a row's date is unreadable, skip that row.
+- amount: positive number, currency symbols and commas stripped (₹1,725 → 1725).
+- type: "expense" for debit / paid / sent / withdrawal / purchase; "income" for credit / received / deposit / refund / cashback.
+- note: short human description — merchant or counterparty name from the narration, with codes stripped (UPI-, POS, NEFT, IMPS prefixes, VPA handles like name@bank, merchant IDs).
+- ref: UPI transaction ID / UTR / reference number for that row if present, else "".
+- Skip opening/closing balance lines, page headers/footers, running-balance columns, totals, and summary sections.
+- Cap at 120 rows.`,
+    buildUser: (b) => {
+      const text = String(b.text || "").slice(0, 24000);
+      return `Statement text:
+"""
+${text}
+"""
+
+Extract every transaction as JSON.`;
+    },
+    validate: (p) => Boolean(p && typeof p === "object" && Array.isArray((p as Record<string, unknown>).rows)),
+  },
 };
 
 // Post-process model output so callers get safe, normalized payloads regardless
@@ -590,6 +625,22 @@ function sanitize(mode: Mode, parsed: Record<string, unknown>, body: Record<stri
       })
       .filter(r => Number.isInteger(r.index) && r.index >= 0 && r.index < rows.length && !seen.has(r.index) && (seen.add(r.index), true));
     return { results };
+  }
+  if (mode === "statement-parse") {
+    const rows = (Array.isArray(parsed.rows) ? parsed.rows : [])
+      .map((r: unknown) => {
+        const o = (r && typeof r === "object" ? r : {}) as Record<string, unknown>;
+        return {
+          date:   typeof o.date === "string" ? o.date.trim() : "",
+          amount: Math.round((typeof o.amount === "number" ? o.amount : Number(o.amount) || 0) * 100) / 100,
+          type:   o.type === "income" ? "income" : "expense",
+          note:   typeof o.note === "string" ? o.note.trim().slice(0, 200) : "",
+          ref:    typeof o.ref === "string" ? o.ref.trim().slice(0, 60) : "",
+        };
+      })
+      .filter((r: { date: string; amount: number }) => /^\d{4}-\d{2}-\d{2}$/.test(r.date) && r.amount > 0)
+      .slice(0, 120);
+    return { rows };
   }
   if (mode === "tax") {
     const items = Array.isArray(parsed.items) ? parsed.items : [];
@@ -716,7 +767,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    const raw = await callText(userPrompt, modeHandler.systemPrompt);
+    // A statement can hold 100+ rows — the default 1024-token budget truncates
+    // the JSON mid-array. Give it room (and a longer generation window).
+    const callOpts = mode === "statement-parse" ? { maxTokens: 4096, timeoutMs: 30_000 } : {};
+    const raw = await callText(userPrompt, modeHandler.systemPrompt, callOpts);
 
     let parsed: unknown;
     try { parsed = extractJSON(raw); }

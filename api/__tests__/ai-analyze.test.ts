@@ -162,6 +162,23 @@ describe('ai-analyze handler', () => {
     expect((r.body as { subscriptions: unknown[] }).subscriptions).toHaveLength(1);
   });
 
+  it('statement-parse normalizes rows and drops invalid dates/amounts', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as { __setNext: (s: string) => void };
+    mod.__setNext(JSON.stringify({ rows: [
+      { date: '2026-06-14', amount: 1725, type: 'debit', note: 'Room rent', ref: 'UTR123' },
+      { date: '2026-06-02', amount: 10000, type: 'income', note: 'From Ravi', ref: '' },
+      { date: 'bad-date', amount: 50, type: 'expense', note: 'skip me' },
+      { date: '2026-06-05', amount: 0, type: 'expense', note: 'zero skip' },
+    ] }));
+    const r = await invoke({ mode: 'statement-parse', text: '14 Jun ... 1725 ...' });
+    expect(r.statusCode).toBe(200);
+    const rows = (r.body as { rows: { date: string; amount: number; type: string }[] }).rows;
+    expect(rows).toHaveLength(2);
+    // Unknown type collapses to "expense"; explicit "income" is preserved.
+    expect(rows[0]).toMatchObject({ date: '2026-06-14', amount: 1725, type: 'expense' });
+    expect(rows[1]).toMatchObject({ date: '2026-06-02', amount: 10000, type: 'income' });
+  });
+
   it('reconcile sanitizes verdicts, ids, and drops out-of-range/duplicate indexes', async () => {
     const mod = await import('../_ai-provider.js') as unknown as { __setNext: (s: string) => void };
     mod.__setNext(JSON.stringify({
