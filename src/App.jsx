@@ -21,6 +21,8 @@ import {
   UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory,
 } from "./financeUtils";
 import { parseAmount, parseVoiceTx, parseBankCsv } from "./txParsers";
+import { extractPdfText, looksLikeText } from "./pdfText";
+import { renderChatHtml } from "./chatFormat";
 import { buildLedger, reconcile, statementClosingBalance, loadImportedRefs, saveImportedRefs } from "./bankReconcile";
 import CalendarView from "./CalendarView";
 import NomadLite from "./NomadLite";
@@ -1635,6 +1637,9 @@ export default function Nomad() {
   const [chatLoading, sChatLoading] = useState(false);
   const [chatMic, sChatMic] = useState(false);
   const chatRecRef = useRef(null);
+  const chatScrollRef = useRef(null);
+  // Keep the transcript pinned to the newest message as it streams in.
+  useEffect(() => { const el = chatScrollRef.current; if (el) el.scrollTop = el.scrollHeight; }, [chatMsgs, chatLoading, chatOpen]);
   const [lionMsg, sLionMsg] = useState(""); const [lionMsgLoading, sLionMsgLoading] = useState(false);
   const [walletsMgrOpen, sWalletsMgrOpen] = useState(false);
   const [newWalletName, sNewWalletName] = useState(""), [newWalletColor, sNewWalletColor] = useState("#A78BFA"), [newWalletUL, sNewWalletUL] = useState(false);
@@ -2726,18 +2731,72 @@ export default function Nomad() {
     if (toast) showT(`${matched.length} matched · ${missing.length} missing — review below`, "info");
     return { walletId: wid, total: rows.length, matched: matched.length, missing: missing.length, already: alreadyImported.length, missingRows: missing };
   };
-  // Statement file → rows. CSV parses on-device; PDF goes to the vision OCR
-  // endpoint (same plumbing as ledger photos, `type: "statement"`).
-  const statementFileToRows = async (file) => {
-    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
-    if (!isPdf) return parseBankCsv(await file.text());
-    const dataUrl = await new Promise((resolve, reject) => { const r = new FileReader(); r.onerror = () => reject(new Error("Failed to read PDF file")); r.onload = () => resolve(r.result); r.readAsDataURL(file); });
-    const [, b64] = String(dataUrl).split(",");
-    if (!b64 || b64.length > 2_800_000) throw new Error("PDF too large — export a shorter date range or use CSV.");
-    const res = await fetch("/api/food-vision", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "statement", imageBase64: b64, mimeType: "application/pdf" }) });
+  // Statement file → rows.
+  // • CSV        → parsed fully on-device (no network).
+  // • Text PDF   → text extracted on-device (pdfjs), parsed by ANY AI provider
+  //               via /api/ai-analyze `statement-parse`. This is the primary
+  //               PDF path — it no longer depends on Gemini vision being
+  //               configured, which is what left users stuck on "Statement OCR
+  //               unavailable — all AI providers failed".
+  // • Scanned PDF → falls back to Gemini vision OCR (`type: "statement"`), the
+  //               only path that can read an image-only PDF.
+  const parseStatementText = async (text) => {
+    const res = await fetch("/api/ai-analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "statement-parse", text }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Couldn't read the statement");
+    return (data.rows || []).map(r => ({ date: r.date, amount: r.amount, type: r.type, note: r.note || "", ref: r.ref || "" }));
+  };
+  const statementVisionOcr = async (file, { isPdf }) => {
+    let b64, mimeType;
+    if (isPdf) {
+      const dataUrl = await new Promise((resolve, reject) => { const r = new FileReader(); r.onerror = () => reject(new Error("Failed to read PDF file")); r.onload = () => resolve(r.result); r.readAsDataURL(file); });
+      [, b64] = String(dataUrl).split(",");
+      mimeType = "application/pdf";
+    } else {
+      // Screenshot / photo of a statement — compress to 1400px JPEG so a
+      // full-page screenshot stays under the 2.8 MB backend limit.
+      b64 = await new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+          const scale = Math.min(1, 1400 / Math.max(img.width, img.height));
+          const c = document.createElement("canvas");
+          c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+          c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+          URL.revokeObjectURL(url);
+          resolve(c.toDataURL("image/jpeg", 0.75).split(",")[1]);
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Couldn't read that image.")); };
+        img.src = url;
+      });
+      mimeType = "image/jpeg";
+    }
+    if (!b64 || b64.length > 2_800_000) throw new Error(isPdf ? "PDF too large — export a shorter date range or use CSV." : "Image too large — try a smaller screenshot.");
+    const res = await fetch("/api/food-vision", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "statement", imageBase64: b64, mimeType }) });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "Statement OCR failed");
     return (data.rows || []).map(r => ({ date: r.date, amount: r.amount, type: r.type, note: r.note || "", ref: r.ref || "" }));
+  };
+  const statementFileToRows = async (file) => {
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
+    const isImage = /^image\//.test(file.type || "") || /\.(png|jpe?g|webp|heic)$/i.test(file.name || "");
+    if (isImage && !isPdf) return statementVisionOcr(file, { isPdf: false });
+    if (!isPdf) return parseBankCsv(await file.text());
+    // Try on-device text extraction first — works for the vast majority of
+    // bank/UPI statements and any configured provider can parse the text.
+    const text = await extractPdfText(file);
+    if (looksLikeText(text)) {
+      try {
+        const rows = await parseStatementText(text);
+        if (rows.length) return rows;
+      } catch (e) {
+        // Text parse failed (provider/network) — fall through to vision OCR
+        // rather than dead-ending. Re-throw only if vision is also unavailable.
+        if (/PDF too large/i.test(e?.message || "")) throw e;
+      }
+    }
+    // No usable text (scanned PDF) or text parse yielded nothing → vision OCR.
+    return statementVisionOcr(file, { isPdf: true });
   };
   const impRecon = async (file) => {
     if (reconOcrBusy) return;
@@ -2769,9 +2828,10 @@ export default function Nomad() {
     try {
       const isCsv = /\.csv$/i.test(file.name || "") || file.type === "text/csv";
       const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
-      if (!isCsv && !isPdf) throw new Error("Attach your bank/UPI statement as a **CSV** or **PDF** and I'll compare it against everything you've logged.");
+      const isImage = /^image\//.test(file.type || "") || /\.(png|jpe?g|webp|heic)$/i.test(file.name || "");
+      if (!isCsv && !isPdf && !isImage) throw new Error("Attach your bank/UPI statement as a **CSV**, **PDF**, or **screenshot** and I'll compare it against everything you've logged.");
       const rows = await statementFileToRows(file);
-      if (!rows.length) { sChatMsgs(p => [...p, { role: "assistant", content: "I couldn't read any transactions from that file. A CSV export from your bank works best; for PDFs, make sure it's a real statement (not a scanned photo)." }]); return; }
+      if (!rows.length) { sChatMsgs(p => [...p, { role: "assistant", content: "I couldn't read any transactions from that file. A **CSV export** from your bank works best. PDFs and screenshots also work — just make sure the transactions are clearly visible." }]); return; }
       const sum = runRecon(rows, { toast: false });
       if (!sum) { sChatMsgs(p => [...p, { role: "assistant", content: "Add a wallet first, then I can reconcile against it." }]); return; }
       const wName = wallets.find(w => w.id === sum.walletId)?.name || "your wallet";
@@ -3338,62 +3398,99 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         if (!navigator.clipboard?.writeText) { showT("Clipboard unavailable in this browser", "error"); return; }
         navigator.clipboard.writeText(String(t || "")).then(() => showT("Copied to clipboard", "success")).catch(() => showT("Copy failed", "error"));
       };
-      const QUICK_QS = ["Everything over ₹500 last month", "How much did I spend from cash this month?", "Compare this month vs last month", "Which bills are due soon?"];
+      const QUICK_QS = [
+        { q: "Everything over ₹500 last month", icon: Receipt, color: "#D4704A" },
+        { q: "How much did I spend from cash this month?", icon: Wallet, color: "#6BAA75" },
+        { q: "Compare this month vs last month", icon: ArrowsLeftRight, color: "#7B8CDE" },
+        { q: "Which bills are due soon?", icon: Timer, color: "#E0A44A" },
+      ];
       const chatView = chatMsgs.length > 0 ? "chat" : "home";
-      const iconBtn = (disabled) => ({ width: 38, height: 38, borderRadius: 10, border: "1.5px solid var(--border)", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center", cursor: disabled ? "not-allowed" : "pointer", flexShrink: 0, padding: 0 });
+      const iconBtn = (disabled) => ({ width: 40, height: 40, borderRadius: 12, border: "1.5px solid var(--border)", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center", cursor: disabled ? "not-allowed" : "pointer", flexShrink: 0, padding: 0, transition: "transform 0.12s ease" });
       return <>
-        <style>{`@keyframes chatBounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.4; } 30% { transform: translateY(-6px); opacity: 1; } } @keyframes chatSlideUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } } @keyframes chatFadeIn { from { opacity: 0; } to { opacity: 1; } } @keyframes chatExpand { from { opacity: 0; transform: scale(0.92) translateY(20px); transform-origin: bottom center; } to { opacity: 1; transform: scale(1) translateY(0); transform-origin: bottom center; } } @keyframes chatMicPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(224,82,82,0.35); } 50% { box-shadow: 0 0 0 6px rgba(224,82,82,0); } }`}</style>
-        {chatOpen && <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 54, display: "flex", flexDirection: "column", justifyContent: "flex-end", animation: "chatFadeIn 0.2s ease" }} onClick={(e) => { if (e.target === e.currentTarget) sChatOpen(false); }}>
-          <div style={{ background: "var(--bg)", borderRadius: "24px 24px 0 0", height: "82%", display: "flex", flexDirection: "column", overflow: "hidden", animation: "chatExpand 0.28s cubic-bezier(0.34,1.56,0.64,1) forwards", borderTop: "1px solid var(--border)" }}>
-            <div style={{ padding: "14px 16px 12px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: "var(--card)" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-                <Lion mood="happy" size={36} />
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: "#D4704A", letterSpacing: 0.5, fontFamily: "var(--font-h)" }}>Ask NOMAD</div>
-                  <div style={{ fontSize: 10.5, color: "var(--muted)", fontFamily: "var(--font-h)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{covLabel}</div>
+        <style>{`
+@keyframes chatBounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.35; } 30% { transform: translateY(-6px); opacity: 1; } }
+@keyframes chatSlideUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes chatFadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes chatExpand { from { opacity: 0; transform: scale(0.94) translateY(24px); transform-origin: bottom center; } to { opacity: 1; transform: scale(1) translateY(0); transform-origin: bottom center; } }
+@keyframes chatMicPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(224,82,82,0.35); } 50% { box-shadow: 0 0 0 7px rgba(224,82,82,0); } }
+@keyframes chatAurora { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+@keyframes chatGlow { 0%, 100% { box-shadow: 0 0 0 0 rgba(224,122,95,0.45); } 50% { box-shadow: 0 0 0 6px rgba(224,122,95,0); } }
+@keyframes chatPop { from { opacity: 0; transform: scale(0.9) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+@keyframes chatLiveDot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.7); } }
+@keyframes chatSweep { 0% { transform: translateX(-120%); } 100% { transform: translateX(220%); } }
+.nmd-body .nmd-p { margin: 3px 0; }
+.nmd-body .nmd-p:first-child { margin-top: 0; }
+.nmd-body .nmd-h { font-weight: 800; margin: 9px 0 4px; color: var(--text); font-family: var(--font-h); font-size: 12px; letter-spacing: 0.3px; }
+.nmd-body .nmd-sp { height: 5px; }
+.nmd-body .nmd-li { display: flex; gap: 7px; margin: 4px 0; align-items: flex-start; }
+.nmd-body .nmd-li .nmd-dot { color: #D4704A; font-weight: 800; line-height: 1.5; }
+.nmd-body .nmd-txs { display: flex; flex-direction: column; margin: 9px 0; border-radius: 13px; overflow: hidden; border: 1px solid var(--border); box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+.nmd-body .nmd-tx { display: flex; align-items: center; gap: 9px; padding: 9px 11px; background: var(--bg); }
+.nmd-body .nmd-tx + .nmd-tx { border-top: 1px solid var(--border); }
+.nmd-body .nmd-tx-d { font-size: 10.5px; color: var(--muted); min-width: 42px; font-family: var(--font-h); font-weight: 700; letter-spacing: 0.2px; }
+.nmd-body .nmd-tx-n { flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.35; color: var(--text); }
+.nmd-body .nmd-tx-a { font-weight: 800; color: #D4704A; font-family: var(--font-h); white-space: nowrap; font-size: 13px; }
+.nmd-body .nmd-tx-a.nmd-in { color: #6BAA75; }
+.nmd-body code { background: rgba(125,140,222,0.14); border-radius: 5px; padding: 1px 5px; font-size: 12px; font-family: ui-monospace, monospace; }
+`}</style>
+        {chatOpen && <div style={{ position: "fixed", inset: 0, background: "rgba(20,14,10,0.55)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", zIndex: 54, display: "flex", flexDirection: "column", justifyContent: "flex-end", animation: "chatFadeIn 0.2s ease" }} onClick={(e) => { if (e.target === e.currentTarget) sChatOpen(false); }}>
+          <div style={{ background: "var(--bg)", borderRadius: "26px 26px 0 0", height: "86%", display: "flex", flexDirection: "column", overflow: "hidden", animation: "chatExpand 0.3s cubic-bezier(0.34,1.56,0.64,1) forwards", boxShadow: "0 -8px 40px rgba(0,0,0,0.28)" }}>
+            {/* Aurora gradient header — the signature look of Ask NOMAD */}
+            <div style={{ position: "relative", padding: "12px 16px 14px", background: "linear-gradient(120deg, #E07A5F, #D4704A, #E0A44A, #D4704A)", backgroundSize: "300% 300%", animation: "chatAurora 9s ease infinite", overflow: "hidden" }}>
+              <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: "100%", background: "linear-gradient(100deg, transparent, rgba(255,255,255,0.22), transparent)", transform: "translateX(-120%)", animation: "chatSweep 5s ease-in-out 0.6s infinite", pointerEvents: "none" }} />
+              <div style={{ width: 38, height: 4, borderRadius: 4, background: "rgba(255,255,255,0.55)", margin: "0 auto 12px" }} />
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, position: "relative" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
+                  <div style={{ width: 42, height: 42, borderRadius: "50%", background: "rgba(255,255,255,0.92)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, animation: "chatGlow 2.6s ease infinite", boxShadow: "0 3px 10px rgba(0,0,0,0.14)" }}><Lion mood="happy" size={32} /></div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ fontSize: 16.5, fontWeight: 800, color: "#fff", letterSpacing: 0.3, fontFamily: "var(--font-h)" }}>Ask NOMAD</span><Sparkle size={15} weight="fill" color="#FFF3D6" /></div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 1 }}><span style={{ width: 6, height: 6, borderRadius: "50%", background: "#BFF3C6", animation: "chatLiveDot 1.8s ease infinite", flexShrink: 0 }} /><span style={{ fontSize: 10.5, color: "rgba(255,255,255,0.9)", fontFamily: "var(--font-h)", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{covLabel}</span></div>
+                  </div>
                 </div>
-              </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
-                {chatMsgs.length > 0 && <button onClick={() => { sChatMsgs([]); sChatInput(""); }} style={{ fontSize: 12, color: "var(--muted)", background: "none", border: "none", cursor: "pointer", padding: "4px 8px", borderRadius: 8, fontFamily: "var(--font-h)" }}>Clear</button>}
-                <button onClick={() => sChatOpen(false)} style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--bg)", border: "1px solid var(--border)", cursor: "pointer", color: "var(--muted)", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}><IconX size={15} /></button>
+                <div style={{ display: "flex", gap: 7, alignItems: "center", flexShrink: 0 }}>
+                  {chatMsgs.length > 0 && <button onClick={() => { sChatMsgs([]); sChatInput(""); }} style={{ fontSize: 12, color: "#fff", background: "rgba(255,255,255,0.18)", border: "none", cursor: "pointer", padding: "6px 11px", borderRadius: 10, fontFamily: "var(--font-h)", fontWeight: 700 }}>Clear</button>}
+                  <button onClick={() => sChatOpen(false)} aria-label="Close" style={{ width: 30, height: 30, borderRadius: "50%", background: "rgba(255,255,255,0.2)", border: "none", cursor: "pointer", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}><IconX size={16} /></button>
+                </div>
               </div>
             </div>
-            <div style={{ flex: 1, overflowY: "auto", padding: "16px 16px 8px", display: "flex", flexDirection: "column" }}>
+            <div ref={chatScrollRef} className="nmd-body" style={{ flex: 1, overflowY: "auto", padding: "18px 16px 10px", display: "flex", flexDirection: "column", scrollBehavior: "smooth" }}>
               {chatView === "home" ? <>
-                <div style={{ display: "flex", gap: 10, marginBottom: 20, animation: "chatSlideUp 0.3s ease forwards" }}>
+                <div style={{ display: "flex", gap: 10, marginBottom: 22, animation: "chatSlideUp 0.35s ease forwards" }}>
                   <div style={{ flexShrink: 0, marginTop: 2 }}><Lion mood="happy" size={28} /></div>
-                  <div style={{ background: "var(--card)", borderRadius: "4px 16px 16px 16px", padding: "12px 14px", fontSize: 13.5, color: "var(--text)", lineHeight: 1.6, border: "1px solid var(--border)", maxWidth: "80%", fontFamily: "var(--font-b)" }}>Ask anything — I can <strong>filter, total and compare</strong> every transaction you have logged: by wallet, category, amount or date.</div>
+                  <div style={{ background: "var(--card)", borderRadius: "4px 18px 18px 18px", padding: "13px 15px", fontSize: 13.5, color: "var(--text)", lineHeight: 1.6, border: "1px solid var(--border)", maxWidth: "82%", fontFamily: "var(--font-b)", boxShadow: "0 2px 12px rgba(0,0,0,0.05)" }}>Hi! I know every transaction you've logged. Ask me to <strong>filter, total or compare</strong> them — by wallet, category, amount or date. 🦁</div>
                 </div>
-                <div style={{ fontSize: 11, letterSpacing: 1.5, color: "var(--muted)", marginBottom: 10, paddingLeft: 2, fontFamily: "var(--font-h)" }}>QUICK QUESTIONS</div>
-                {QUICK_QS.map((q, i) => <button key={q} onClick={() => sendChat(q)} style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 14, padding: "12px 16px", textAlign: "left", fontSize: 13.5, color: "var(--text)", cursor: "pointer", marginBottom: 8, fontFamily: "var(--font-b)", lineHeight: 1.4, animation: `chatSlideUp 0.3s ease ${i * 0.07}s forwards`, opacity: 0 }}>{q}</button>)}
-                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--muted)", marginTop: 8, paddingLeft: 2, lineHeight: 1.5, fontFamily: "var(--font-b)" }}><Paperclip size={13} weight="bold" style={{ flexShrink: 0 }} /><span>Attach your bank/UPI statement (CSV or PDF) and I will find transactions you forgot to log.</span></div>
+                <div style={{ fontSize: 10.5, letterSpacing: 1.8, color: "var(--muted)", marginBottom: 11, paddingLeft: 3, fontFamily: "var(--font-h)", fontWeight: 700 }}>TRY ASKING</div>
+                {QUICK_QS.map((item, i) => { const Ic = item.icon; return <button key={item.q} onClick={() => sendChat(item.q)} style={{ display: "flex", alignItems: "center", gap: 12, background: "var(--card)", border: "1px solid var(--border)", borderRadius: 16, padding: "12px 13px", textAlign: "left", fontSize: 13.5, color: "var(--text)", cursor: "pointer", marginBottom: 9, fontFamily: "var(--font-b)", lineHeight: 1.35, animation: `chatPop 0.4s cubic-bezier(0.34,1.56,0.64,1) ${0.08 + i * 0.07}s both`, boxShadow: "0 1px 8px rgba(0,0,0,0.04)" }}><span style={{ width: 34, height: 34, borderRadius: 11, background: item.color + "1c", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Ic size={18} weight="bold" color={item.color} /></span><span style={{ flex: 1, fontWeight: 600 }}>{item.q}</span><ArrowRight size={15} weight="bold" color="var(--muted)" style={{ flexShrink: 0, opacity: 0.5 }} /></button>; })}
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginTop: 12, padding: "13px 14px", background: "linear-gradient(135deg, rgba(123,140,222,0.09), rgba(224,122,95,0.07))", border: "1px dashed var(--border)", borderRadius: 16, animation: "chatPop 0.4s ease 0.4s both" }}><span style={{ width: 34, height: 34, borderRadius: 11, background: "#7B8CDE1c", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><FilePdf size={18} weight="bold" color="#7B8CDE" /></span><div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.55, fontFamily: "var(--font-b)" }}><strong style={{ color: "var(--text)" }}>Attach a statement</strong> — tap the clip and drop a bank/UPI export (CSV, PDF or screenshot). I'll find the transactions you forgot to log.</div></div>
               </> : <>
                 {chatMsgs.map((m, i) => <Fragment key={i}>
-                  <div style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: m.role === "assistant" ? 4 : 10, animation: "chatSlideUp 0.3s ease forwards", opacity: 0 }}>
+                  <div style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: m.role === "assistant" ? 4 : 12, animation: "chatSlideUp 0.32s ease forwards", opacity: 0 }}>
                     {m.role === "assistant" && <div style={{ flexShrink: 0, marginRight: 8, marginTop: 2 }}><Lion mood="happy" size={28} /></div>}
-                    <div style={{ maxWidth: "76%", padding: "10px 13px", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "4px 16px 16px 16px", background: m.role === "user" ? "#D4704A" : "var(--card)", color: m.role === "user" ? "#FFFFFF" : "var(--text)", border: m.role === "user" ? "none" : "1px solid var(--border)", fontSize: 13.5, lineHeight: 1.55, boxShadow: m.role === "user" ? "0 2px 8px rgba(212,112,74,0.25)" : "none", fontFamily: "var(--font-b)" }} dangerouslySetInnerHTML={{ __html: String(m.content || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>") }} />
+                    {m.role === "user"
+                      ? <div style={{ maxWidth: "78%", padding: "11px 14px", borderRadius: "18px 18px 5px 18px", background: "linear-gradient(135deg, #E07A5F, #D4704A)", color: "#fff", fontSize: 13.5, lineHeight: 1.5, boxShadow: "0 3px 12px rgba(212,112,74,0.32)", fontFamily: "var(--font-b)", wordBreak: "break-word" }} dangerouslySetInnerHTML={{ __html: String(m.content || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>") }} />
+                      : <div style={{ maxWidth: "82%", padding: "11px 14px", borderRadius: "5px 18px 18px 18px", background: "var(--card)", color: "var(--text)", border: "1px solid var(--border)", fontSize: 13.5, lineHeight: 1.55, fontFamily: "var(--font-b)", boxShadow: "0 2px 12px rgba(0,0,0,0.05)", wordBreak: "break-word" }} dangerouslySetInnerHTML={{ __html: renderChatHtml(m.content) }} />}
                   </div>
-                  {m.role === "assistant" && <div style={{ display: "flex", justifyContent: "flex-start", margin: "0 0 10px 36px" }}><button onClick={() => copyMsg(m.content)} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: "var(--muted)", background: "none", border: "none", cursor: "pointer", padding: "2px 4px", fontFamily: "var(--font-h)" }}><CopySimple size={12} />Copy</button></div>}
-                  {m.action === "recon" && <div style={{ display: "flex", justifyContent: "flex-start", margin: "-2px 0 12px 36px" }}><button onClick={() => { sChatOpen(false); sTab("settings"); showT("Review & import is under RECONCILE BANK STATEMENT", "info"); }} style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: "#7B8CDE", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "var(--font-h)", boxShadow: "0 2px 8px rgba(123,140,222,0.3)" }}>Review & import →</button></div>}
+                  {m.role === "assistant" && <div style={{ display: "flex", justifyContent: "flex-start", margin: "0 0 12px 36px", gap: 4 }}><button onClick={() => copyMsg(m.content)} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, color: "var(--muted)", background: "var(--card)", border: "1px solid var(--border)", cursor: "pointer", padding: "4px 9px", borderRadius: 8, fontFamily: "var(--font-h)", fontWeight: 600 }}><CopySimple size={12} />Copy</button></div>}
+                  {m.action === "recon" && <div style={{ display: "flex", justifyContent: "flex-start", margin: "-4px 0 14px 36px" }}><button onClick={() => { sChatOpen(false); sTab("settings"); showT("Review & import is under RECONCILE BANK STATEMENT", "info"); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 15px", borderRadius: 12, border: "none", background: "linear-gradient(135deg, #7B8CDE, #6A7BD0)", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "var(--font-h)", boxShadow: "0 3px 12px rgba(123,140,222,0.35)" }}><Receipt size={15} weight="bold" />Review &amp; import<ArrowRight size={14} weight="bold" /></button></div>}
                 </Fragment>)}
-                {chatLoading && <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 10 }}><div style={{ flexShrink: 0, marginRight: 8, marginTop: 2 }}><Lion mood="happy" size={28} /></div><div style={{ background: "var(--card)", borderRadius: "4px 16px 16px 16px", padding: "10px 13px", border: "1px solid var(--border)" }}><div style={{ display: "flex", gap: 4, alignItems: "center", padding: "4px 0" }}>{[0, 1, 2].map(j => <div key={j} style={{ width: 7, height: 7, borderRadius: "50%", background: "#D4704A", animation: `chatBounce 1.2s ease-in-out ${j * 0.2}s infinite` }} />)}</div></div></div>}
+                {chatLoading && <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 12, animation: "chatSlideUp 0.3s ease forwards" }}><div style={{ flexShrink: 0, marginRight: 8, marginTop: 2 }}><Lion mood="happy" size={28} /></div><div style={{ display: "flex", alignItems: "center", gap: 9, background: "var(--card)", borderRadius: "5px 18px 18px 18px", padding: "11px 15px", border: "1px solid var(--border)", boxShadow: "0 2px 12px rgba(0,0,0,0.05)" }}><div style={{ display: "flex", gap: 5, alignItems: "center" }}>{[0, 1, 2].map(j => <div key={j} style={{ width: 7, height: 7, borderRadius: "50%", background: "#D4704A", animation: `chatBounce 1.2s ease-in-out ${j * 0.18}s infinite` }} />)}</div><span style={{ fontSize: 11.5, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600 }}>crunching your numbers…</span></div></div>}
               </>}
             </div>
-            <div style={{ padding: "10px 12px calc(env(safe-area-inset-bottom, 0px) + 10px)", borderTop: "1px solid var(--border)", display: "flex", gap: 7, background: "var(--card)", alignItems: "center" }}>
-              <label title="Attach bank/UPI statement (CSV or PDF) to find unlogged transactions" style={{ ...iconBtn(chatLoading), opacity: chatLoading ? 0.5 : 1 }}>
-                <Paperclip size={17} weight="bold" color="var(--muted)" />
-                <input type="file" accept=".csv,.pdf,application/pdf" disabled={chatLoading} onChange={e => { if (e.target.files[0]) handleChatFile(e.target.files[0]); e.target.value = ""; }} style={{ display: "none" }} />
+            <div style={{ padding: "10px 12px calc(env(safe-area-inset-bottom, 0px) + 10px)", borderTop: "1px solid var(--border)", display: "flex", gap: 8, background: "var(--card)", alignItems: "center" }}>
+              <label title="Attach a bank/UPI statement (CSV, PDF or screenshot)" style={{ ...iconBtn(chatLoading), opacity: chatLoading ? 0.5 : 1 }}>
+                <Paperclip size={18} weight="bold" color="var(--muted)" />
+                <input type="file" accept=".csv,.pdf,application/pdf,image/*" disabled={chatLoading} onChange={e => { if (e.target.files[0]) handleChatFile(e.target.files[0]); e.target.value = ""; }} style={{ display: "none" }} />
               </label>
-              <input value={chatInput} onChange={e => sChatInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(chatInput); } }} placeholder={chatMic ? "Listening…" : "Ask about your finances…"} style={{ flex: 1, minWidth: 0, padding: "10px 12px", borderRadius: 10, border: `1.5px solid ${chatMic ? "#E05252" : "var(--border)"}`, background: "var(--bg)", color: "var(--text)", fontSize: 13, fontFamily: "var(--font-b)", outline: "none" }} />
-              {micSupported && <button onClick={toggleMic} title={chatMic ? "Stop listening" : "Speak your question"} style={{ ...iconBtn(false), border: `1.5px solid ${chatMic ? "#E05252" : "var(--border)"}`, background: chatMic ? "rgba(224,82,82,0.12)" : "var(--bg)", animation: chatMic ? "chatMicPulse 1.4s ease infinite" : "none" }}><Microphone size={17} weight={chatMic ? "fill" : "regular"} color={chatMic ? "#E05252" : "var(--muted)"} /></button>}
-              <button onClick={() => sendChat(chatInput)} disabled={chatLoading || !chatInput.trim()} style={{ width: 38, height: 38, borderRadius: 10, border: "none", background: chatLoading || !chatInput.trim() ? "var(--border)" : "#D4704A", color: "#fff", cursor: chatLoading || !chatInput.trim() ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, padding: 0 }}><PaperPlaneTilt size={16} weight="fill" /></button>
+              <input value={chatInput} onChange={e => sChatInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(chatInput); } }} placeholder={chatMic ? "Listening…" : "Ask about your finances…"} style={{ flex: 1, minWidth: 0, padding: "11px 14px", borderRadius: 22, border: `1.5px solid ${chatMic ? "#E05252" : "var(--border)"}`, background: "var(--bg)", color: "var(--text)", fontSize: 13.5, fontFamily: "var(--font-b)", outline: "none" }} />
+              {micSupported && <button onClick={toggleMic} title={chatMic ? "Stop listening" : "Speak your question"} style={{ ...iconBtn(false), borderRadius: "50%", border: `1.5px solid ${chatMic ? "#E05252" : "var(--border)"}`, background: chatMic ? "rgba(224,82,82,0.12)" : "var(--bg)", animation: chatMic ? "chatMicPulse 1.4s ease infinite" : "none" }}><Microphone size={18} weight={chatMic ? "fill" : "regular"} color={chatMic ? "#E05252" : "var(--muted)"} /></button>}
+              <button onClick={() => sendChat(chatInput)} disabled={chatLoading || !chatInput.trim()} aria-label="Send" style={{ width: 40, height: 40, borderRadius: "50%", border: "none", background: chatLoading || !chatInput.trim() ? "var(--border)" : "linear-gradient(135deg, #E07A5F, #D4704A)", color: "#fff", cursor: chatLoading || !chatInput.trim() ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, padding: 0, boxShadow: chatLoading || !chatInput.trim() ? "none" : "0 3px 12px rgba(212,112,74,0.4)", transition: "transform 0.12s ease" }}><PaperPlaneTilt size={17} weight="fill" /></button>
             </div>
           </div>
         </div>}
       </>;
     })()}
     {module === "finance" && dlBanner && deadLetterCount > 0 && <div style={{ position: "fixed", bottom: 84, left: 0, right: 0, maxWidth: 430, margin: "0 auto", background: "#D4726A", color: "#fff", padding: "10px 14px", display: "flex", alignItems: "center", gap: 8, zIndex: 49, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, boxShadow: "0 -2px 10px rgba(212,114,106,0.4)" }}><span style={{ flex: 1 }}>⚠ {deadLetterCount} change{deadLetterCount === 1 ? "" : "s"} failed to sync</span><button onClick={() => { sTab("settings"); sDlBanner(false); }} style={{ background: "rgba(255,255,255,0.25)", border: "none", borderRadius: 8, color: "#fff", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, padding: "4px 10px", cursor: "pointer" }}>Fix ›</button><button onClick={() => sDlBanner(false)} style={{ background: "none", border: "none", color: "#fff", fontSize: 18, cursor: "pointer", padding: "0 2px", lineHeight: 1, opacity: 0.8 }}>✕</button></div>}
-{module === "finance" && <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 430, margin: "0 auto", zIndex: 50, paddingBottom: "env(safe-area-inset-bottom)" }}><div style={{ position: "relative", height: 76 }}><svg width="100%" height="76" viewBox="0 0 430 76" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, display: "block", filter: "drop-shadow(0 -2px 12px rgba(0,0,0,0.07))" }}><path d="M0,18 L158,18 C184,18 185,52 215,52 C245,52 246,18 272,18 L430,18 L430,76 L0,76 Z" fill="var(--nav-bg)" stroke="var(--border)" strokeWidth="1" /></svg><div style={{ position: "absolute", inset: "18px 0 0 0", display: "flex" }}>{[{ id: "dashboard", label: "Home" }, { id: "events", label: "Events" }, { id: "__fab", label: "" }, { id: "history", label: "History" }, { id: "settings", label: "Settings" }].map(n => n.id === "__fab" ? <div key="__fab" style={{ flex: 1 }} /> : <button key={n.id} onClick={() => { hapticSelection(); sTab(n.id); }} style={{ flex: 1, padding: "8px 0 0", border: "none", background: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, cursor: "pointer", opacity: tab === n.id ? 1 : 0.45 }}><div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>{tab === n.id && <span key={"rip" + n.id} style={{ position: "absolute", top: "50%", left: "50%", width: 30, height: 30, borderRadius: "50%", background: "#E07A5F", pointerEvents: "none", animation: "ripple 0.6s ease-out forwards" }} />}<NI type={n.id} active={tab === n.id} />{n.id === "settings" && deadLetterCount > 0 && <div style={{ position: "absolute", top: -2, right: -2, width: 8, height: 8, borderRadius: "50%", background: "#D4726A", border: "2px solid var(--nav-bg)" }} />}</div><span style={{ fontFamily: "var(--font-h)", fontSize: 9, color: tab === n.id ? "#E07A5F" : "var(--muted)", fontWeight: tab === n.id ? 600 : 400 }}>{n.label}</span></button>)}</div><button onClick={() => { hapticLight(); sTab("add"); }} aria-label="Add" style={{ position: "absolute", top: -18, left: "50%", width: 58, height: 58, borderRadius: "50%", border: "none", background: tab === "add" ? "#D4704A" : "#E07A5F", color: "#fff", cursor: "pointer", boxShadow: "0 8px 20px rgba(224,122,95,0.42), 0 2px 6px rgba(224,122,95,0.28)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", transform: `translateX(-50%) scale(${tab === "add" ? 0.94 : 1})`, transition: "transform 0.18s cubic-bezier(0.34,1.56,0.64,1), background 0.18s ease" }}>{tab === "add" && <span key="fabrip" style={{ position: "absolute", top: "50%", left: "50%", width: 58, height: 58, borderRadius: "50%", background: "rgba(255,255,255,0.45)", pointerEvents: "none", animation: "navsplash 0.6s ease-out forwards" }} />}<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round" style={{ position: "relative", zIndex: 1 }}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg></button></div></div>}
+{module === "finance" && <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 430, margin: "0 auto", zIndex: 50, paddingBottom: "env(safe-area-inset-bottom)" }}><div style={{ position: "relative", height: 76 }}><svg width="100%" height="76" viewBox="0 0 430 76" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, display: "block", filter: "drop-shadow(0 -2px 12px rgba(0,0,0,0.07))" }}><path d="M0,18 L430,18 L430,76 L0,76 Z" fill="var(--nav-bg)" stroke="var(--border)" strokeWidth="1" /></svg><div style={{ position: "absolute", inset: "18px 0 0 0", display: "flex" }}>{[{ id: "dashboard", label: "Home" }, { id: "events", label: "Events" }, { id: "__fab", label: "" }, { id: "history", label: "History" }, { id: "settings", label: "Settings" }].map(n => n.id === "__fab" ? <div key="__fab" style={{ flex: 1 }} /> : <button key={n.id} onClick={() => { hapticSelection(); sTab(n.id); }} style={{ flex: 1, padding: "8px 0 0", border: "none", background: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, cursor: "pointer", opacity: tab === n.id ? 1 : 0.45 }}><div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>{tab === n.id && <span key={"rip" + n.id} style={{ position: "absolute", top: "50%", left: "50%", width: 30, height: 30, borderRadius: "50%", background: "#E07A5F", pointerEvents: "none", animation: "ripple 0.6s ease-out forwards" }} />}<NI type={n.id} active={tab === n.id} />{n.id === "settings" && deadLetterCount > 0 && <div style={{ position: "absolute", top: -2, right: -2, width: 8, height: 8, borderRadius: "50%", background: "#D4726A", border: "2px solid var(--nav-bg)" }} />}</div><span style={{ fontFamily: "var(--font-h)", fontSize: 9, color: tab === n.id ? "#E07A5F" : "var(--muted)", fontWeight: tab === n.id ? 600 : 400 }}>{n.label}</span></button>)}</div><button onClick={() => { hapticLight(); sTab("add"); }} aria-label="Add" style={{ position: "absolute", top: 16, left: "50%", width: 52, height: 52, borderRadius: "50%", border: "3px solid var(--nav-bg)", background: tab === "add" ? "#D4704A" : "#E07A5F", color: "#fff", cursor: "pointer", boxShadow: "0 6px 16px rgba(224,122,95,0.42), 0 2px 6px rgba(224,122,95,0.28)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", transform: `translateX(-50%) scale(${tab === "add" ? 0.94 : 1})`, transition: "transform 0.18s cubic-bezier(0.34,1.56,0.64,1), background 0.18s ease" }}>{tab === "add" && <span key="fabrip" style={{ position: "absolute", top: "50%", left: "50%", width: 58, height: 58, borderRadius: "50%", background: "rgba(255,255,255,0.45)", pointerEvents: "none", animation: "navsplash 0.6s ease-out forwards" }} />}<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round" style={{ position: "relative", zIndex: 1 }}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg></button></div></div>}
 
     {calW && <CalM wallet={calW} currentBal={wBal[calW.id] || 0} onSave={(v, note) => handleCal(calW.id, v, note)} onViewLedger={() => { const wv = calW; sCalW(null); sLedgerW(wv); }} onClose={() => sCalW(null)} />}{recountW && <RecountM wallet={recountW} currentBal={wBal[recountW.id] || 0} onClose={() => sRecountW(null)} />}{ledgerW && (() => { const wid = ledgerW.id; const touches = (it) => it.type === "expense" ? (it.walletId || "upi_lite") === wid : it.type === "income" ? (it.walletId || "bank") === wid : it.type === "transfer" ? (it.fromWallet === wid || it.toWallet === wid) : it.type === "settlement" ? it.walletId === wid : false; const all = [...ex.map(e => ({ ...e, type: "expense" })), ...inc.map(i => ({ ...i, type: "income" })), ...tr.map(t => ({ ...t, type: "transfer" })), ...stl.map(s => ({ ...s, type: "settlement" }))].filter(touches).sort(historySortCompare); const labelFor = (it) => it.type === "expense" ? (cats.find(c => c.id === it.categoryId)?.name || recCats.find(c => c.id === it.categoryId)?.name || "Expense") : it.type === "income" ? (isrc.find(s => s.id === it.sourceId)?.name || "Income") : it.type === "transfer" ? (it.fromWallet === wid ? `Transfer → ${wallets.find(x => x.id === it.toWallet)?.name || "?"}` : `Transfer ← ${wallets.find(x => x.id === it.fromWallet)?.name || "?"}`) : (it.splitName ? `Settle · ${it.splitName}` : "Settlement"); const lastV = walletVerify[wid]?.last; const rowVerified = (it) => { if (!lastV) return false; const precise = it.created_at || it.createdAt || it.updated_at; if (precise) return new Date(precise).getTime() <= lastV.ts; if (!it.date) return false; return it.date <= lastV.date; }; const wD = (it) => { if (it.type === "expense") return (it.walletId || "upi_lite") === wid ? -it.amount : 0; if (it.type === "income") return (it.walletId || "bank") === wid ? it.amount : 0; if (it.type === "transfer") return it.fromWallet === wid ? -it.amount : it.toWallet === wid ? it.amount : 0; if (it.type === "settlement") return it.walletId === wid ? (it.direction === "owed" ? it.amount : -it.amount) : 0; return 0; }; const _txTs = (it) => { const t = it.created_at || it.createdAt || it.updated_at; return t ? new Date(t).getTime() : new Date(it.date + "T23:59:59").getTime(); }; const _cals = (calLog || []).filter(c => c.wId === wid); const _chrono = [...all].sort((a, b) => { const dd = new Date(a.date) - new Date(b.date); if (dd !== 0) return dd; return new Date(a.created_at || a.createdAt || a.updated_at || 0) - new Date(b.created_at || b.createdAt || b.updated_at || 0); }); const _afterById = {}; let _prefix = 0; _chrono.forEach(it => { const _fg = _cals.filter(c => c.ts > _txTs(it)).reduce((s, c) => s + (c.gap || 0), 0); _prefix += wD(it); _afterById[it.id] = (wsb[wid] || 0) - _fg + _prefix; }); const rows = all.map(it => { const d = wD(it); return { id: it.id, label: labelFor(it), date: it.date, note: dispNote(it.note), delta: roundMoney(d), after: roundMoney(_afterById[it.id] ?? 0), verified: rowVerified(it) }; }); const lastVerifyLabel = lastV ? dl(lastV.date) : null; return <LedgerM wallet={ledgerW} rows={rows} curBal={roundMoney(wBal[wid] || 0)} lastVerifyLabel={lastVerifyLabel} onReconcile={() => { const wv = ledgerW; sLedgerW(null); sCalW(wv); }} onClose={() => sLedgerW(null)} />; })()}
     {recEditId && (() => {
