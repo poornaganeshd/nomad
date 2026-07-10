@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseAmount, parseVoiceTx, parseBankCsv } from "../txParsers.js";
+import { parseAmount, parseVoiceTx, parseBankCsv, parseUpiStatement } from "../txParsers.js";
 
 // ---------------------------------------------------------------------------
 // parseAmount
@@ -185,5 +185,58 @@ describe("parseBankCsv", () => {
     expect(rows).toEqual([{ date: "2024-01-15", amount: 20, note: "Chai", type: "expense" }]);
     expect("ref" in rows[0]).toBe(false);
     expect("balance" in rows[0]).toBe(false);
+  });
+});
+
+describe("parseUpiStatement", () => {
+  // Mirrors the exact line structure pdfText.js produces from a real GPay
+  // "Download statement" PDF (June 2026 layout).
+  const GPAY = `Transaction statement
+9999999999, someone@example.com
+Transaction statement period Sent Received
+01 June 2026 - 30 June 2026 ₹6,835.50 ₹19,480.90
+Date & time Transaction details Amount
+01 Jun, 2026 Paid to Corner Tea Stall ₹500
+07:16 PM UPI Transaction ID: 615293622557
+Paid by State Bank of India 1062
+01 Jun, 2026 Received from Ravi Kumar ₹28
+07:48 PM UPI Transaction ID: 194830449539
+Paid to State Bank of India 1062
+02 Jun, 2026 Received from Meena Traders ₹3.30
+08:11 PM UPI Transaction ID: 201107437781
+Paid to State Bank of India 1062
+Page 1 of 12`;
+
+  it("parses GPay statement blocks into dated rows with refs", () => {
+    const rows = parseUpiStatement(GPAY);
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toEqual({ date: "2026-06-01", amount: 500, type: "expense", note: "Corner Tea Stall", ref: "615293622557" });
+    expect(rows[1]).toEqual({ date: "2026-06-01", amount: 28, type: "income", note: "Ravi Kumar", ref: "194830449539" });
+    expect(rows[2]).toEqual({ date: "2026-06-02", amount: 3.30, type: "income", note: "Meena Traders", ref: "201107437781" });
+  });
+
+  it("does NOT match the statement-period header line as a transaction", () => {
+    const rows = parseUpiStatement("01 June 2026 - 30 June 2026 ₹6,835.50 ₹19,480.90");
+    expect(rows).toHaveLength(0);
+  });
+
+  it("handles comma-grouped amounts and full month names", () => {
+    const rows = parseUpiStatement("14 June, 2026 Paid to Landlord ₹1,725.50\n09:00 AM UPI Transaction ID: ABC123XYZ");
+    expect(rows).toEqual([{ date: "2026-06-14", amount: 1725.5, type: "expense", note: "Landlord", ref: "ABC123XYZ" }]);
+  });
+
+  it("maps refund/cashback to income and keeps ref per-row (no bleed)", () => {
+    const rows = parseUpiStatement(`03 Jun, 2026 Refund from Big Mart ₹120
+10:00 AM UPI Transaction ID: 111
+04 Jun, 2026 Paid to Metro ₹45
+11:00 AM UPI Transaction ID: 222`);
+    expect(rows[0]).toMatchObject({ type: "income", ref: "111" });
+    expect(rows[1]).toMatchObject({ type: "expense", ref: "222" });
+  });
+
+  it("returns [] for prose / CSV / empty input", () => {
+    expect(parseUpiStatement("")).toEqual([]);
+    expect(parseUpiStatement("date,amount\n2026-06-01,500")).toEqual([]);
+    expect(parseUpiStatement("Hello, this is not a statement at all.")).toEqual([]);
   });
 });

@@ -123,3 +123,50 @@ export const parseBankCsv = (text) => {
   }
   return rows;
 };
+
+// ——— UPI-app statement text → transaction rows (deterministic, no AI) ———
+// GPay/PhonePe "Download statement" PDFs are text PDFs with a rigid per-txn
+// block once pdfText.js reassembles the lines:
+//   01 Jun, 2026 Paid to Thicknaagar Raman ₹500
+//   07:16 PM UPI Transaction ID: 615293622557
+//   Paid by State Bank of India 1062
+// Parsing this locally is the PRIMARY statement path — it works offline, costs
+// nothing, and cannot fail because an AI provider is down (the exact failure
+// users kept hitting). AI parse / vision OCR are fallbacks for other layouts.
+const _MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+// A row line must carry: date, a direction keyword, and a trailing ₹amount.
+// Requiring the keyword is what keeps header lines like the statement-period
+// summary ("01 June 2026 - 30 June 2026 ₹6,835.50 ₹19,480.90") from matching.
+const _UPI_ROW = /^(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})\s*[·|,-]?\s*(Paid to|Received from|Sent to|Money sent to|Refund from|Cashback from|Payment to|Transfer to|Transfer from|Self transfer)\s+(.*?)\s*₹\s?([\d,]+(?:\.\d{1,2})?)\s*$/i;
+const _INCOME_DIR = /^(received from|refund from|cashback from|transfer from)$/i;
+export const parseUpiStatement = (text) => {
+  const rows = [];
+  let cur = null;
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = _UPI_ROW.exec(line);
+    if (m) {
+      const mon = _MON[m[2].slice(0, 3).toLowerCase()];
+      const amount = parseFloat(m[6].replace(/,/g, ""));
+      if (!mon || !(amount > 0)) { cur = null; continue; }
+      const dir = m[4].toLowerCase();
+      cur = {
+        date: `${m[3]}-${String(mon).padStart(2, "0")}-${String(m[1]).padStart(2, "0")}`,
+        amount,
+        type: _INCOME_DIR.test(dir) ? "income" : "expense",
+        note: (m[5] || "").trim() || m[4],
+        ref: "",
+      };
+      rows.push(cur);
+      continue;
+    }
+    // Continuation lines: attach the UPI transaction ID to the row above so
+    // re-uploads dedupe via importedRefs exactly like the AI/OCR paths.
+    if (cur && !cur.ref) {
+      const r = /UPI\s+Transaction\s+ID\s*:?\s*([A-Za-z0-9]+)/i.exec(line);
+      if (r) cur.ref = r[1];
+    }
+  }
+  return rows;
+};

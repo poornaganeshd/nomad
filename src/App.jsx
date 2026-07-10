@@ -20,7 +20,7 @@ import {
   recurringDaysOverdue, distributeAmount, expenseShareMap, historySortCompare,
   UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory,
 } from "./financeUtils";
-import { parseAmount, parseVoiceTx, parseBankCsv } from "./txParsers";
+import { parseAmount, parseVoiceTx, parseBankCsv, parseUpiStatement } from "./txParsers";
 import { extractPdfText, looksLikeText } from "./pdfText";
 import { renderChatHtml } from "./chatFormat";
 import { buildLedger, reconcile, statementClosingBalance, loadImportedRefs, saveImportedRefs } from "./bankReconcile";
@@ -2731,17 +2731,20 @@ export default function Nomad() {
     if (toast) showT(`${matched.length} matched · ${missing.length} missing — review below`, "info");
     return { walletId: wid, total: rows.length, matched: matched.length, missing: missing.length, already: alreadyImported.length, missingRows: missing };
   };
-  // Statement file → rows.
-  // • CSV        → parsed fully on-device (no network).
-  // • Text PDF   → text extracted on-device (pdfjs), parsed by ANY AI provider
-  //               via /api/ai-analyze `statement-parse`. This is the primary
-  //               PDF path — it no longer depends on Gemini vision being
-  //               configured, which is what left users stuck on "Statement OCR
-  //               unavailable — all AI providers failed".
-  // • Scanned PDF → falls back to Gemini vision OCR (`type: "statement"`), the
-  //               only path that can read an image-only PDF.
+  // Statement file → rows. Ordered so the paths that CANNOT fail on a flaky
+  // network / down AI provider run first:
+  // 1. CSV                → parseBankCsv on-device (no network).
+  // 2. Text PDF, GPay/UPI → pdfjs text extraction + parseUpiStatement, both
+  //                        fully on-device. This is the primary PDF path — a
+  //                        GPay statement now parses with ZERO server calls.
+  // 3. Text PDF, other    → extracted text to /api/ai-analyze `statement-parse`
+  //                        (any text provider, not just Gemini).
+  // 4. Scanned PDF/image  → Gemini vision OCR (`type: "statement"`), the only
+  //                        path that can read pixels.
   const parseStatementText = async (text) => {
-    const res = await fetch("/api/ai-analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "statement-parse", text }) });
+    // Cap client-side to what the server reads anyway (24 KB) — a 12-page
+    // statement over a slow mobile link shouldn't upload more than that.
+    const res = await fetch("/api/ai-analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "statement-parse", text: String(text).slice(0, 24000) }) });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "Couldn't read the statement");
     return (data.rows || []).map(r => ({ date: r.date, amount: r.amount, type: r.type, note: r.note || "", ref: r.ref || "" }));
@@ -2774,7 +2777,9 @@ export default function Nomad() {
     if (!b64 || b64.length > 2_800_000) throw new Error(isPdf ? "PDF too large — export a shorter date range or use CSV." : "Image too large — try a smaller screenshot.");
     const res = await fetch("/api/food-vision", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "statement", imageBase64: b64, mimeType }) });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || "Statement OCR failed");
+    // Append the first provider error so a failure is diagnosable from the
+    // chat bubble (e.g. "gemini HTTP 429: quota") instead of a dead generic.
+    if (!res.ok) throw new Error((data.error || "Statement OCR failed") + (Array.isArray(data.details) && data.details[0] ? ` (${String(data.details[0]).slice(0, 120)})` : ""));
     return (data.rows || []).map(r => ({ date: r.date, amount: r.amount, type: r.type, note: r.note || "", ref: r.ref || "" }));
   };
   const statementFileToRows = async (file) => {
@@ -2782,20 +2787,29 @@ export default function Nomad() {
     const isImage = /^image\//.test(file.type || "") || /\.(png|jpe?g|webp|heic)$/i.test(file.name || "");
     if (isImage && !isPdf) return statementVisionOcr(file, { isPdf: false });
     if (!isPdf) return parseBankCsv(await file.text());
-    // Try on-device text extraction first — works for the vast majority of
-    // bank/UPI statements and any configured provider can parse the text.
+    // On-device text extraction first — works for the vast majority of
+    // bank/UPI statements.
     const text = await extractPdfText(file);
+    let localRows = [];
     if (looksLikeText(text)) {
+      // Deterministic GPay/UPI-layout parse: no network, no AI, can't be down.
+      localRows = parseUpiStatement(text);
+      if (localRows.length >= 3) return localRows;
+      // Not a recognised UPI layout (or barely matched) → AI text parse. If
+      // the providers are down but the local pass DID find something, prefer
+      // those few real rows over dying.
       try {
         const rows = await parseStatementText(text);
         if (rows.length) return rows;
       } catch (e) {
-        // Text parse failed (provider/network) — fall through to vision OCR
-        // rather than dead-ending. Re-throw only if vision is also unavailable.
-        if (/PDF too large/i.test(e?.message || "")) throw e;
+        if (localRows.length) return localRows;
+        // Real text was extracted but no parser could read it — say that,
+        // instead of letting vision OCR fail later with a misleading error.
+        throw new Error(`I could read the PDF's text but not its transaction layout (${e?.message || "parse failed"}). A CSV export will work.`);
       }
+      if (localRows.length) return localRows;
     }
-    // No usable text (scanned PDF) or text parse yielded nothing → vision OCR.
+    // No usable text (scanned/image PDF) → vision OCR is the only option left.
     return statementVisionOcr(file, { isPdf: true });
   };
   const impRecon = async (file) => {
@@ -2844,7 +2858,9 @@ export default function Nomad() {
         sChatMsgs(p => [...p, { role: "assistant", content: `I compared ${sum.total} statement row${sum.total === 1 ? "" : "s"} against **${wName}**: **${sum.matched} matched**, **${sum.missing} missing** from NOMAD${already}.\n\nMissing:\n${lines}${more}\n\nOpen the review to tick & import. The **AI review** button there asks every configured AI provider and majority-votes the verdicts.`, action: "recon" }]);
       }
     } catch (err) {
-      sChatMsgs(p => [...p, { role: "assistant", content: err.message || "Couldn't process that file — try again or use the Settings → Reconcile uploader." }]);
+      // fetch()'s bare TypeError reads like a bug to users; name the culprit.
+      const msg = /failed to fetch|networkerror|load failed/i.test(err?.message || "") ? "The upload didn't reach the server — your connection dropped mid-way. Try again on a steadier network." : (err.message || "Couldn't process that file — try again or use the Settings → Reconcile uploader.");
+      sChatMsgs(p => [...p, { role: "assistant", content: msg }]);
     } finally { sChatLoading(false); }
   };
   const confirmRecon = () => {
