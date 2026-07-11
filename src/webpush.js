@@ -59,9 +59,31 @@ export async function getCurrentSubscription() {
   return sub ? sub.toJSON() : null;
 }
 
+// True when an existing PushSubscription was created with the given VAPID
+// public key. A subscription bound to a DIFFERENT key makes every server send
+// fail with 403 — the push service checks the signing key against the one the
+// subscription was created with. Returns true when the browser doesn't expose
+// options.applicationServerKey (can't tell — assume it's fine).
+export function subscriptionMatchesKey(sub, b64Key) {
+  try {
+    const raw = sub?.options?.applicationServerKey;
+    if (!raw) return true;
+    const cur = new Uint8Array(raw);
+    const want = urlBase64ToUint8Array(b64Key);
+    if (cur.length !== want.length) return false;
+    for (let i = 0; i < cur.length; i++) { if (cur[i] !== want[i]) return false; }
+    return true;
+  } catch { return true; }
+}
+
 // Ask permission + subscribe this browser. Returns the subscription as plain
 // JSON ({ endpoint, keys: { p256dh, auth } }) ready for the DB. Throws with a
 // user-showable message on every failure path.
+//
+// Self-healing: always fetches the server's CURRENT key (bypassing the cache),
+// and if an existing subscription is bound to a different key it is dropped
+// and re-created — otherwise a rotated/corrected VAPID key would leave the
+// device permanently 403ing with no way out but clearing site data.
 export async function subscribeDevice(fetchImpl = fetch) {
   if (!isPushSupported()) {
     throw new Error("This browser can't receive push. On iPhone: Share → Add to Home Screen first, then enable here.");
@@ -71,26 +93,17 @@ export async function subscribeDevice(fetchImpl = fetch) {
     throw new Error("Notification permission was denied — allow notifications for this site in browser settings.");
   }
   const reg = await navigator.serviceWorker.ready;
+  const key = await getVapidPublicKey(fetchImpl, true);
   const existing = await reg.pushManager.getSubscription();
-  if (existing) return existing.toJSON();
-
-  const key = await getVapidPublicKey(fetchImpl);
-  try {
-    const sub = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(key),
-    });
-    return sub.toJSON();
-  } catch {
-    // Most common cause: cached VAPID key no longer matches the server (key
-    // rotated). Refetch and retry once before giving up.
-    const fresh = await getVapidPublicKey(fetchImpl, true);
-    const sub = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(fresh),
-    });
-    return sub.toJSON();
+  if (existing) {
+    if (subscriptionMatchesKey(existing, key)) return existing.toJSON();
+    await existing.unsubscribe().catch(() => { });
   }
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(key),
+  });
+  return sub.toJSON();
 }
 
 // Unsubscribe this browser. Returns the endpoint that was removed (so the
