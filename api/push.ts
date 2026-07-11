@@ -62,6 +62,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (status === 404 || status === 410) {
       return res.status(410).json({ error: "Subscription expired — disable and re-enable push on that device", expired: true });
     }
+    if (status === 403 || status === 401) {
+      // Push services reject with 401/403 when the VAPID signing key doesn't
+      // match the key the device subscribed under — mismatched env values or
+      // keys rotated after subscribing.
+      return res.status(403).json({ error: "VAPID key mismatch (403) — verify VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY are from the same generate run (no quotes/spaces), redeploy, then Disable and re-enable push on this device", mismatch: true });
+    }
     console.error("[push] test send failed:", (e as Error).message);
     return res.status(502).json({ error: `Push service rejected the send (${status ?? "network"})` });
   }

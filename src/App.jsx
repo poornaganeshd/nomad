@@ -3187,8 +3187,9 @@ export default function Nomad() {
       const r = await syncNtfyToCloud(saved);
       if (r.ok) { showT(saved.enabled ? "Saved — daily cloud push is active" : "Notification settings saved", "success"); return; }
       const eb = r.res ? await r.res.json().catch(() => ({})) : {};
-      if (eb?.code === "42P01" || (eb?.message ?? "").includes("does not exist")) sDbSetupModal(true);
-      else showT(`Saved locally — cloud sync failed (${r.status})`, "error");
+      const ebMsg = String(eb?.message ?? "");
+      if (eb?.code === "42P01" || eb?.code === "PGRST205" || r.status === 404 || ebMsg.includes("does not exist") || ebMsg.includes("schema cache")) sDbSetupModal(true);
+      else showT(`Saved locally — cloud sync failed (${r.status}${ebMsg ? ": " + ebMsg.slice(0, 120) : ""})`, "error");
     } catch { showT("Saved locally — cloud sync failed", "error"); }
   };
 
@@ -3209,8 +3210,12 @@ export default function Nomad() {
         });
         if (!r.ok) {
           const eb = await r.json().catch(() => ({}));
-          if (eb?.code === "42P01" || (eb?.message ?? "").includes("does not exist")) { sDbSetupModal(true); return; }
-          throw new Error(`Enabled on this device, but saving to cloud failed (${r.status}) — daily reminders won't arrive until saved`);
+          // PostgREST reports a missing table as 42P01, PGRST205 ("...in the
+          // schema cache"), or a 404 depending on version — treat them all as
+          // "run the DB setup" rather than a dead-end error toast.
+          const ebMsg = String(eb?.message ?? "");
+          if (eb?.code === "42P01" || eb?.code === "PGRST205" || r.status === 404 || ebMsg.includes("does not exist") || ebMsg.includes("schema cache")) { sDbSetupModal(true); return; }
+          throw new Error(`Enabled on this device, but cloud save failed (${r.status}${eb?.code ? " " + eb.code : ""}${ebMsg ? ": " + ebMsg.slice(0, 140) : ""}) — daily reminders won't arrive until saved`);
         }
         fetch(`${SB_URL}/rest/v1/notification_prefs`, { method: "POST", headers: { ...sbH, "Prefer": "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify([{ id: "self" }]) }).catch(() => { });
         const registryUrl = import.meta.env.VITE_SUPABASE_URL;

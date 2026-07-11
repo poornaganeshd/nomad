@@ -12,9 +12,10 @@ import {
 // jsdom has no PushManager/Notification — install controllable fakes.
 const FAKE_KEY = "BPfKF0AsRy2tj7Op6H2q1QwZ8Yv7Fh3sBqmzC1TnGKlR5eXW9dJvNwq4iYxUuHkT2LhVgD8cA0M7pOI6E5nSmQE";
 
-function makeSubscription(endpoint = "https://push.example.com/sub/abc") {
+function makeSubscription(endpoint = "https://push.example.com/sub/abc", appServerKey = null) {
   return {
     endpoint,
+    options: appServerKey ? { applicationServerKey: appServerKey.buffer ?? appServerKey } : {},
     toJSON: () => ({ endpoint, keys: { p256dh: "p", auth: "a" } }),
     unsubscribe: vi.fn().mockResolvedValue(true),
   };
@@ -98,12 +99,23 @@ describe("subscribeDevice", () => {
     await expect(subscribeDevice()).rejects.toThrow(/denied/);
   });
 
-  it("returns existing subscription without re-subscribing", async () => {
-    const existing = makeSubscription("https://push.example.com/existing");
+  it("keeps an existing subscription bound to the current server key", async () => {
+    const existing = makeSubscription("https://push.example.com/existing", urlBase64ToUint8Array(FAKE_KEY));
     const { pushManager } = installPushEnv({ existingSub: existing });
-    const sub = await subscribeDevice(vi.fn());
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ publicKey: FAKE_KEY }) });
+    const sub = await subscribeDevice(fetchMock);
     expect(sub.endpoint).toBe("https://push.example.com/existing");
     expect(pushManager.subscribe).not.toHaveBeenCalled();
+    expect(existing.unsubscribe).not.toHaveBeenCalled();
+  });
+
+  it("always refetches the server key (ignores the localStorage cache)", async () => {
+    installPushEnv();
+    localStorage.setItem("nomad-vapid-key", "stale-cached-key");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ publicKey: FAKE_KEY }) });
+    await subscribeDevice(fetchMock);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem("nomad-vapid-key")).toBe(FAKE_KEY);
   });
 
   it("subscribes with the fetched VAPID key", async () => {
@@ -116,14 +128,15 @@ describe("subscribeDevice", () => {
     expect(arg.applicationServerKey).toBeInstanceOf(Uint8Array);
   });
 
-  it("retries once with a fresh key after a stale-key failure", async () => {
-    const { pushManager } = installPushEnv({ subscribeError: new Error("InvalidAccessError") });
-    localStorage.setItem("nomad-vapid-key", "stale-key0");
+  it("drops and re-creates a subscription bound to a DIFFERENT key (403 self-heal)", async () => {
+    const oldKey = new Uint8Array(65).fill(7);
+    const existing = makeSubscription("https://push.example.com/old", oldKey);
+    const { pushManager } = installPushEnv({ existingSub: existing });
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ publicKey: FAKE_KEY }) });
     const sub = await subscribeDevice(fetchMock);
+    expect(existing.unsubscribe).toHaveBeenCalled();
+    expect(pushManager.subscribe).toHaveBeenCalledTimes(1);
     expect(sub.endpoint).toBe("https://push.example.com/sub/abc");
-    expect(pushManager.subscribe).toHaveBeenCalledTimes(2);
-    expect(localStorage.getItem("nomad-vapid-key")).toBe(FAKE_KEY);
   });
 });
 
