@@ -35,8 +35,27 @@ CREATE INDEX IF NOT EXISTS idx_report_schedules_due
   ON report_schedules (next_send_at)
   WHERE is_active = true;
 
+CREATE TABLE IF NOT EXISTS notification_prefs (
+  id             TEXT        PRIMARY KEY DEFAULT 'self',
+  enabled        BOOLEAN     NOT NULL DEFAULT false,
+  ntfy_server    TEXT        NOT NULL DEFAULT 'https://ntfy.sh',
+  ntfy_topic     TEXT        NOT NULL DEFAULT '',
+  last_run_date  DATE,
+  created_at     TIMESTAMPTZ DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint      TEXT        PRIMARY KEY,
+  subscription  JSONB       NOT NULL,
+  user_agent    TEXT,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
 ALTER TABLE report_schedules    DISABLE ROW LEVEL SECURITY;
 ALTER TABLE report_delivery_log DISABLE ROW LEVEL SECURITY;
+ALTER TABLE notification_prefs  DISABLE ROW LEVEL SECURITY;
+ALTER TABLE push_subscriptions  DISABLE ROW LEVEL SECURITY;
 
 ALTER TABLE report_schedules ADD COLUMN IF NOT EXISTS custom_days         INTEGER;
 ALTER TABLE report_schedules ADD COLUMN IF NOT EXISTS send_hour           INTEGER NOT NULL DEFAULT 6;

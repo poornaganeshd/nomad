@@ -29,7 +29,7 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 
 ## Baselines (verify before/after edits; don't regress)
 
-- **Tests:** 552 pass / 0 fail, 26 files (`npm test`).
+- **Tests:** 549 pass / 0 fail, 27 files (`npm test`).
 - **Lint:** 0 errors / 12 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
 - **Build:** succeeds (~1.16 MB bundle; the >500 kB chunk warning is expected).
@@ -109,25 +109,35 @@ An open tab fetches Supabase only once on mount, so a row added on another devic
 `sbDelete` is a soft delete (PATCH `deleted_at=now()`); `sbDeleteWhere` is a hard DELETE (bulk/nuke). `sbGet` appends `&deleted_at=is.null` only for `SOFT_DELETE_TABLES` = {expenses, incomes, transfers, recurring, events, splits}. Optimistic concurrency: recurring edits send `If-Unmodified-Since` from version cache `nomad-record-versions-v1`; 412 → conflict toast + discard; flush strips the header so offline replays always win. Recurring is the only table with conflict detection (the others are append-only).
 
 ### Local backup & PWA
-Full state mirrored to localStorage `nomad-v5` (loaded as fallback). Categories/incomeSources optionally sync cross-device via the **`user_prefs`** JSONB table (single row keyed `"nomad"`, dedupeKey `user_prefs:nomad`) — `load()` probes it once: present → `prefsSync="on"` (a debounced effect pushes `{categories, incomeSources}`, and remote is adopted when present & not pending a local upsert); absent (un-migrated) → `prefsSync="off"`, stay localStorage-only with **zero error toasts**. So these still work offline/un-migrated, and follow you across devices once `nomad_setup.sql` is re-run. `nomad-v5` remains the local fallback + backup-export source. `public/sw.js` is cache-first (app shell); skips Supabase + non-OK/opaque responses; bump `CACHE_NAME` when changing it (Vite plugin auto-injects a build-version suffix). No push notifications (removed) — reminders are in-app only.
+Full state mirrored to localStorage `nomad-v5` (loaded as fallback). Categories/incomeSources optionally sync cross-device via the **`user_prefs`** JSONB table (single row keyed `"nomad"`, dedupeKey `user_prefs:nomad`) — `load()` probes it once: present → `prefsSync="on"` (a debounced effect pushes `{categories, incomeSources}`, and remote is adopted when present & not pending a local upsert); absent (un-migrated) → `prefsSync="off"`, stay localStorage-only with **zero error toasts**. So these still work offline/un-migrated, and follow you across devices once `nomad_setup.sql` is re-run. `nomad-v5` remains the local fallback + backup-export source. `public/sw.js` is cache-first (app shell); skips Supabase + non-OK/opaque responses (and ignores all non-GET, so the ntfy POST passes through); bump `CACHE_NAME` when changing it (Vite plugin auto-injects a build-version suffix).
+
+### Push notifications (Web Push + ntfy)
+Bill/IOU reminders as real phone push, two channels behind one Settings → "Push Notifications" card:
+
+**Web Push (primary, "real app" channel):** browser-native push via VAPID — notifications land in the device shade under NOMAD's name/icon, no extra app. `src/webpush.js` (tests `src/__tests__/webpush.test.js`) handles permission + `PushManager` subscribe using the VAPID public key from `GET /api/push` (cached in localStorage `nomad-vapid-key`, auto-refetch on stale-key subscribe failure). Subscriptions are stored in the user's own Supabase `push_subscriptions` table (endpoint PK, JSONB body); "Enable on this device" also upserts `notification_prefs` (dedupe stamp lives there) and registers in `user_registry`. `public/sw.js` has the `push`/`notificationclick` handlers (payload `{title, body, tag, url}`). Server side: `api/push.ts` (GET public key / POST canned test push — content fixed server-side so it can't be a spam relay; 404/410 → 410 expired) and `api/_webpush.ts` (`sendToSubscriptions` fans the daily digest out, returns expired endpoints which the cron prunes). **Owner env (only setup): `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`** — generate via `npx web-push generate-vapid-keys`. iOS needs Add-to-Home-Screen (16.4+); the UI explains when `PushManager` is absent. Tests: `api/__tests__/webpush.test.ts`, `api/__tests__/push.test.ts`.
+
+**ntfy (optional alternative):** via the ntfy app (`src/ntfy.js`, tests `src/__tests__/ntfy.test.js`). Browser POSTs straight to the ntfy server (ntfy.sh is CORS-whitelisted in `vercel.json` CSP `connect-src`; custom servers must be added there). Config in localStorage `nomad-ntfy-v1` + `notification_prefs` row.
+
+**Shared plumbing:** the `send-reports` cron builds ONE due-bill digest per user (`api/_notify.ts` `buildBillDigest`) and fans it out to whichever channels are on, deduped once per IST day via `notification_prefs.last_run_date` (upserted, so it works even when only web push is on). Client-side legs fire while a tab is open: the `App.jsx` bill-reminders effect mirrors `checkBillReminders()` output to `publishNtfy` AND to `registration.showNotification` (works in local-only mode, no server). `api/_notify.ts` is a hand-port of `financeUtils.js` recurring-due math (api/ is CommonJS, can't import ESM `src/`) — change both together; guarded by `api/__tests__/notify.test.ts`.
 
 ### Backend (`api/`)
 | File | Route | Purpose |
 |---|---|---|
 | `sync.ts` | `POST /api/sync` | Supabase write proxy w/ idempotency. Validates host is exactly `<ref>.supabase.co` (anti-SSRF). |
-| `send-reports.ts` | `POST /api/send-reports` (cron `0 2 * * *`) | iterate `user_registry`, email scheduled reports (concurrency 5, 30s/user) |
+| `send-reports.ts` | `POST /api/send-reports` (cron `0 2 * * *`) | iterate `user_registry`: email scheduled reports (concurrency 5, 30s/user) **and** push due-bill ntfy digests (`_notify.ts`). Email leg skipped (not 500) if Gmail creds unset, so ntfy runs standalone. |
 | `send-now.ts` | `POST /api/send-now` | manual report; caller's URL must be in `user_registry` |
 | `setup-user.ts` | `POST /api/setup-user` | create report tables via Supabase Management API |
+| `push.ts` | `GET/POST /api/push` | Web Push: GET → VAPID public key; POST `{subscription}` → canned test notification (fixed content; 410 on expired) |
 | `food-vision.ts` | `POST /api/food-vision` | **food nutrition AND receipt OCR** via `type: "food"\|"receipt"` body param (no separate receipt endpoint) |
 | `ai-analyze.ts` | `POST /api/ai-analyze` | **omnibus AI endpoint** — 13 modes: `voice-parse`, `subscriptions`, `anomaly`, `duplicates`, `merchants`, `narrative`, `whatif`, `budget-suggest`, `mood-correlation`, `tax`, `split-cats`, `smart-reminders`, `goal-coach`. Each mode has its own system prompt, user-prompt builder, JSON validator, and sanitizer. Returns 503 if no AI providers configured, 400 for unknown mode, 502 on bad JSON. |
 | `ai-insights.ts` / `ai-categorize.ts` / `ai-chat.ts` | `POST /api/ai-*` | finance AI; client redacts PII first |
 | `_shared.ts` | — | Supabase/period/schedule helpers, HTML/CSV email builders |
 | `_ai-provider.ts` | — | Gemini→Groq→NVIDIA waterfall; `callText`/`callVision`/`callVisionWithProvider`, `extractJSON` |
 
-Cron in `vercel.json` (only `send-reports`). Env: `VITE_SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY`, `GMAIL_USER`/`GMAIL_APP_PASSWORD`, `CRON_SECRET`, and `GEMINI_API_KEY`/`GROQ_API_KEY`/`NVIDIA_API_KEY` (any one enables AI).
+Cron in `vercel.json` (only `send-reports`). Env: `VITE_SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY`, `GMAIL_USER`/`GMAIL_APP_PASSWORD`, `CRON_SECRET`, `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY`/`VAPID_SUBJECT` (Web Push), and `GEMINI_API_KEY`/`GROQ_API_KEY`/`NVIDIA_API_KEY` (any one enables AI).
 
 ### Database
-`nomad_setup.sql` is idempotent (safe re-run; `IF NOT EXISTS` / `DROP ... IF EXISTS`). Core tables: `expenses`, `incomes`, `transfers`, `settlements`, `splits`, `recurring`, `events`, `wallet_balances`, `user_prefs` (cross-device JSONB prefs — categories / income sources). Email: `report_schedules`, `report_delivery_log`. Sync: `nomad_sync_keys`. Owner-only: `user_registry`. Routine: `daily_logs`, `user_config`. RLS disabled everywhere.
+`nomad_setup.sql` is idempotent (safe re-run; `IF NOT EXISTS` / `DROP ... IF EXISTS`). Core tables: `expenses`, `incomes`, `transfers`, `settlements`, `splits`, `recurring`, `events`, `wallet_balances`, `user_prefs` (cross-device JSONB prefs — categories / income sources). Email: `report_schedules`, `report_delivery_log`. Push: `notification_prefs` (ntfy topic + shared `last_run_date` dedupe), `push_subscriptions` (Web Push, one row per device). Sync: `nomad_sync_keys`. Owner-only: `user_registry`. Routine: `daily_logs`, `user_config`. RLS disabled everywhere.
 
 ## Key conventions / gotchas
 

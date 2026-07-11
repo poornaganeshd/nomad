@@ -266,6 +266,33 @@ ALTER TABLE events   ADD COLUMN IF NOT EXISTS participants  JSONB DEFAULT '[]';
 ALTER TABLE report_schedules    DISABLE ROW LEVEL SECURITY;
 ALTER TABLE report_delivery_log DISABLE ROW LEVEL SECURITY;
 
+-- ── 2b. PUSH NOTIFICATION PREFS (ntfy) ───────────────────────
+-- One row per user (id='self'). Read by the send-reports cron to push a due-
+-- bill digest to the user's ntfy topic even when no NOMAD tab is open.
+CREATE TABLE IF NOT EXISTS notification_prefs (
+  id             TEXT        PRIMARY KEY DEFAULT 'self',
+  enabled        BOOLEAN     NOT NULL DEFAULT false,
+  ntfy_server    TEXT        NOT NULL DEFAULT 'https://ntfy.sh',
+  ntfy_topic     TEXT        NOT NULL DEFAULT '',
+  last_run_date  DATE,
+  created_at     TIMESTAMPTZ DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE notification_prefs DISABLE ROW LEVEL SECURITY;
+
+-- Web Push browser subscriptions (one row per device/browser that tapped
+-- "Enable on this device"). The send-reports cron sends the daily due-bill
+-- digest to every row via the Web Push protocol; 404/410 rows are pruned.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint      TEXT        PRIMARY KEY,
+  subscription  JSONB       NOT NULL,
+  user_agent    TEXT,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE push_subscriptions DISABLE ROW LEVEL SECURITY;
+
 -- ── 3. USER REGISTRY (owner's Supabase only) ─────────────────
 
 CREATE TABLE IF NOT EXISTS user_registry (

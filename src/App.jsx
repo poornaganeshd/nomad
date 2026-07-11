@@ -5,6 +5,8 @@ import { PieChart, Pie, Cell } from "recharts";
 import RoutineApp from "./Routine";
 import { flushSyncQueue, getPendingSyncCount, getPendingSyncSummary, getDeadLetterCount, clearDeadLetter, sendSupabaseRequest, subscribePendingSync, subscribeSyncDrops, isPendingDelete, isPendingUpsert, hasPendingDedupeKey } from "./offlineSync";
 import { checkBillReminders } from "./billReminders";
+import { getNtfyConfig, saveNtfyConfig, isNtfyConfigured, publishNtfy } from "./ntfy";
+import { isPushSupported, getCurrentSubscription, subscribeDevice, unsubscribeDevice, sendTestPush } from "./webpush";
 import { computeStreak, loadStreakStore, saveStreakStore } from "./streak";
 import { getExchangeRate, saveCurrencyMeta, getCurrencyMeta, getRateMeta } from "./currencyConverter";
 import { hapticForToast, hapticLight, hapticMedium, hapticSelection, hapticsEnabled, setHapticsEnabled } from "./haptics";
@@ -1559,6 +1561,17 @@ export default function Nomad() {
   const [module, setModule] = useState("finance");
   const [showSetup, setShowSetup] = useState(false);
   const [backendOpen, sBackendOpen] = useState(false);
+  const [ntfyOpen, sNtfyOpen] = useState(false);
+  const [ntfyCfg, sNtfyCfg] = useState(getNtfyConfig);
+  const [ntfyTesting, sNtfyTesting] = useState(false);
+  // Web Push (device) state: checking → unsupported | denied | off | on
+  const [pushState, sPushState] = useState("checking");
+  const [pushBusy, sPushBusy] = useState(false);
+  useEffect(() => {
+    if (!isPushSupported()) { sPushState("unsupported"); return; }
+    if (Notification.permission === "denied") { sPushState("denied"); return; }
+    getCurrentSubscription().then(s => sPushState(s ? "on" : "off")).catch(() => sPushState("off"));
+  }, []);
   const [haptics, sHaptics] = useState(hapticsEnabled());
   const [reportOpen, sReportOpen] = useState(false);
   const [reportEmail, sReportEmail] = useState("");
@@ -1808,6 +1821,25 @@ export default function Nomad() {
         setTimeout(() => sToasts(prev => prev.filter(t => t.id !== id)), 4000);
       }, i * 700);
     });
+    // Mirror the same reminders to ntfy (real phone push). checkBillReminders
+    // already de-dupes to once-per-day per bill, so this fires at most once a
+    // day per item. Fire-and-forget; publishNtfy no-ops when not configured.
+    const nc = getNtfyConfig();
+    if (isNtfyConfigured(nc)) {
+      reminders.forEach(r => {
+        publishNtfy(nc, { title: r.type === "warn" ? "Payment due" : "Bill reminder", message: r.msg, type: r.type });
+      });
+    }
+    // Also surface them as system notifications (notification shade) when the
+    // user granted permission — works in every mode incl. local-only, no
+    // server involved: the SW registration shows them directly.
+    if (typeof Notification !== "undefined" && Notification.permission === "granted" && "serviceWorker" in navigator) {
+      navigator.serviceWorker.ready.then(reg => {
+        reminders.forEach(r => {
+          reg.showNotification(r.type === "warn" ? "Payment due" : "Bill reminder", { body: r.msg, icon: "/icon-192.png", badge: "/icon-192.png", tag: "nomad-local-" + r.id }).catch(() => { });
+        });
+      }).catch(() => { });
+    }
   }, [loaded, rec, sp]);
 
   useEffect(() => {
@@ -3121,6 +3153,104 @@ export default function Nomad() {
     sReportSaving(false);
   };
 
+  // Persist ntfy prefs to the user's own Supabase (notification_prefs, one row
+  // id='self') so the daily send-reports cron can push bill reminders when no
+  // NOMAD tab is open. localStorage already holds the same config for the
+  // client-side (app-open) leg. Also registers this Supabase in the owner's
+  // user_registry so the cron knows to visit it.
+  const syncNtfyToCloud = async (cfg) => {
+    if (!SB_ENABLED) return { ok: true, localOnly: true };
+    const r = await fetch(`${SB_URL}/rest/v1/notification_prefs`, {
+      method: "POST",
+      headers: { ...sbH, "Prefer": "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify([{ id: "self", enabled: !!cfg.enabled, ntfy_server: cfg.server || "https://ntfy.sh", ntfy_topic: cfg.topic || "", updated_at: new Date().toISOString() }]),
+    });
+    if (r.ok) {
+      const registryUrl = import.meta.env.VITE_SUPABASE_URL;
+      const registryKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+      if (registryUrl && registryKey) {
+        fetch(`${registryUrl}/rest/v1/user_registry`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "apikey": registryKey, "Authorization": `Bearer ${registryKey}`, "Prefer": "resolution=merge-duplicates" },
+          body: JSON.stringify([{ supabase_url: SB_URL, anon_key: _creds.sbKey }]),
+        }).catch(() => { });
+      }
+    }
+    return { ok: r.ok, status: r.status, res: r };
+  };
+
+  const saveNtfy = async () => {
+    const saved = saveNtfyConfig(ntfyCfg);
+    sNtfyCfg(saved);
+    if (!SB_ENABLED) { showT("Saved on this device — add Supabase for closed-app push", "info"); return; }
+    try {
+      const r = await syncNtfyToCloud(saved);
+      if (r.ok) { showT(saved.enabled ? "Saved — daily cloud push is active" : "Notification settings saved", "success"); return; }
+      const eb = r.res ? await r.res.json().catch(() => ({})) : {};
+      if (eb?.code === "42P01" || (eb?.message ?? "").includes("does not exist")) sDbSetupModal(true);
+      else showT(`Saved locally — cloud sync failed (${r.status})`, "error");
+    } catch { showT("Saved locally — cloud sync failed", "error"); }
+  };
+
+  // ── Web Push (device) handlers ─────────────────────────────────────────
+  // Enable = browser permission + PushManager subscribe (src/webpush.js), then
+  // store the subscription in the user's own Supabase so the daily cron can
+  // push with the app closed. Without Supabase the subscription still works
+  // for the test button and app-open notifications, but no daily digest.
+  const enableDevicePush = async () => {
+    sPushBusy(true);
+    try {
+      const sub = await subscribeDevice();
+      if (SB_ENABLED) {
+        const r = await fetch(`${SB_URL}/rest/v1/push_subscriptions`, {
+          method: "POST",
+          headers: { ...sbH, "Prefer": "resolution=merge-duplicates,return=minimal" },
+          body: JSON.stringify([{ endpoint: sub.endpoint, subscription: sub, user_agent: (navigator.userAgent || "").slice(0, 200) }]),
+        });
+        if (!r.ok) {
+          const eb = await r.json().catch(() => ({}));
+          if (eb?.code === "42P01" || (eb?.message ?? "").includes("does not exist")) { sDbSetupModal(true); return; }
+          throw new Error(`Enabled on this device, but saving to cloud failed (${r.status}) — daily reminders won't arrive until saved`);
+        }
+        fetch(`${SB_URL}/rest/v1/notification_prefs`, { method: "POST", headers: { ...sbH, "Prefer": "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify([{ id: "self" }]) }).catch(() => { });
+        const registryUrl = import.meta.env.VITE_SUPABASE_URL;
+        const registryKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+        if (registryUrl && registryKey) {
+          fetch(`${registryUrl}/rest/v1/user_registry`, { method: "POST", headers: { "Content-Type": "application/json", "apikey": registryKey, "Authorization": `Bearer ${registryKey}`, "Prefer": "resolution=merge-duplicates" }, body: JSON.stringify([{ supabase_url: SB_URL, anon_key: _creds.sbKey }]) }).catch(() => { });
+        }
+      }
+      sPushState("on");
+      showT(SB_ENABLED ? "Push enabled — tap Send test to verify" : "Enabled for this device — add Supabase to also get the daily digest with the app closed", "success");
+    } catch (e) {
+      if (typeof Notification !== "undefined" && Notification.permission === "denied") sPushState("denied");
+      showT(e?.message || "Couldn't enable push", "error");
+    } finally { sPushBusy(false); }
+  };
+
+  const testDevicePush = async () => {
+    sPushBusy(true);
+    try {
+      const sub = await getCurrentSubscription();
+      if (!sub) throw new Error("Not subscribed on this device — tap Enable first");
+      await sendTestPush(sub);
+      showT("Test sent — check your notification shade", "success");
+    } catch (e) { showT(e?.message || "Test failed", "error"); }
+    finally { sPushBusy(false); }
+  };
+
+  const disableDevicePush = async () => {
+    sPushBusy(true);
+    try {
+      const endpoint = await unsubscribeDevice();
+      if (endpoint && SB_ENABLED) {
+        fetch(`${SB_URL}/rest/v1/push_subscriptions?endpoint=eq.${encodeURIComponent(endpoint)}`, { method: "DELETE", headers: sbH }).catch(() => { });
+      }
+      sPushState("off");
+      showT("Push disabled on this device", "info");
+    } catch { showT("Couldn't disable push", "error"); }
+    finally { sPushBusy(false); }
+  };
+
   const runDbSetup = async () => {
     if (!dbSetupToken.trim()) { showT("Enter your Supabase access token", "error"); return; }
     sDbSetupRunning(true);
@@ -3393,6 +3523,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
           </div>}
         </div>
         <div style={{ ...cc, padding: "14px 20px", marginBottom: 14 }}><div onClick={() => sBackendOpen(v => !v)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600 }}>Backend</div><span style={{ fontSize: 11, color: "var(--muted)" }}>{backendOpen ? "▲" : "▼"}</span></div>{backendOpen && <div style={{ marginTop: 14 }}><div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}><div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: "var(--bg)", borderRadius: 10, border: "1px solid var(--border)" }}><div style={{ width: 8, height: 8, borderRadius: "50%", background: _creds.sbUrl ? "#6BAA75" : "#FBBF24", flexShrink: 0 }} /><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 11, fontWeight: 700, fontFamily: "var(--font-h)", color: "var(--text)" }}>Supabase</div><div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{_creds.sbUrl ? _creds.sbUrl.replace("https://", "").replace(".supabase.co", "") + ".supabase.co" : "Not configured"}</div></div></div><div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: "var(--bg)", borderRadius: 10, border: "1px solid var(--border)" }}><div style={{ width: 8, height: 8, borderRadius: "50%", background: _creds.cloudName ? "#6BAA75" : "#FBBF24", flexShrink: 0 }} /><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 11, fontWeight: 700, fontFamily: "var(--font-h)", color: "var(--text)" }}>Cloudinary</div><div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 1 }}>{_creds.cloudName ? (_creds.apiKey ? _creds.cloudName + " (signed)" : _creds.cloudName + " (unsigned preset)") : "Not configured"}</div></div></div></div><div style={{ display: "flex", gap: 8, marginBottom: 8 }}><button onClick={() => { const data = JSON.stringify(_creds, null, 2); const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type: "application/json" })); a.download = "nomad_credentials.json"; a.click(); showT("Credentials exported", "success"); }} style={{ flex: 1, padding: "11px", border: "1.5px solid #6BAA75", borderRadius: 10, background: "#6BAA7512", color: "#6BAA75", fontFamily: "var(--font-h)", fontSize: 12, cursor: "pointer", fontWeight: 600 }}>Export</button><label style={{ flex: 1, padding: "11px", border: "1.5px solid #7B8CDE", borderRadius: 10, background: "#7B8CDE12", color: "#7B8CDE", fontFamily: "var(--font-h)", fontSize: 12, cursor: "pointer", fontWeight: 600, textAlign: "center" }}>Import<input type="file" accept=".json" style={{ display: "none" }} onChange={e => { const f = e.target.files[0]; if (!f) return; const r = new FileReader(); r.onerror = () => showT("Failed to read file", "error"); r.onload = ev => { try { const d = JSON.parse(ev.target.result); if (!d.sbUrl || !d.sbKey) { showT("Invalid credentials file", "error"); return; } localStorage.setItem("nomad-credentials", JSON.stringify(d)); showT("Credentials imported — reloading…", "success"); setTimeout(() => window.location.reload(), 1000); } catch { showT("Failed to read file", "error"); } }; r.readAsText(f); e.target.value = ""; }} /></label></div><button onClick={() => setShowSetup(true)} style={{ width: "100%", padding: "11px", border: "1.5px solid var(--border)", borderRadius: 10, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, cursor: "pointer", fontWeight: 600 }}>Edit Credentials</button></div>}</div>
+        <div style={{ ...cc, padding: "14px 20px", marginBottom: 14 }}><div onClick={() => sNtfyOpen(v => !v)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer" }}><div style={{ display: "flex", alignItems: "center", gap: 8 }}><div style={{ width: 8, height: 8, borderRadius: "50%", background: (pushState === "on" || isNtfyConfigured(ntfyCfg)) ? "#6BAA75" : "#FBBF24", flexShrink: 0 }} /><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600 }}>Push Notifications</div></div><span style={{ fontSize: 11, color: "var(--muted)" }}>{ntfyOpen ? "▲" : "▼"}</span></div>{ntfyOpen && <div style={{ marginTop: 14 }}><div style={{ padding: "12px 14px", background: "var(--bg)", borderRadius: 12, border: "1px solid var(--border)", marginBottom: 16 }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}><div style={{ width: 8, height: 8, borderRadius: "50%", background: pushState === "on" ? "#6BAA75" : pushState === "denied" ? "#D4726A" : "#FBBF24", flexShrink: 0 }} /><div style={{ fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 700, color: "var(--text)" }}>This device{pushState === "on" ? " — enabled ✓" : ""}</div></div><p style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0, marginBottom: 10 }}>{pushState === "unsupported" ? "This browser can't receive push yet. On iPhone: Share → Add to Home Screen, open NOMAD from the new icon, then enable here (iOS 16.4+). Android Chrome works directly." : pushState === "denied" ? "Notifications are blocked for this site. Allow them in your browser's site settings, then reload this page." : pushState === "on" ? (SB_ENABLED ? "Real notifications in your phone's shade, like any other app. A daily bill digest arrives even when NOMAD is closed." : "Enabled for this device. Connect Supabase to also receive the daily digest when NOMAD is closed.") : "Real notifications in your phone's notification shade — like any other app, nothing to install. Tap enable and allow notifications."}</p>{pushState === "off" || pushState === "checking" ? <button disabled={pushBusy || pushState === "checking"} onClick={enableDevicePush} style={{ width: "100%", padding: "11px", border: "none", borderRadius: 10, background: pushBusy ? "var(--border)" : "#E07A5F", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12.5, fontWeight: 700, cursor: pushBusy ? "default" : "pointer", opacity: pushBusy ? 0.7 : 1 }}>{pushBusy ? "Enabling…" : "Enable notifications on this device"}</button> : pushState === "on" ? <div style={{ display: "flex", gap: 8 }}><button disabled={pushBusy} onClick={testDevicePush} style={{ flex: 1.4, padding: "11px", border: "1.5px solid #7B8CDE", borderRadius: 10, background: pushBusy ? "var(--border)" : "#7B8CDE12", color: "#7B8CDE", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: pushBusy ? "default" : "pointer", opacity: pushBusy ? 0.7 : 1 }}>{pushBusy ? "Working…" : "Send test"}</button><button disabled={pushBusy} onClick={disableDevicePush} style={{ flex: 1, padding: "11px", border: "1.5px solid var(--border)", borderRadius: 10, background: "transparent", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: pushBusy ? "default" : "pointer" }}>Disable</button></div> : null}</div><div style={{ fontSize: 10.5, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 700, letterSpacing: "0.8px", marginBottom: 8 }}>NTFY (OPTIONAL — USES THE NTFY APP)</div><p style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 0, marginBottom: 12 }}>Alternative channel via the free <strong>ntfy</strong> app (ntfy.sh): subscribe to the topic below in ntfy, then Save. Topics are public — pick something long & unguessable.</p><label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, cursor: "pointer", fontSize: 13, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--text)" }}><input type="checkbox" checked={ntfyCfg.enabled} onChange={e => sNtfyCfg(c => ({ ...c, enabled: e.target.checked }))} style={{ width: 16, height: 16, accentColor: "#E07A5F", cursor: "pointer" }} />Enable ntfy push</label><div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600, marginBottom: 4 }}>Server</div><input value={ntfyCfg.server} onChange={e => sNtfyCfg(c => ({ ...c, server: e.target.value }))} placeholder="https://ntfy.sh" style={{ width: "100%", boxSizing: "border-box", padding: "10px 11px", border: "1px solid var(--border)", borderRadius: 10, marginBottom: 10, fontSize: 13, background: "var(--card)", color: "var(--text)", fontFamily: "var(--font-b)" }} /><div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600, marginBottom: 4 }}>Topic</div><input value={ntfyCfg.topic} onChange={e => sNtfyCfg(c => ({ ...c, topic: e.target.value }))} placeholder="nomad-a8f3k2q" style={{ width: "100%", boxSizing: "border-box", padding: "10px 11px", border: "1px solid var(--border)", borderRadius: 10, marginBottom: 12, fontSize: 13, background: "var(--card)", color: "var(--text)", fontFamily: "var(--font-b)" }} /><div style={{ display: "flex", gap: 8 }}><button onClick={saveNtfy} style={{ flex: 1, padding: "11px", border: "1.5px solid #6BAA75", borderRadius: 10, background: "#6BAA7512", color: "#6BAA75", fontFamily: "var(--font-h)", fontSize: 12, cursor: "pointer", fontWeight: 600 }}>Save</button><button disabled={ntfyTesting || !ntfyCfg.topic.trim()} onClick={async () => { const saved = saveNtfyConfig(ntfyCfg); sNtfyCfg(saved); sNtfyTesting(true); const r = await publishNtfy({ ...saved, enabled: true }, { title: "NOMAD test", message: "ntfy is connected — you'll get bill & IOU reminders here.", type: "success" }); sNtfyTesting(false); showT(r.ok ? "Test push sent — check your ntfy app" : ("Test failed" + (r.status ? " (HTTP " + r.status + ")" : r.error ? " — " + r.error : "")), r.ok ? "success" : "error"); }} style={{ flex: 1, padding: "11px", border: "1.5px solid #7B8CDE", borderRadius: 10, background: ntfyTesting ? "var(--border)" : "#7B8CDE12", color: "#7B8CDE", fontFamily: "var(--font-h)", fontSize: 12, cursor: (ntfyTesting || !ntfyCfg.topic.trim()) ? "not-allowed" : "pointer", fontWeight: 600, opacity: (ntfyTesting || !ntfyCfg.topic.trim()) ? 0.6 : 1 }}>{ntfyTesting ? "Sending…" : "Send test"}</button></div></div>}</div>
         <div style={{ ...cc, padding: "14px 20px", marginBottom: 14 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "var(--muted)", marginBottom: 12, letterSpacing: "0.5px", fontWeight: 600 }}>Sync Status</div><div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", background: "var(--bg)", borderRadius: 10, border: "1px solid var(--border)", marginBottom: 10 }}><div><div style={{ fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--text)" }}>{online ? (pendingSync > 0 ? `${pendingSync} change${pendingSync === 1 ? "" : "s"} pending` : "All changes synced") : "Offline — changes will sync when online"}</div><div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2, fontFamily: "var(--font-h)" }}>{online ? "Connected to Supabase" : "Working from local copy"}</div></div><div style={{ width: 8, height: 8, borderRadius: "50%", background: !online ? "#D4726A" : pendingSync > 0 ? "#FBBF24" : "#6BAA75", flexShrink: 0 }} /></div><div style={{ display: "flex", gap: 6 }}><button disabled={!online || pendingSync === 0} onClick={() => { flushSyncQueue().then(r => { if (r.synced > 0) showT(`Synced ${r.synced} change${r.synced === 1 ? "" : "s"}`, "success"); else if (r.pending > 0) showT(`${r.pending} change${r.pending === 1 ? "" : "s"} still pending — server may be unreachable`, "info"); else showT("Nothing to sync", "info"); }).catch(() => showT("Sync failed", "error")); }} style={{ flex: 1, padding: "10px", border: "1.5px solid var(--border)", borderRadius: 10, background: "var(--card)", color: (!online || pendingSync === 0) ? "var(--muted)" : "var(--text)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: (!online || pendingSync === 0) ? "not-allowed" : "pointer", opacity: (!online || pendingSync === 0) ? 0.5 : 1 }}>Push pending</button><button disabled={!online || !SB_ENABLED} onClick={() => { showT("Pulling latest from cloud…", "info"); load({ skipLocal: true }).then(ok => { showT(ok ? "Pulled latest from cloud ✓" : "Pull failed — check network or credentials", ok ? "success" : "error"); }).catch(() => showT("Pull failed", "error")); }} title={!SB_ENABLED ? "Add Supabase credentials first" : ""} style={{ flex: 1, padding: "10px", border: `1.5px solid ${(online && SB_ENABLED) ? "#7B8CDE" : "var(--border)"}`, borderRadius: 10, background: (online && SB_ENABLED) ? "#7B8CDE12" : "var(--card)", color: (online && SB_ENABLED) ? "#7B8CDE" : "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: (online && SB_ENABLED) ? "pointer" : "not-allowed", opacity: (online && SB_ENABLED) ? 1 : 0.5 }}>Pull from cloud</button></div>{deadLetterCount > 0 && <div style={{ marginTop: 10, padding: "10px 12px", background: "#D4726A12", border: "1px solid #D4726A30", borderRadius: 10 }}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><div style={{ fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, color: "#D4726A" }}>{deadLetterCount} failed change{deadLetterCount === 1 ? "" : "s"}</div><button onClick={() => { clearDeadLetter(); sDeadLetterCount(0); showT("Failed queue cleared", "info"); }} style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 600, background: "none", border: "none", color: "#D4726A", cursor: "pointer", padding: "2px 6px" }}>Dismiss</button></div><div style={{ fontSize: 10, color: "var(--muted)", marginTop: 3, fontFamily: "var(--font-b)" }}>These changes couldn't be saved after 3 retries. They've been discarded from the queue.</div></div>}</div>
         {(() => { const count = ex.filter(rowHasLocalReceipt).length + inc.filter(rowHasLocalReceipt).length; if (count === 0) return null; return <div style={{ ...cc, padding: "14px 20px", marginBottom: 14, borderLeft: "3px solid #FBBF24" }}><div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}><div><div style={{ fontFamily: "var(--font-h)", fontSize: 13, color: "#c8820a", fontWeight: 700, letterSpacing: "0.5px" }}>Local Receipts</div><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{count} receipt{count === 1 ? "" : "s"} saved on this device only</div></div><div style={{ fontSize: 11, color: "#c8820a", fontWeight: 700, fontFamily: "var(--font-h)", background: "#FBBF2415", borderRadius: 8, padding: "4px 10px" }}>{count}</div></div><p style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.5, marginBottom: 10 }}>These were attached while offline or when Cloudinary upload failed. They're stored as base64 in the database (large rows). Tap below to re-upload to Cloudinary.</p>{(() => { const rows = [...ex.filter(rowHasLocalReceipt).map(r => ({ ...r, _k: "E" })), ...inc.filter(rowHasLocalReceipt).map(r => ({ ...r, _k: "I" }))]; return <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 10 }}>{rows.slice(0, 8).map(r => <div key={r._k + r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 11, fontFamily: "var(--font-h)", color: "var(--text)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 9px" }}><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><span style={{ fontWeight: 700 }}>{fmt(r.amount)}</span>{r.note ? " · " + dispNote(r.note) : ""}</span><span style={{ flexShrink: 0, color: "var(--muted)", fontWeight: 600 }}>{r.date || ""}</span></div>)}{rows.length > 8 && <div style={{ fontSize: 10, color: "var(--muted)", textAlign: "center", fontFamily: "var(--font-b)" }}>…and {rows.length - 8} more</div>}</div>; })()}<button disabled={lrMigrating || !_creds.cloudName || !online} onClick={migrateLocalReceipts} style={{ width: "100%", padding: "10px", border: "1.5px solid #c8820a", borderRadius: 10, background: lrMigrating ? "var(--border)" : "#FBBF2412", color: "#c8820a", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: (lrMigrating || !_creds.cloudName || !online) ? "not-allowed" : "pointer", opacity: (lrMigrating || !_creds.cloudName || !online) ? 0.5 : 1 }}>{lrMigrating ? "Uploading…" : !_creds.cloudName ? "Add Cloudinary credentials first" : !online ? "Offline — connect to retry" : `Re-upload ${count} receipt${count === 1 ? "" : "s"} to Cloudinary`}</button><button disabled={lrMigrating} onClick={discardLocalReceipts} style={{ width: "100%", padding: "8px", marginTop: 8, border: "none", borderRadius: 8, background: "none", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 600, cursor: lrMigrating ? "not-allowed" : "pointer", textDecoration: "underline", opacity: lrMigrating ? 0.4 : 1 }}>Already in cloud? Discard local cop{count === 1 ? "y" : "ies"}</button></div>; })()}
         <div style={{ ...cc, padding: 20, marginBottom: 14 }}><div onClick={() => { sRecDelOpen(o => !o); if (!recDelOpen && recDelItems === null) loadRecentlyDeleted(); }} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", marginBottom: recDelOpen ? 12 : 0 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600 }}>Recently Deleted</div><span style={{ fontSize: 10, color: "var(--muted)", transition: "transform 0.2s", display: "inline-block", transform: recDelOpen ? "rotate(0deg)" : "rotate(-90deg)" }}>▾</span></div>{recDelOpen && (recDelItems === null ? <button onClick={loadRecentlyDeleted} disabled={recDelLoading} style={{ width: "100%", padding: "10px", border: "1.5px solid var(--border)", borderRadius: 10, background: "var(--card)", color: recDelLoading ? "var(--muted)" : "var(--text)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: recDelLoading ? "not-allowed" : "pointer", opacity: recDelLoading ? 0.6 : 1 }}>{recDelLoading ? "Loading…" : "Load deleted items (last 30 days)"}</button> : recDelItems.length === 0 ? <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", padding: "8px 0" }}>No items deleted in the last 30 days</div> : <><button onClick={() => { const cutoff = new Date(Date.now() - 30 * 864e5).toISOString(); if (!window.confirm("Permanently delete all items soft-deleted more than 30 days ago? This cannot be undone.")) return; ["expenses","incomes","transfers","recurring","events","splits"].forEach(t => sbDeleteWhere(t, "deleted_at=lt." + cutoff)); showT("Expired items (>30 days) purged from database", "success"); }} style={{ width: "100%", padding: "8px", border: "1.5px solid #D4726A", borderRadius: 8, background: "#D4726A10", color: "#D4726A", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 600, cursor: "pointer", marginBottom: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}><Trash size={12} />Purge expired (&gt;30 days old)</button>{recDelItems.map(item => <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: "1px solid var(--border)" }}><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item._tbl === "recurring" ? item.name : item._tbl === "splits" ? (item.name + " · " + fmt(item.amount) + (item.note ? " · " + item.note : "")) : (fmt(item.amount) + (item.note ? " · " + item.note : "") + " · " + (item.date || ""))}</div><div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>{item._tbl} · deleted {new Date(item.deleted_at).toLocaleDateString()}</div></div><button onClick={() => restoreDeleted(item)} style={{ padding: "5px 10px", border: "1.5px solid #6BAA75", borderRadius: 7, background: "#6BAA7512", color: "#6BAA75", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 600, cursor: "pointer", flexShrink: 0 }}>Restore</button><button onClick={() => { sbDeleteWhere(item._tbl, "id=eq." + item.id); sRecDelItems(p => p.filter(i => i.id !== item.id)); showT("Permanently deleted", "success"); }} style={{ padding: "5px 8px", border: "1.5px solid #D4726A", borderRadius: 7, background: "#D4726A10", color: "#D4726A", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 600, cursor: "pointer", flexShrink: 0 }}>✕</button></div>)}</>)}</div>
