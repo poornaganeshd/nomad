@@ -1,12 +1,13 @@
 import { useState, useEffect, useMemo, useRef, useCallback, memo, Fragment } from "react";
-import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning, Wallet, Target, Lightning, Envelope, Fire, Sparkle, Lightbulb, ClipboardText, Timer, HandWaving, BellSlash, Robot, Receipt, FilePdf, Trash, Moon, Sun, Scales, Gear, PushPin, Hash, Microphone, CheckCircle, ArrowsLeftRight, CaretLeft, Users, ArrowRight, ArrowUpRight, ArrowDownLeft, PencilSimple, ShareNetwork, Compass } from "@phosphor-icons/react";
+import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning, Wallet, Target, Lightning, Envelope, Fire, Sparkle, Lightbulb, ClipboardText, Timer, HandWaving, BellSlash, Robot, Receipt, FilePdf, Trash, Moon, Sun, Scales, Gear, PushPin, Hash, Microphone, CheckCircle, ArrowsLeftRight, CaretLeft, Users, ArrowRight, ArrowUpRight, ArrowDownLeft, PencilSimple, ShareNetwork, Compass, Paperclip, PaperPlaneTilt, CopySimple } from "@phosphor-icons/react";
 import { IconCheck, IconTrash, IconHistory, IconChevronRight, IconChevronLeft, IconSend, IconAlertTriangle, IconX, IconClock, IconArrowDown, IconArrowUp, IconPlus, IconPlayerSkipForward, IconPencil } from "@tabler/icons-react";
-import { ComposedChart, Bar, Line, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid, PieChart, Pie } from "recharts";
+import { PieChart, Pie, Cell } from "recharts";
 import RoutineApp from "./Routine";
 import { flushSyncQueue, getPendingSyncCount, getPendingSyncSummary, getDeadLetterCount, clearDeadLetter, sendSupabaseRequest, subscribePendingSync, subscribeSyncDrops, isPendingDelete, isPendingUpsert, hasPendingDedupeKey } from "./offlineSync";
 import { checkBillReminders } from "./billReminders";
 import { getNtfyConfig, saveNtfyConfig, isNtfyConfigured, publishNtfy } from "./ntfy";
 import { isPushSupported, getCurrentSubscription, subscribeDevice, unsubscribeDevice, sendTestPush } from "./webpush";
+import { computeStreak, loadStreakStore, saveStreakStore } from "./streak";
 import { getExchangeRate, saveCurrencyMeta, getCurrencyMeta, getRateMeta } from "./currencyConverter";
 import { hapticForToast, hapticLight, hapticMedium, hapticSelection, hapticsEnabled, setHapticsEnabled } from "./haptics";
 import ReceiptPicker from "./ReceiptPicker";
@@ -22,7 +23,9 @@ import {
   recurringDaysOverdue, distributeAmount, expenseShareMap, historySortCompare,
   UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory,
 } from "./financeUtils";
-import { parseAmount, parseVoiceTx, parseBankCsv } from "./txParsers";
+import { parseAmount, parseVoiceTx, parseBankCsv, parseUpiStatement } from "./txParsers";
+import { extractPdfText, looksLikeText } from "./pdfText";
+import { renderChatHtml } from "./chatFormat";
 import { buildLedger, reconcile, statementClosingBalance, loadImportedRefs, saveImportedRefs } from "./bankReconcile";
 import CalendarView from "./CalendarView";
 import NomadLite from "./NomadLite";
@@ -233,79 +236,154 @@ function LionM({ balance: bal, dancing, aiMsg, aiLoading, onTap }) {
   return <div style={{ display: "flex", alignItems: "flex-end", gap: 12, padding: "12px 0", cursor: onTap ? "pointer" : "default" }} onClick={onTap}><Lion mood={mood} dancing={dancing} /><div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: "14px 14px 14px 4px", padding: "10px 14px", fontSize: 13, color: "var(--ts)", maxWidth: 220, fontFamily: "var(--font-b)", lineHeight: 1.5 }}>{aiLoading ? <span style={{ color: "var(--muted)", fontStyle: "italic" }}>Thinking…</span> : displayMsg}</div></div>
 }
 
-function SpendingBreakdown({ expenses, categories, period, onPeriodChange, formatCurrency, darkMode }) {
-  const categoryMap = useMemo(
-    () => Object.fromEntries((categories || []).map(c => [c.id, c])),
-    [categories]
-  );
-  const addDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
-  const startOfWeek = date => { const d = new Date(date); d.setDate(d.getDate() - d.getDay()); return d; };
+// ——— Spending Breakdown (v2) ———
+// Mobile-first rebuild: no horizontal scroll, no floating tooltip, no Recharts.
+// Fixed calendar windows per period (14 days / 8 weeks / 6 months / 6 years)
+// paged with ‹ › chevrons; scrub (tap or drag) any bar to pin its detail in a
+// fixed insight header; tap a legend chip to isolate one category. Y-scale is
+// computed from the visible window only, so one big past month can't crush
+// recent bars into invisibility.
+const TREND_WINDOW = { day: 14, week: 8, month: 6, year: 6 };
+const TREND_UNIT = { day: "day", week: "wk", month: "mo", year: "yr" };
+const trendAddDays = (date, days) => { const d = new Date(date); d.setDate(d.getDate() + days); return d; };
+const trendWeekStart = date => { const d = new Date(date); d.setDate(d.getDate() - d.getDay()); return d; };
+const trendKeyOf = (dateStr, period) => {
+  if (period === "day") return dateStr;
+  if (period === "week") return localDateKey(trendWeekStart(new Date(`${dateStr}T12:00:00`)));
+  if (period === "month") return dateStr.slice(0, 7);
+  return dateStr.slice(0, 4);
+};
+// Category lookup with recurring-category + legacy-id fallbacks, so bills logged
+// under RC ids ("sip", "recharge") and orphaned ids ("other_mobfx1oo4pxf") get a
+// readable name instead of a raw id. Delegates to resolveRecCategory — the
+// single-source cats→RC lookup (CLAUDE.md) — adding only orphan-id prettifying.
+const trendCatOf = (cid, catList) => { const id = cid || "uncat"; return resolveRecCategory(id, [catList, RC], id === "uncat" ? "Uncategorised" : id.split("_")[0].replace(/^\w/, l => l.toUpperCase())); };
+const trendMD = date => date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+const trendLabelOf = (bucket, period) => {
+  if (period === "day") return bucket.date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  if (period === "week") return `${trendMD(bucket.date)} – ${trendMD(trendAddDays(bucket.date, 6))}`;
+  if (period === "month") return bucket.date.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  return bucket.key;
+};
+const trendTickOf = (bucket, period) => {
+  if (period === "day") return String(bucket.date.getDate());
+  if (period === "week") return trendMD(bucket.date);
+  if (period === "month") return bucket.date.toLocaleDateString("en-US", { month: "short" });
+  return bucket.key;
+};
+const trendNice = v => { const x = Math.max(100, v); const p = Math.pow(10, Math.floor(Math.log10(x))); const u = x / p; const m = u <= 1 ? 1 : u <= 2 ? 2 : u <= 2.5 ? 2.5 : u <= 5 ? 5 : 10; return m * p; };
+const trendFmt = v => { const n = Number(v || 0); if (n >= 100000) return `₹${(n / 100000).toFixed(1)}L`; if (n >= 1000) return `₹${(n / 1000).toFixed(1)}k`; return `₹${Math.round(n)}`; };
+const trendHexA = (hex, a) => { const h = String(hex || "#8A8A9A").replace("#", ""); return `rgba(${parseInt(h.slice(0, 2), 16) || 0},${parseInt(h.slice(2, 4), 16) || 0},${parseInt(h.slice(4, 6), 16) || 0},${a})`; };
+const trendTopPath = (x, y, w, h, r0) => { const r = Math.max(0, Math.min(r0, w / 2, h)); return `M${x},${y + h} L${x},${y + r} Q${x},${y} ${x + r},${y} L${x + w - r},${y} Q${x + w},${y} ${x + w},${y + r} L${x + w},${y + h} Z`; };
 
-  const { data, activeCats, peakKey, yMax } = useMemo(() => {
-    const allDates = (expenses || []).map(e => e.date).filter(Boolean).sort();
-    if (!allDates.length) return { data: [], activeCats: [], peakKey: null, yMax: 1000 };
+function SpendingBreakdown({ expenses, categories, period, onPeriodChange, formatCurrency, darkMode }) {
+  const [page, sPage] = useState(0);
+  const [selIdx, sSelIdx] = useState(null);
+  const [isoCat, sIsoCat] = useState(null);
+  useEffect(() => { sPage(0); sSelIdx(null); sIsoCat(null); }, [period]);
+
+  const hasData = (expenses || []).some(e => e?.date);
+
+  // Exact-pixel SVG width from the card itself — no ResponsiveContainer, so bars
+  // can never inflate wider than the screen or park mid-scroll.
+  const wrapRef = useRef(null);
+  const [chartW, sChartW] = useState(0);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    sChartW(el.clientWidth);
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(entries => { const w = entries[0]?.contentRect?.width; if (w) sChartW(w); });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hasData]);
+
+  // Key the window on the calendar day (noon-anchored), not a Date captured
+  // inside the memo — a PWA left open past midnight would otherwise keep
+  // bucketing "today" into yesterday's window until some other dep changed.
+  const todayKey = localDateKey();
+  const { buckets, activeCats, hasPrev } = useMemo(() => {
+    const byKey = new Map();
+    let earliestKey = null;
+    (expenses || []).forEach(e => {
+      if (!e?.date) return;
+      const key = trendKeyOf(e.date, period);
+      if (!earliestKey || key < earliestKey) earliestKey = key;
+      let row = byKey.get(key);
+      if (!row) { row = { total: 0, cats: {} }; byKey.set(key, row); }
+      const cid = e.categoryId || "uncat";
+      row.cats[cid] = roundMoney((row.cats[cid] || 0) + Number(e.amount || 0));
+      row.total = roundMoney(row.total + Number(e.amount || 0));
+    });
+    const n = TREND_WINDOW[period] || 6;
+    const today = new Date(`${todayKey}T12:00:00`);
+    const mk = (key, date) => { const r = byKey.get(key); return { key, date, total: r?.total || 0, cats: r?.cats || {} }; };
     let buckets;
     if (period === "day") {
-      const today = new Date();
-      buckets = Array.from({ length: 60 }, (_, i) => {
-        const date = addDays(today, -(59 - i));
-        const key = localDateKey(date);
-        return { key, label: new Date(`${key}T00:00:00`).toLocaleDateString("en-US", { day: "numeric", month: "short" }) };
-      });
+      const end = trendAddDays(today, -(page * n));
+      buckets = Array.from({ length: n }, (_, i) => { const d = trendAddDays(end, -(n - 1 - i)); return mk(localDateKey(d), d); });
     } else if (period === "week") {
-      const cur = startOfWeek(new Date());
-      buckets = Array.from({ length: 26 }, (_, i) => {
-        const start = addDays(cur, -(7 * (25 - i)));
-        const key = localDateKey(start);
-        return { key, label: new Date(`${key}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" }) };
-      });
+      const end = trendAddDays(trendWeekStart(today), -(page * n * 7));
+      buckets = Array.from({ length: n }, (_, i) => { const d = trendAddDays(end, -7 * (n - 1 - i)); return mk(localDateKey(d), d); });
     } else if (period === "month") {
-      buckets = [...new Set(allDates.map(d => d.slice(0, 7)))].sort().slice(-24).map(key => {
-        const [y, m] = key.split("-");
-        return { key, label: new Date(Number(y), Number(m) - 1, 1).toLocaleDateString("en-US", { month: "short", year: "2-digit" }) };
-      });
+      buckets = Array.from({ length: n }, (_, i) => { const d = new Date(today.getFullYear(), today.getMonth() - page * n - (n - 1 - i), 1); return mk(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`, d); });
     } else {
-      buckets = [...new Set(allDates.map(d => d.slice(0, 4)))].sort().slice(-8).map(key => ({ key, label: key }));
+      const endY = today.getFullYear() - page * n;
+      buckets = Array.from({ length: n }, (_, i) => { const y = endY - (n - 1 - i); return mk(String(y), new Date(y, 0, 1)); });
     }
-    const catIds = [...new Set((expenses || []).map(e => e.categoryId).filter(Boolean))];
-    const rows = new Map(buckets.map(b => [b.key, { ...b, total: 0, ...Object.fromEntries(catIds.map(id => [id, 0])) }]));
-    (expenses || []).forEach(expense => {
-      if (!expense?.date) return;
-      let key = expense.date;
-      if (period === "week") { const d = new Date(`${expense.date}T00:00:00`); d.setDate(d.getDate() - d.getDay()); key = localDateKey(d); }
-      else if (period === "month") key = expense.date.slice(0, 7);
-      else if (period === "year") key = expense.date.slice(0, 4);
-      const row = rows.get(key);
-      if (!row) return;
-      row[expense.categoryId] = roundMoney((row[expense.categoryId] || 0) + Number(expense.amount || 0));
-      row.total = roundMoney(row.total + Number(expense.amount || 0));
-    });
-    const raw = [...rows.values()];
-    const activeCatIds = catIds.filter(id => raw.some(r => Number(r[id] || 0) > 0));
-    const activeCatsData = activeCatIds.map(id => categoryMap[id] || { id, name: id, color: "#999" });
-    const chartData = raw.map(row => ({ ...row, topCat: [...activeCatIds].reverse().find(id => Number(row[id] || 0) > 0) || null }));
-    const peak = chartData.reduce((best, row) => row.total > (best?.total || 0) ? row : best, null);
-    const maxTotal = Math.max(0, ...chartData.map(r => r.total || 0));
-    return { data: chartData, activeCats: activeCatsData, peakKey: peak?.key || null, yMax: Math.max(1000, Math.ceil(maxTotal * 1.18 / 100) * 100) };
-  }, [expenses, period, categoryMap]);
+    const sums = {};
+    buckets.forEach(b => Object.entries(b.cats).forEach(([cid, v]) => { sums[cid] = (sums[cid] || 0) + Number(v || 0); }));
+    const activeCats = Object.entries(sums).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).map(([cid]) => trendCatOf(cid, categories));
+    return { buckets, activeCats, hasPrev: !!earliestKey && buckets[0].key > earliestKey };
+  }, [expenses, period, page, categories, todayKey]);
 
-  // Sideways scroll: with 60 day / 26 week / 24 month buckets the bars no longer
-  // fit one screen. Chart gets an explicit px width (36px per bucket, min 100%)
-  // inside an overflow-x wrapper, anchored to the newest bucket on the right.
-  const scrollRef = useRef(null);
-  // rAF: anchor AFTER Recharts/ResponsiveContainer has laid out, otherwise
-  // scrollWidth is measured pre-inflation and the chart parks mid-scroll.
-  useEffect(() => { const id = requestAnimationFrame(() => { const el = scrollRef.current; if (el) el.scrollLeft = el.scrollWidth; }); return () => cancelAnimationFrame(id); }, [period, data.length]);
-  const chartW = Math.max(data.length * 36, 280);
-  const fmtY = v => { const n = Number(v || 0); if (n >= 100000) return `\u20b9${(n / 100000).toFixed(1)}L`; if (n >= 1000) return `\u20b9${(n / 1000).toFixed(1)}k`; return `\u20b9${Math.round(n)}`; };
-  const lineStroke = darkMode ? "rgba(255,255,255,0.6)" : "rgba(44,42,36,0.4)";
-  const ttBg = darkMode ? "#1A1917" : "#FAFAF7", ttBorder = darkMode ? "#2A2926" : "#DDD9D0", ttText = darkMode ? "#E8E4DC" : "#2C2A24", ttMuted = darkMode ? "#7A7870" : "#9A9488";
+  const n = buckets.length;
+  const val = b => (isoCat ? Number(b.cats[isoCat] || 0) : b.total);
+  const vals = buckets.map(val);
+  const yTop = trendNice(Math.max(...vals, 0));
+  const nz = vals.filter(v => v > 0);
+  const avg = nz.length ? nz.reduce((a, b) => a + b, 0) / nz.length : 0;
+  let sel = selIdx == null ? -1 : Math.min(selIdx, n - 1);
+  if (sel < 0) { sel = n - 1; for (let i = n - 1; i >= 0; i--) { if (vals[i] > 0) { sel = i; break; } } }
+  const selB = buckets[sel];
+  const selVal = vals[sel];
+  const prevVal = sel > 0 ? vals[sel - 1] : null;
+  const delta = prevVal != null && prevVal > 0 ? Math.round((selVal - prevVal) / prevVal * 100) : null;
+  const selSegs = activeCats.map(cat => ({ cat, v: Number(selB?.cats[cat.id] || 0) })).filter(s => s.v > 0);
+  const chipCats = isoCat && !activeCats.some(c => c.id === isoCat) ? [...activeCats, trendCatOf(isoCat, categories)] : activeCats;
+  const isoCatObj = isoCat ? trendCatOf(isoCat, categories) : null;
+
+  const H = 176, padT = 16, padB = 20, plotH = H - padT - padB;
+  const step = n > 0 && chartW > 0 ? chartW / n : 0;
+  const gap = period === "day" ? 5 : 9;
+  const barW = Math.max(6, Math.min(step - gap, 46));
+  const bx = i => i * step + (step - barW) / 2;
+  const yOf = v => padT + plotH * (1 - Math.min(1, v / yTop));
+  const gridStroke = darkMode ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.07)";
+  const bandFill = darkMode ? "rgba(56,189,248,0.12)" : "rgba(56,189,248,0.10)";
+
+  const pick = e => {
+    if (!step) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const i = Math.max(0, Math.min(n - 1, Math.floor((e.clientX - r.left) / step)));
+    if (i !== sel) { hapticSelection(); sSelIdx(i); }
+  };
+  const onDown = e => { try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* older webviews */ } pick(e); };
+  const onMove = e => { if ((e.buttons & 1) || e.pointerType === "touch") pick(e); };
+
+  const first = buckets[0], last = buckets[n - 1];
+  const y2 = d => String(d.getFullYear()).slice(2);
+  const rangeLabel = !n ? "" : period === "day" ? `${trendMD(first.date)} – ${trendMD(last.date)}`
+    : period === "week" ? `${trendMD(first.date)} – ${trendMD(trendAddDays(last.date, 6))}`
+    : period === "month" ? `${first.date.toLocaleDateString("en-US", { month: "short" })} ${y2(first.date) !== y2(last.date) ? `’${y2(first.date)} ` : ""}– ${last.date.toLocaleDateString("en-US", { month: "short" })} ’${y2(last.date)}`
+    : `${first.key} – ${last.key}`;
+  const pagerBtn = disabled => ({ width: 26, height: 26, borderRadius: 13, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--ts)", fontSize: 15, lineHeight: "22px", padding: 0, fontFamily: "var(--font-h)", cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.25 : 1 });
 
   const tabs = (
     <div style={{ display: "flex", gap: 2, background: darkMode ? "rgba(56,189,248,0.08)" : "rgba(56,189,248,0.12)", borderRadius: 20, padding: 3 }}>
       {["Day", "Week", "Month", "Year"].map(tab => {
         const v = tab.toLowerCase(), active = period === v;
-        return <button key={v} onClick={() => { hapticSelection(); onPeriodChange(v); }} style={{ padding: "5px 11px", borderRadius: 16, border: "none", background: active ? "#38bdf8" : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? (darkMode ? "#0a1628" : "#fff") : darkMode ? "rgba(56,189,248,0.6)" : "rgba(0,90,130,0.7)", cursor: "pointer", transition: "all 0.15s" }}>{tab}</button>;
+        return <button key={v} onClick={() => { hapticSelection(); onPeriodChange(v); }} style={{ padding: "5px 10px", borderRadius: 16, border: "none", whiteSpace: "nowrap", background: active ? "#38bdf8" : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? (darkMode ? "#0a1628" : "#fff") : darkMode ? "rgba(56,189,248,0.6)" : "rgba(0,90,130,0.7)", cursor: "pointer", transition: "all 0.15s" }}>{tab}</button>;
       })}
     </div>
   );
@@ -313,59 +391,88 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
   return (
     <div style={{ ...cc, padding: "18px 14px", marginBottom: 16, position: "relative", overflow: "hidden" }}>
       <div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "#38bdf8" }} />
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, gap: 12 }}>
-        <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "#38bdf8", letterSpacing: "0.04em", fontWeight: 600 }}>Spending Breakdown</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 10, flexWrap: "wrap", rowGap: 8 }}>
+        <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "#38bdf8", letterSpacing: "0.04em", fontWeight: 600, whiteSpace: "nowrap" }}>Spending Breakdown</div>
         {tabs}
       </div>
-      {!data.length || !activeCats.length ? (
+      {!hasData ? (
         <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: "28px 0 8px", fontFamily: "var(--font-b)" }}>Add transactions to see trends</p>
       ) : (
         <>
-          <div ref={scrollRef} style={{ width: "100%", overflowX: "auto", overflowY: "hidden", WebkitOverflowScrolling: "touch", touchAction: "pan-x pan-y", overscrollBehaviorX: "contain" }}>
-          <div style={{ width: chartW, minWidth: "100%", height: 260 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={data} margin={{ top: 8, right: 8, left: -4, bottom: 0 }} barCategoryGap="30%">
-                <CartesianGrid stroke={darkMode ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.06)"} vertical={false} />
-                <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "var(--font-h)" }} />
-                <YAxis tickLine={false} axisLine={false} width={48} domain={[0, yMax]} tickFormatter={fmtY} tick={{ fill: "var(--muted)", fontSize: 10, fontFamily: "var(--font-h)" }} tickCount={5} />
-                <Tooltip content={({ active, payload }) => {
-                  if (!active || !payload?.length) return null;
-                  const row = payload[0]?.payload;
-                  const entries = payload.filter(p => activeCats.some(c => c.id === p.dataKey) && Number(p.value || 0) > 0);
+          <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 10, margin: "0 2px 10px" }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600, letterSpacing: "0.4px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isoCatObj ? `${isoCatObj.name} · ` : ""}{selB ? trendLabelOf(selB, period) : ""}</div>
+              <div style={{ fontFamily: "var(--font-h)", fontSize: 20, fontWeight: 800, color: "var(--text)", lineHeight: 1.3 }}>{formatCurrency(selVal)}</div>
+            </div>
+            <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+              {delta !== null && (
+                <span style={{ fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 700, color: delta > 0 ? "#E07A5F" : delta < 0 ? "#6BAA75" : "var(--muted)", background: delta > 0 ? "#E07A5F15" : delta < 0 ? "#6BAA7515" : "var(--bg)", padding: "2px 6px", borderRadius: 4, whiteSpace: "nowrap" }}>{delta > 0 ? "▲ +" : delta < 0 ? "▼ " : ""}{delta}% vs prev</span>
+              )}
+              {nz.length >= 2 && <span style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", whiteSpace: "nowrap" }}>avg {trendFmt(avg)}/{TREND_UNIT[period]}</span>}
+            </div>
+          </div>
+          <div ref={wrapRef} style={{ width: "100%" }}>
+            {chartW > 0 && n > 0 && (
+              <svg data-chart="spend-trend" width={chartW} height={H} style={{ display: "block", touchAction: "pan-y" }}>
+                <rect x={sel * step + 1} y={4} width={Math.max(step - 2, 4)} height={H - 4} rx={8} fill={bandFill} />
+                <line x1={0} x2={chartW} y1={yOf(yTop)} y2={yOf(yTop)} stroke={gridStroke} />
+                <line x1={0} x2={chartW} y1={yOf(yTop / 2)} y2={yOf(yTop / 2)} stroke={gridStroke} />
+                <line x1={0} x2={chartW} y1={padT + plotH} y2={padT + plotH} stroke="var(--border)" />
+                <text x={chartW - 2} y={yOf(yTop) - 4} textAnchor="end" fontSize={8.5} fill="var(--muted)" fontFamily="var(--font-h)" opacity={0.85}>{trendFmt(yTop)}</text>
+                <text x={chartW - 2} y={yOf(yTop / 2) - 4} textAnchor="end" fontSize={8.5} fill="var(--muted)" fontFamily="var(--font-h)" opacity={0.85}>{trendFmt(yTop / 2)}</text>
+                {buckets.map((b, i) => {
+                  const v = vals[i];
+                  if (v <= 0) return <rect key={b.key} x={bx(i)} y={padT + plotH - 2} width={barW} height={2} rx={1} fill="var(--border)" />;
+                  if (isoCat) { const y = yOf(v); return <path key={b.key} d={trendTopPath(bx(i), y, barW, padT + plotH - y, 4)} fill={isoCatObj.color} opacity={i === sel ? 1 : 0.75} />; }
+                  let acc = 0;
+                  const segs = [];
+                  activeCats.forEach(cat => { const cv = Number(b.cats[cat.id] || 0); if (cv <= 0) return; segs.push({ cat, y0: acc, y1: acc + cv }); acc += cv; });
                   return (
-                    <div style={{ background: ttBg, borderRadius: 10, border: `0.5px solid ${ttBorder}`, padding: "10px 12px", minWidth: 155, boxShadow: "0 8px 24px rgba(0,0,0,0.12)" }}>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: ttText, fontFamily: "var(--font-h)", marginBottom: 7 }}>{row.label}</div>
-                      <div style={{ display: "grid", gap: 5 }}>
-                        {entries.map(p => { const cat = activeCats.find(c => c.id === p.dataKey); return <div key={p.dataKey} style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}><div style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 7, height: 7, borderRadius: 2, background: cat?.color || "#999", flexShrink: 0 }} /><span style={{ color: ttMuted, fontSize: 11, fontFamily: "var(--font-b)" }}>{cat?.name || p.dataKey}</span></div><span style={{ color: ttText, fontSize: 11, fontFamily: "var(--font-b)", fontWeight: 700 }}>{formatCurrency(p.value)}</span></div>; })}
-                        {entries.length > 1 && <><div style={{ height: 1, background: ttBorder, margin: "2px 0" }} /><div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}><span style={{ color: ttMuted, fontSize: 11, fontFamily: "var(--font-b)" }}>Total</span><span style={{ color: "#C17A5A", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 700 }}>{formatCurrency(row.total)}</span></div></>}
-                      </div>
-                    </div>
+                    <g key={b.key} opacity={i === sel ? 1 : 0.8}>
+                      {segs.map((s, si) => {
+                        const yPx = yOf(s.y1);
+                        const hPx = yOf(s.y0) - yPx;
+                        return si === segs.length - 1
+                          ? <path key={s.cat.id} d={trendTopPath(bx(i), yPx, barW, hPx, 4)} fill={s.cat.color} />
+                          : <rect key={s.cat.id} x={bx(i)} y={yPx} width={barW} height={hPx + 0.4} fill={s.cat.color} />;
+                      })}
+                    </g>
                   );
-                }} cursor={{ fill: "rgba(201,123,99,0.06)" }} />
-                {activeCats.map(cat => (
-                  <Bar key={cat.id} dataKey={cat.id} name={cat.name} stackId="e" fill={cat.color} maxBarSize={32} isAnimationActive={false}>
-                    {data.map((row, idx) => <Cell key={`${cat.id}-${idx}`} radius={row.topCat === cat.id ? [4, 4, 0, 0] : [0, 0, 0, 0]} />)}
-                  </Bar>
+                })}
+                {nz.length >= 2 && avg > 0 && <line x1={0} x2={chartW} y1={yOf(avg)} y2={yOf(avg)} stroke="#C17A5A" strokeWidth={1} strokeDasharray="4 4" opacity={0.75} />}
+                {buckets.map((b, i) => (
+                  <text key={b.key} x={i * step + step / 2} y={H - 5} textAnchor="middle" fontSize={8.5} fontFamily="var(--font-h)" fill={i === sel ? "var(--text)" : "var(--muted)"} fontWeight={i === sel ? 700 : 400}>{trendTickOf(b, period)}</text>
                 ))}
-                <Line type="monotone" dataKey="total" stroke={lineStroke} strokeDasharray="5 4" strokeWidth={1.5} isAnimationActive={false}
-                  dot={({ cx, cy, payload }) => {
-                    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
-                    return <circle key={payload?.key} cx={cx} cy={cy} r={payload?.key === peakKey && payload?.total > 0 ? 6 : 2.5} fill="#C17A5A" />;
-                  }}
-                  activeDot={{ r: 5, fill: "#C17A5A" }}
-                />
-              </ComposedChart>
-            </ResponsiveContainer>
+                <rect x={0} y={0} width={chartW} height={H} fill="transparent" style={{ cursor: "pointer" }} onPointerDown={onDown} onPointerMove={onMove} />
+              </svg>
+            )}
           </div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, marginTop: 8 }}>
+            <button aria-label="Older" disabled={!hasPrev} onClick={() => { if (!hasPrev) return; hapticSelection(); sPage(p => p + 1); sSelIdx(null); }} style={pagerBtn(!hasPrev)}>‹</button>
+            <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600, letterSpacing: "0.3px", minWidth: 110, textAlign: "center" }}>{rangeLabel}</span>
+            <button aria-label="Newer" disabled={page === 0} onClick={() => { if (page === 0) return; hapticSelection(); sPage(p => Math.max(0, p - 1)); sSelIdx(null); }} style={pagerBtn(page === 0)}>›</button>
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
-            {activeCats.map(cat => (
-              <div key={cat.id} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "var(--bg)", border: "0.5px solid var(--border)", borderRadius: 20, padding: "3px 9px" }}>
-                <span style={{ width: 7, height: 7, borderRadius: 2, background: cat.color, flexShrink: 0 }} />
-                <span style={{ color: "var(--muted)", fontSize: 10, fontFamily: "var(--font-b)" }}>{cat.name}</span>
-              </div>
-            ))}
-          </div>
+          {!isoCat && selVal > 0 && selSegs.length > 1 && (
+            <div style={{ display: "flex", height: 9, borderRadius: 5, overflow: "hidden", margin: "10px 2px 0", gap: 2 }}>
+              {selSegs.map(s => <div key={s.cat.id} style={{ flex: s.v, background: s.cat.color, minWidth: 3, borderRadius: 2 }} />)}
+            </div>
+          )}
+          {chipCats.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
+              {chipCats.map(cat => {
+                const on = isoCat === cat.id;
+                const inSel = Number(selB?.cats[cat.id] || 0);
+                return (
+                  <button key={cat.id} onClick={() => { hapticSelection(); sIsoCat(on ? null : cat.id); sSelIdx(null); }} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: on ? trendHexA(cat.color, 0.14) : "var(--bg)", border: `1px solid ${on ? cat.color : "var(--border)"}`, borderRadius: 20, padding: "3px 9px", cursor: "pointer", opacity: isoCat && !on ? 0.45 : 1, transition: "all 0.15s" }}>
+                    <span style={{ width: 7, height: 7, borderRadius: 2, background: cat.color, flexShrink: 0 }} />
+                    <span style={{ color: on ? "var(--text)" : "var(--muted)", fontSize: 10, fontFamily: "var(--font-b)", fontWeight: on ? 700 : 400 }}>{cat.name}</span>
+                    {inSel > 0 && <span style={{ color: "var(--ts)", fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 700 }}>{trendFmt(inSel)}</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <div style={{ fontSize: 9, color: "var(--muted)", textAlign: "center", marginTop: 8, opacity: 0.75, fontFamily: "var(--font-b)" }}>tap or drag the bars to inspect · tap a chip to focus one category</div>
         </>
       )}
     </div>
@@ -373,13 +480,13 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
 }
 
 
-// Category Share — donut + ranked category bars for a picked period, with
-// change-vs-previous-period chips and tap-to-drill transaction lists. Additive
-// view: complements SpendingBreakdown (time buckets) and the month-filtered
-// "Spending by Category" card without touching either.
+// Category Share — pure proportion view: interactive donut, nothing else.
+// The ranked per-category bar list was removed ("Spending by Category" already
+// covers ranked amounts); tap a slice or its legend chip to see amount, share
+// and change-vs-previous-period pinned in the donut centre.
 function CategoryBreakdown({ expenses, categories, formatCurrency }) {
   const [range, sRange] = useState("month");
-  const [openCat, sOpenCat] = useState(null);
+  const [selCid, sSelCid] = useState(null);
   const { rows, total, prevLabel } = useMemo(() => {
     const today = new Date();
     const y = today.getFullYear(), m = today.getMonth(), d = today.getDate();
@@ -390,32 +497,33 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
     else if (range === "3m") { curStart = new Date(y, m - 2, 1); prevStart = new Date(y, m - 5, 1); prevEnd = curStart; prevLabel = "vs prior 3 mo"; }
     else { curStart = new Date(y, 0, 1); prevStart = new Date(y - 1, 0, 1); prevEnd = curStart; prevLabel = "vs last year"; }
     const curStartKey = key(curStart), curEndKey = key(new Date(y, m, d + 1)), prevStartKey = key(prevStart), prevEndKey = key(prevEnd);
-    const cur = {}, prev = {}, txs = {};
+    const cur = {}, prev = {};
     let total = 0;
     (expenses || []).forEach(e => {
       if (!e?.date) return;
       const cid = e.categoryId || "uncat";
-      if (e.date >= curStartKey && e.date < curEndKey) { const amt = Number(e.amount || 0); cur[cid] = roundMoney((cur[cid] || 0) + amt); total = roundMoney(total + amt); (txs[cid] = txs[cid] || []).push(e); }
+      if (e.date >= curStartKey && e.date < curEndKey) { const amt = Number(e.amount || 0); cur[cid] = roundMoney((cur[cid] || 0) + amt); total = roundMoney(total + amt); }
       else if (e.date >= prevStartKey && e.date < prevEndKey) prev[cid] = roundMoney((prev[cid] || 0) + Number(e.amount || 0));
     });
     const rows = Object.entries(cur).sort((a, b) => b[1] - a[1]).map(([cid, amt]) => {
-      const cat = categories.find(x => x.id === cid) || (cid === "uncat" ? { id: cid, name: "Uncategorised", color: "#8A8A9A", neon: "#A0A0B0" } : { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#6366F1", neon: "#818CF8" });
+      const cat = trendCatOf(cid, categories);
       const prevAmt = prev[cid] || 0;
-      return { cid, cat, amt, pct: total > 0 ? Math.round(amt / total * 100) : 0, delta: prevAmt > 0 ? Math.round((amt - prevAmt) / prevAmt * 100) : null, isNew: prevAmt === 0 && amt > 0, txs: (txs[cid] || []).sort((a, b) => (b.date || "").localeCompare(a.date || "")) };
+      return { cid, cat, amt, pct: total > 0 ? Math.round(amt / total * 100) : 0, delta: prevAmt > 0 ? Math.round((amt - prevAmt) / prevAmt * 100) : null, isNew: prevAmt === 0 && amt > 0 };
     });
     return { rows, total, prevLabel };
   }, [expenses, categories, range]);
-  const maxAmt = rows[0]?.amt || 1;
+  const sel = selCid ? rows.find(r => r.cid === selCid) : null;
   const accent = "#F4A261";
+  const toggleCat = cid => { hapticSelection(); sSelCid(c => (c === cid ? null : cid)); };
   return (
     <div style={{ ...cc, padding: "18px 14px", marginBottom: 16, position: "relative", overflow: "hidden" }}>
       <div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: accent }} />
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, gap: 12 }}>
-        <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: accent, letterSpacing: "0.04em", fontWeight: 600 }}>Category Share</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 10, flexWrap: "wrap", rowGap: 8 }}>
+        <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: accent, letterSpacing: "0.04em", fontWeight: 600, whiteSpace: "nowrap" }}>Category Share</div>
         <div style={{ display: "flex", gap: 2, background: "rgba(244,162,97,0.12)", borderRadius: 20, padding: 3 }}>
-          {[["week", "Week"], ["month", "Month"], ["3m", "3 Mo"], ["year", "Year"]].map(([v, lbl]) => {
+          {[["week", "Week"], ["month", "Month"], ["3m", "3M"], ["year", "Year"]].map(([v, lbl]) => {
             const active = range === v;
-            return <button key={v} onClick={() => { hapticSelection(); sRange(v); sOpenCat(null); }} style={{ padding: "5px 10px", borderRadius: 16, border: "none", background: active ? accent : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? "#fff" : "rgba(244,162,97,0.85)", cursor: "pointer", transition: "all 0.15s" }}>{lbl}</button>;
+            return <button key={v} onClick={() => { hapticSelection(); sRange(v); sSelCid(null); }} style={{ padding: "5px 10px", borderRadius: 16, border: "none", whiteSpace: "nowrap", background: active ? accent : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? "#fff" : "rgba(244,162,97,0.85)", cursor: "pointer", transition: "all 0.15s" }}>{lbl}</button>;
           })}
         </div>
       </div>
@@ -423,57 +531,45 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
         <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: "28px 0 8px", fontFamily: "var(--font-b)" }}>No expenses in this period</p>
       ) : (
         <>
-          <div style={{ position: "relative", width: 176, height: 176, margin: "0 auto 14px" }}>
-            <PieChart width={176} height={176}>
-              <Pie data={rows.map(r => ({ name: r.cat.name, value: r.amt }))} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={57} outerRadius={80} paddingAngle={rows.length > 1 ? 2 : 0} cornerRadius={3} stroke="none" isAnimationActive={false}>
-                {rows.map(r => <Cell key={r.cid} fill={r.cat.color} />)}
+          <div style={{ position: "relative", width: 208, height: 208, margin: "2px auto 6px" }}>
+            <PieChart width={208} height={208}>
+              <Pie data={rows.map(r => ({ name: r.cat.name, value: r.amt }))} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={64} outerRadius={96} paddingAngle={rows.length > 1 ? 2 : 0} cornerRadius={3} stroke="none" isAnimationActive={false} onClick={(_, idx) => { const r = rows[idx]; if (r) toggleCat(r.cid); }}>
+                {rows.map(r => <Cell key={r.cid} fill={r.cat.color} fillOpacity={selCid && r.cid !== selCid ? 0.3 : 1} style={{ cursor: "pointer", outline: "none" }} />)}
               </Pie>
             </PieChart>
-            <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
-              <span style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{formatCurrency(total)}</span>
-              <span style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", letterSpacing: "0.4px" }}>{rows.length} {rows.length === 1 ? "category" : "categories"}</span>
+            <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none", textAlign: "center" }}>
+              {sel ? (
+                <>
+                  <span style={{ display: "flex", alignItems: "center", gap: 4, maxWidth: 104 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: sel.cat.color, flexShrink: 0 }} /><span style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ts)", fontFamily: "var(--font-h)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sel.cat.name}</span></span>
+                  <span style={{ fontFamily: "var(--font-h)", fontSize: 16, fontWeight: 800, color: "var(--text)", marginTop: 2 }}>{formatCurrency(sel.amt)}</span>
+                  <span style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", marginTop: 1 }}>{sel.pct}% of spend</span>
+                  {sel.delta !== null ? (
+                    <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: sel.delta > 0 ? "#E07A5F" : sel.delta < 0 ? "#6BAA75" : "var(--muted)", background: sel.delta > 0 ? "#E07A5F15" : sel.delta < 0 ? "#6BAA7515" : "var(--bg)", padding: "1px 6px", borderRadius: 3, marginTop: 3, whiteSpace: "nowrap" }}>{sel.delta > 0 ? "▲ +" : sel.delta < 0 ? "▼ " : ""}{sel.delta}% {prevLabel}</span>
+                  ) : sel.isNew ? (
+                    <span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 700, color: "#7B8CDE", background: "#7B8CDE15", padding: "1px 6px", borderRadius: 3, marginTop: 3, letterSpacing: "0.3px" }}>NEW</span>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <span style={{ fontFamily: "var(--font-h)", fontSize: 16, fontWeight: 800, color: "var(--text)" }}>{formatCurrency(total)}</span>
+                  <span style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", letterSpacing: "0.4px", marginTop: 1 }}>{rows.length} {rows.length === 1 ? "category" : "categories"}</span>
+                  <span style={{ fontSize: 8.5, color: "var(--muted)", fontFamily: "var(--font-b)", opacity: 0.75, marginTop: 3 }}>tap a slice</span>
+                </>
+              )}
             </div>
           </div>
-          {rows.map(r => {
-            const drilled = openCat === r.cid;
-            const shown = drilled ? r.txs.slice(0, 15) : [];
-            return (
-              <div key={r.cid} style={{ marginBottom: 10 }}>
-                <div onClick={() => { hapticSelection(); sOpenCat(drilled ? null : r.cid); }} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-                  <span style={{ width: 26, display: "flex", justifyContent: "center", flexShrink: 0 }}><DI2 id={r.cat.id} accent={r.cat.neon || r.cat.color} size={18} /></span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, gap: 8 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                        <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.cat.name}</span>
-                        <span style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", flexShrink: 0 }}>{r.pct}%</span>
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                        {r.delta !== null && <span title={prevLabel} style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: r.delta > 0 ? "#E07A5F" : "#6BAA75", background: r.delta > 0 ? "#E07A5F15" : "#6BAA7515", padding: "1px 5px", borderRadius: 3 }}>{r.delta > 0 ? "▲ +" : r.delta < 0 ? "▼ " : ""}{r.delta}%</span>}
-                        {r.isNew && <span title={prevLabel} style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 700, color: "#7B8CDE", background: "#7B8CDE15", padding: "1px 5px", borderRadius: 3, letterSpacing: "0.3px" }}>NEW</span>}
-                        <span style={{ fontSize: 12.5, fontFamily: "var(--font-h)", color: "var(--ts)", fontWeight: 600 }}>{formatCurrency(r.amt)}</span>
-                      </div>
-                    </div>
-                    <div style={{ height: 5, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${(r.amt / maxAmt) * 100}%`, background: r.cat.color, borderRadius: 3 }} /></div>
-                  </div>
-                  <span style={{ fontSize: 10, color: "var(--muted)", flexShrink: 0 }}>{drilled ? "▲" : "▼"}</span>
-                </div>
-                {drilled && (
-                  <div style={{ marginLeft: 36, marginTop: 6, padding: "8px 10px", background: "var(--bg)", borderRadius: 8, border: "1px solid var(--border)", maxHeight: 240, overflowY: "auto" }}>
-                    {shown.map(tx => (
-                      <div key={tx.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, paddingBottom: 6, borderBottom: "1px dashed var(--border)" }}>
-                        <div style={{ flex: 1, minWidth: 0, marginRight: 8 }}>
-                          <div style={{ fontSize: 11, color: "var(--ts)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-h)", fontWeight: 600 }}>{tx.note || "(no note)"}</div>
-                          <div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 1 }}>{dl(tx.date)}</div>
-                        </div>
-                        <span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--text)", fontWeight: 600, flexShrink: 0 }}>{formatCurrency(tx.amount)}</span>
-                      </div>
-                    ))}
-                    {r.txs.length > shown.length && <div style={{ fontSize: 10, color: "var(--muted)", textAlign: "center", paddingTop: 2, fontFamily: "var(--font-h)" }}>+{r.txs.length - shown.length} more in History</div>}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, justifyContent: "center" }}>
+            {rows.map(r => {
+              const on = selCid === r.cid;
+              return (
+                <button key={r.cid} onClick={() => toggleCat(r.cid)} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: on ? trendHexA(r.cat.color, 0.14) : "var(--bg)", border: `1px solid ${on ? r.cat.color : "var(--border)"}`, borderRadius: 20, padding: "3px 9px", cursor: "pointer", opacity: selCid && !on ? 0.5 : 1, transition: "all 0.15s" }}>
+                  <span style={{ width: 7, height: 7, borderRadius: "50%", background: r.cat.color, flexShrink: 0 }} />
+                  <span style={{ color: on ? "var(--text)" : "var(--muted)", fontSize: 10, fontFamily: "var(--font-b)", fontWeight: on ? 700 : 400 }}>{r.cat.name}</span>
+                  <span style={{ color: "var(--muted)", fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700 }}>{r.pct}%</span>
+                </button>
+              );
+            })}
+          </div>
         </>
       )}
     </div>
@@ -525,9 +621,12 @@ function VoiceAdd({ onParsed, accent = "#E07A5F", compact = false }) {
   return <div style={{ marginBottom: 14 }}><button onClick={listening ? stop : start} style={{ width: "100%", padding: "10px 14px", border: `1.5px dashed ${listening ? "#E07A5F" : accent}`, borderRadius: 10, background: listening ? "#E07A5F12" : "var(--card)", color: listening ? "#E07A5F" : accent, fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}><Microphone size={14} weight={listening ? "fill" : "regular"} />{listening ? "Listening… tap to stop" : "Voice add — say e.g. \"300 coffee bank\""}</button>{error && <div style={{ fontSize: 11, color: "#E07A5F", marginTop: 4, fontFamily: "var(--font-h)" }}>{error}</div>}</div>;
 }
 
-function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], autoRules = [], onLearnRule = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false }) {
+function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], autoRules = [], onLearnRule = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false, splitPeople = [], onAddSplits = () => {} }) {
   const _AD = (() => { try { return JSON.parse(sessionStorage.getItem("nomad-add-draft") || "{}"); } catch { return {}; } })();
   const [type, sType] = useState(_AD.type || "expense"), [amt, sAmt] = useState(_AD.amt || "0"), [catId, sCat] = useState(_AD.catId || cats[0]?.id || ""), [srcId, sSrc] = useState(isrc[0]?.id || ""), [wid, sW] = useState(_AD.wid || "bank"), [iwid, sIW] = useState("bank"), [tFrom, sTF] = useState("bank"), [tTo, sTT] = useState("upi_lite"), [date, sDate] = useState(_AD.date || localDateKey()), [note, sNote] = useState(_AD.note || ""), [fixed, sFixed] = useState(false);
+  // "Split with friends": selected friend names + the new-name input. Friends'
+  // equal shares become "owed" IOUs alongside the expense at submit time.
+  const [splitOn, sSplitOn] = useState(false), [splitSel, sSplitSel] = useState([]), [splitNew, sSplitNew] = useState("");
   const [rName, sRN] = useState(""), [rAmt, sRA] = useState(""), [rCat, sRC] = useState("rent"), [rWal, sRW] = useState("bank"), [rFreq, sRF] = useState("monthly"), [rDay, sRD] = useState(new Date().getDate()), [rInt, sRI] = useState(30), [rStart, sRS] = useState(localDateKey()), [rOther, sRO] = useState(""), [rYM, sRYM] = useState(1), [rYD, sRYD] = useState(1);
   const [fxCur, setFxCur] = useState("INR"), [fxRate, setFxRate] = useState(null), [fxFetching, setFxFetching] = useState(false), [fxDate, setFxDate] = useState(null);
   const [fxExpanded, setFxExpanded] = useState(false), [fxSearch, setFxSearch] = useState("");
@@ -722,7 +821,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
   };
   // Clear AI-bulk previews when switching transaction type — they're built
   // for the current type's wallet/category context and become stale otherwise.
-  useEffect(() => { sItemsPreview(null); sFixed(false); }, [type]);
+  useEffect(() => { sItemsPreview(null); sFixed(false); sSplitOn(false); sSplitSel([]); sSplitNew(""); }, [type]);
   useEffect(() => { const c = fxCur.trim().toUpperCase(); if (c.length !== 3 || c === "INR") { setFxRate(null); setFxDate(null); return; } setFxFetching(true); getExchangeRate(c, date).then(r => { setFxRate(r); setFxDate(getRateMeta(c, date)?.date || null); setFxFetching(false); }).catch(() => { setFxRate(null); setFxDate(null); setFxFetching(false); }); }, [fxCur, date]);
   useEffect(() => { try { sessionStorage.setItem("nomad-add-draft", JSON.stringify({ type, amt, catId, wid, date, note })); } catch { /* ignore storage errors */ } }, [type, amt, catId, wid, date, note]);
   const tc = type === "expense" ? "#E07A5F" : type === "income" ? "#6BAA75" : type === "transfer" ? "#7B8CDE" : "#A78BFA";
@@ -768,6 +867,12 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
         const txId = uid();
         if (isFX) saveCurrencyMeta(txId, fxCur, a, fxRate);
         txOk = oE({ id: txId, amount: inrAmt, categoryId: catId, date, note: fixed ? markFixedNote(note) : note, walletId: wid, recurring: fixed || undefined, ...(rUrl ? { receipt_url: rUrl } : {}) }) !== false;
+        if (txOk && splitOn && splitSel.length > 0) {
+          // Equal shares across you + friends; you keep shares[0] so any odd
+          // paise from rounding lands on you, never on a friend's IOU.
+          const shares = distributeAmount(inrAmt, splitSel.length + 1);
+          onAddSplits(splitSel.map((nm, i) => ({ id: uid(), name: nm, amount: shares[i + 1], direction: "owed", settled: false, eventId: null, groupId: null, note: note.trim() || cats.find(c => c.id === catId)?.name || "Split", categoryId: catId, date, createdAt: new Date().toISOString() })));
+        }
       } else if (type === "income") {
         const txId = uid();
         if (isFX) saveCurrencyMeta(txId, fxCur, a, fxRate);
@@ -780,6 +885,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       sAmt("0");
       sNote("");
       sFixed(false);
+      sSplitOn(false); sSplitSel([]); sSplitNew("");
       try { sessionStorage.removeItem("nomad-add-draft"); } catch { /* ignore */ }
     } finally {
       setSubmitting(false);
@@ -855,16 +961,31 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
           <div style={{ ...microLabel("var(--muted)"), marginBottom: 11 }}>{isExp ? "Category" : "Source"}</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{catList.map(c => { const on = selCatId === c.id; return <button key={c.id} onClick={() => { hapticSelection(); setSelCat(c.id); }} style={{ padding: "8px 13px 8px 10px", borderRadius: 100, fontSize: 12.5, fontFamily: "var(--font-h)", border: `1.5px solid ${on ? c.color : "var(--border)"}`, background: on ? alpha(c.color, 0.13) : "var(--bg)", color: on ? c.color : "var(--ts)", cursor: "pointer", fontWeight: on ? 800 : 600, display: "flex", alignItems: "center", gap: 6 }}><DI2 id={c.id} accent={c.neon || c.color} size={15} />{c.name}</button>; })}</div>
 
-          {isExp && <button onClick={() => { hapticSelection(); sFixed(f => !f); }} aria-pressed={fixed} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 12, padding: "9px 12px", borderRadius: 12, border: `1.5px solid ${fixed ? alpha("#A78BFA", 0.5) : "var(--border)"}`, background: fixed ? alpha("#A78BFA", 0.07) : "var(--bg)", cursor: "pointer", textAlign: "left", transition: "background .15s, border-color .15s" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
-              <Lightning size={16} weight={fixed ? "fill" : "regular"} color={fixed ? "#A78BFA" : "var(--muted)"} />
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontFamily: "var(--font-h)", fontSize: 12.5, fontWeight: 700, color: fixed ? "#A78BFA" : "var(--text)" }}>Fixed cost</div>
-                <div style={{ fontFamily: "var(--font-b)", fontSize: 10, color: "var(--muted)", lineHeight: 1.3, marginTop: 1 }}>Rent, bills, recharge — counts under Fixed</div>
-              </div>
-            </div>
-            <div style={{ width: 32, height: 18, borderRadius: 9, background: fixed ? "#A78BFA" : "var(--border)", position: "relative", flexShrink: 0, transition: "background .15s" }}><div style={{ position: "absolute", top: 2, left: fixed ? 16 : 2, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left .15s", boxShadow: "0 1px 3px rgba(0,0,0,0.25)" }} /></div>
-          </button>}
+          {isExp && (() => {
+            const SPL = "#7B8CDE";
+            const addName = () => { const nm = splitNew.trim().slice(0, 40); if (!nm) return; if ([...splitPeople, ...splitSel].some(p => p.toLowerCase() === nm.toLowerCase()) && !splitSel.some(p => p.toLowerCase() === nm.toLowerCase())) { sSplitSel(p => [...p, splitPeople.find(x => x.toLowerCase() === nm.toLowerCase()) || nm]); } else if (!splitSel.some(p => p.toLowerCase() === nm.toLowerCase())) { sSplitSel(p => [...p, nm]); } sSplitNew(""); };
+            const heads = splitSel.length + 1;
+            const shares = distributeAmount(inrAmt, heads);
+            return <>
+              <button onClick={() => { hapticSelection(); sSplitOn(v => !v); }} aria-pressed={splitOn} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 12, padding: "9px 12px", borderRadius: 12, border: `1.5px solid ${splitOn ? alpha(SPL, 0.5) : "var(--border)"}`, background: splitOn ? alpha(SPL, 0.07) : "var(--bg)", cursor: "pointer", textAlign: "left", transition: "background .15s, border-color .15s" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
+                  <Users size={16} weight={splitOn ? "fill" : "regular"} color={splitOn ? SPL : "var(--muted)"} />
+                  <span style={{ fontFamily: "var(--font-h)", fontSize: 12.5, fontWeight: 700, color: splitOn ? SPL : "var(--text)" }}>Split with friends</span>
+                  {splitOn && splitSel.length > 0 && <span style={{ fontSize: 10, fontFamily: "var(--font-h)", fontWeight: 800, color: SPL, background: alpha(SPL, 0.14), borderRadius: 8, padding: "2px 7px" }}>{splitSel.length}</span>}
+                </div>
+                <div style={{ width: 32, height: 18, borderRadius: 9, background: splitOn ? SPL : "var(--border)", position: "relative", flexShrink: 0, transition: "background .15s" }}><div style={{ position: "absolute", top: 2, left: splitOn ? 16 : 2, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left .15s", boxShadow: "0 1px 3px rgba(0,0,0,0.25)" }} /></div>
+              </button>
+              {splitOn && <div style={{ marginTop: 8, padding: "10px 12px", borderRadius: 12, border: `1px dashed ${alpha(SPL, 0.45)}`, background: alpha(SPL, 0.04) }}>
+                {(() => { const seen = new Set(); const allNames = [...splitPeople, ...splitSel].filter(nm => { const k = nm.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }); return allNames.length > 0 && <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>{allNames.map(nm => { const on = splitSel.some(p => p.toLowerCase() === nm.toLowerCase()); return <button key={nm} onClick={() => { hapticSelection(); sSplitSel(p => on ? p.filter(x => x.toLowerCase() !== nm.toLowerCase()) : [...p, nm]); }} style={{ padding: "6px 11px", borderRadius: 100, fontSize: 11.5, fontFamily: "var(--font-h)", fontWeight: on ? 800 : 600, border: `1.5px solid ${on ? SPL : "var(--border)"}`, background: on ? alpha(SPL, 0.13) : "var(--card)", color: on ? SPL : "var(--ts)", cursor: "pointer" }}>{on ? "✓ " : ""}{nm}</button>; })}</div>; })()}
+                <div style={{ display: "flex", gap: 6, marginBottom: splitSel.length > 0 ? 8 : 0 }}>
+                  <input value={splitNew} onChange={e => sSplitNew(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addName(); } }} placeholder={splitPeople.length ? "Add someone new…" : "Friend's name…"} style={{ flex: 1, minWidth: 0, height: 36, padding: "0 11px", borderRadius: 9, border: "1px solid var(--border)", background: "var(--card)", color: "var(--text)", fontSize: 12.5, fontFamily: "var(--font-b)", outline: "none" }} />
+                  <button onClick={addName} disabled={!splitNew.trim()} style={{ height: 36, padding: "0 13px", borderRadius: 9, border: "none", background: splitNew.trim() ? SPL : "var(--border)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 800, cursor: splitNew.trim() ? "pointer" : "not-allowed" }}>Add</button>
+                </div>
+                {splitSel.length > 0 && inrAmt > 0 && <div style={{ fontSize: 11.5, fontFamily: "var(--font-h)", fontWeight: 700, color: SPL, lineHeight: 1.5 }}>{fmt(inrAmt)} ÷ {heads} (you + {splitSel.length}) → each {fmt(shares[1] ?? 0)} · {splitSel.length} IOU{splitSel.length === 1 ? "" : "s"} on save</div>}
+                {splitSel.length > 0 && !(inrAmt > 0) && <div style={{ fontSize: 11, fontFamily: "var(--font-b)", color: "var(--muted)" }}>Enter the amount above to see everyone's share.</div>}
+              </div>}
+            </>;
+          })()}
 
           <div style={{ height: 1, background: "var(--border)", margin: "16px -18px" }} />
 
@@ -885,6 +1006,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
               to split one expense across categories was noisy. Use the receipt-items
               flow (Robot icon next to Scan) instead — it splits a *real* receipt
               into line items with editable per-line category. */}
+          {isExp && <button onClick={() => { hapticSelection(); sFixed(f => !f); }} aria-pressed={fixed} title="Rent, bills, recharge — counts under Fixed" style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8, padding: "8px 12px", borderRadius: 10, border: `1px solid ${fixed ? alpha("#A78BFA", 0.5) : "var(--border)"}`, background: fixed ? alpha("#A78BFA", 0.07) : "var(--bg)", cursor: "pointer", textAlign: "left", transition: "background .15s, border-color .15s" }}><span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}><Lightning size={14} weight={fixed ? "fill" : "regular"} color={fixed ? "#A78BFA" : "var(--muted)"} /><span style={{ fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, color: fixed ? "#A78BFA" : "var(--text)" }}>Fixed cost</span><span style={{ fontFamily: "var(--font-b)", fontSize: 10, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>· rent, bills, recharge</span></span><span style={{ width: 30, height: 17, borderRadius: 9, background: fixed ? "#A78BFA" : "var(--border)", position: "relative", flexShrink: 0, transition: "background .15s", display: "inline-block" }}><span style={{ position: "absolute", top: 2, left: fixed ? 15 : 2, width: 13, height: 13, borderRadius: "50%", background: "#fff", transition: "left .15s", boxShadow: "0 1px 3px rgba(0,0,0,0.25)", display: "inline-block" }} /></span></button>}
           <div style={{ marginBottom: 10 }}><ReceiptPicker ref={receiptPickerRef} cloudinaryEnabled={cloudinaryEnabled} /></div>
           {itemsPreview && (() => { const sum = roundMoney(itemsPreview.items.reduce((s, it) => s + (Number(it.amount) || 0), 0)); const total = roundMoney(itemsPreview.total || 0); const drift = roundMoney(sum - total); const driftBig = total > 0 && Math.abs(drift) > 5; return <div style={{ background: alpha(tc, 0.06), border: `1.5px solid ${alpha(tc, 0.4)}`, borderRadius: 14, padding: "10px 12px", marginBottom: 10 }}><div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 800, color: tc, letterSpacing: ".5px" }}>RECEIPT ITEMS · {itemsPreview.merchant || "(no merchant)"}</div><span style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 700 }}>{itemsPreview.items.length} item{itemsPreview.items.length === 1 ? "" : "s"}</span></div><div style={{ maxHeight: 280, overflowY: "auto", paddingRight: 2 }}>{itemsPreview.items.map((it, i) => <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 0", borderBottom: i < itemsPreview.items.length - 1 ? "1px dashed var(--border)" : "none" }}><input value={it.name || ""} onChange={e => updateItemName(i, e.target.value)} placeholder="Item" style={{ flex: 2, minWidth: 0, padding: "6px 8px", borderRadius: 7, border: "1px solid var(--border)", background: "var(--card)", color: "var(--text)", fontFamily: "var(--font-h)", fontWeight: 700, fontSize: 11.5, outline: "none" }} /><div style={{ position: "relative", flex: "0 1 118px", minWidth: 86 }}><select value={it.categoryId || ""} onChange={e => updateItemCat(i, e.target.value)} title="Set category — AI's guess is a starting point" style={{ width: "100%", appearance: "none", WebkitAppearance: "none", MozAppearance: "none", padding: "6px 22px 6px 9px", borderRadius: 7, border: `1px solid ${alpha(tc, 0.4)}`, background: alpha(tc, 0.06), color: tc, fontFamily: "var(--font-h)", fontWeight: 700, fontSize: 10.5, outline: "none", cursor: "pointer" }}>{cats.map(c => <option key={c.id} value={c.id} style={{ color: "var(--text)" }}>{c.name}</option>)}</select><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke={tc} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}><polyline points="6 9 12 15 18 9" /></svg></div><div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0, width: 80, border: "1px solid var(--border)", borderRadius: 7, padding: "5px 7px", background: "var(--card)" }}><span style={{ fontFamily: "var(--font-h)", fontWeight: 800, color: tc, fontSize: 11 }}>₹</span><input type="number" inputMode="decimal" value={it.amount ?? ""} onChange={e => updateItemAmount(i, e.target.value)} style={{ width: "100%", minWidth: 0, border: "none", background: "transparent", color: tc, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 12, outline: "none", textAlign: "right", padding: 0 }} /></div></div>)}</div><div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, padding: "6px 8px", borderRadius: 8, background: driftBig ? alpha("#D4726A", 0.12) : alpha(tc, 0.06), border: driftBig ? "1px solid #D4726A40" : "none" }}><span style={{ fontSize: 10.5, fontFamily: "var(--font-h)", color: driftBig ? "#D4726A" : "var(--muted)", fontWeight: 700 }}>{driftBig ? `Items sum ${fmt(sum)} ≠ receipt ${fmt(total)} (Δ${drift > 0 ? "+" : ""}${fmt(drift)})` : total > 0 ? `Items sum ${fmt(sum)} ≈ ${fmt(total)}` : `Items sum ${fmt(sum)}`}</span></div><div style={{ display: "flex", gap: 6, marginTop: 8 }}><button onClick={confirmItemsImport} style={{ flex: 2, padding: "8px", border: "none", borderRadius: 9, background: tc, color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>Add {itemsPreview.items.length} item{itemsPreview.items.length === 1 ? "" : "s"}</button><button onClick={() => sItemsPreview(null)} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 9, background: "transparent", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Cancel</button></div></div>; })()}
         </div>
@@ -1553,6 +1675,11 @@ export default function Nomad() {
   const [chatMsgs, sChatMsgs] = useState([]);
   const [chatInput, sChatInput] = useState("");
   const [chatLoading, sChatLoading] = useState(false);
+  const [chatMic, sChatMic] = useState(false);
+  const chatRecRef = useRef(null);
+  const chatScrollRef = useRef(null);
+  // Keep the transcript pinned to the newest message as it streams in.
+  useEffect(() => { const el = chatScrollRef.current; if (el) el.scrollTop = el.scrollHeight; }, [chatMsgs, chatLoading, chatOpen]);
   const [lionMsg, sLionMsg] = useState(""); const [lionMsgLoading, sLionMsgLoading] = useState(false);
   const [walletsMgrOpen, sWalletsMgrOpen] = useState(false);
   const [newWalletName, sNewWalletName] = useState(""), [newWalletColor, sNewWalletColor] = useState("#A78BFA"), [newWalletUL, sNewWalletUL] = useState(false);
@@ -1925,7 +2052,25 @@ export default function Nomad() {
 
   const allM = useMemo(() => { const s = new Set(); ex.forEach(e => s.add(mk(e.date))); inc.forEach(i => s.add(mk(i.date))); return [...s].sort() }, [ex, inc]);
   const quickPatterns = useMemo(() => { const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 60); const cutStr = localDateKey(cutoff); const counts = {}; ex.filter(e => !e.deleted_at && !isTrackedExp(e) && (e.date || "") >= cutStr).forEach(e => { const k = `${e.amount}|${e.categoryId || ""}|${e.walletId || "upi_lite"}|${(e.note || "").slice(0, 30)}`; if (!counts[k]) counts[k] = { count: 0, amount: e.amount, categoryId: e.categoryId || "", walletId: e.walletId || "upi_lite", note: e.note || "" }; counts[k].count++; }); return Object.values(counts).filter(p => p.count >= 2).sort((a, b) => b.count - a.count).slice(0, 5); }, [ex]);
-  const finStreak = useMemo(() => { const allDays = new Set([...ex, ...inc].map(t => String(t.date || "").slice(0, 10))); let s = 0; const d = new Date(); while (true) { const k = localDateKey(d); if (!allDays.has(k)) break; s++; d.setDate(d.getDate() - 1); } return s; }, [ex, inc]);
+  // Duolingo-style logging streak (src/streak.js): all manual log types count,
+  // "no spend" confirmations count, earned freezes forgive missed days, and a
+  // pending today never zeroes the flame. Derived by replay — only the
+  // no-spend list + last-celebrated milestone persist (nomad-streak-v1).
+  const [streakStore, sStreakStore] = useState(loadStreakStore);
+  const [streakOpen, sStreakOpen] = useState(false);
+  const [streakNudgeGone, sStreakNudgeGone] = useState(() => { try { return localStorage.getItem("nomad-streak-nudge") === localDateKey(); } catch { return false; } });
+  const streakInfo = useMemo(() => computeStreak({
+    txDates: [...ex, ...inc, ...tr, ...stl].map(t => t.date),
+    noSpendDays: streakStore.noSpendDays,
+  }), [ex, inc, tr, stl, streakStore]);
+  const finStreak = streakInfo.current;
+  const markNoSpendToday = () => {
+    const today = localDateKey();
+    if (streakStore.noSpendDays.includes(today) || streakInfo.todayLogged) return;
+    hapticLight();
+    sStreakStore(saveStreakStore({ ...streakStore, noSpendDays: [...streakStore.noSpendDays, today] }));
+    showT("Day accounted for — streak safe 🔥", "success");
+  };
   const finScore = useMemo(() => computeFinanceScore({ expenses: ex.filter(e => !isTrackedExp(e)), incomes: inc, recurring: rec }), [ex, inc, rec]);
   const subSuggestions = useMemo(() => { const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 90); const cutStr = localDateKey(cutoff); const recNames = new Set(rec.map(r => r.name.toLowerCase().trim())); const groups = {}; ex.filter(e => !e.deleted_at && !isTrackedExp(e) && (e.date || "") >= cutStr).forEach(e => { const k = (e.note || "").toLowerCase().trim(); if (!k || k.length < 3) return; if (!groups[k]) groups[k] = []; groups[k].push(e); }); return Object.values(groups).filter(g => g.length >= 2).map(g => { const amounts = g.map(e => e.amount); const avgAmt = roundMoney(amounts.reduce((s, a) => s + a, 0) / amounts.length); const name = g[0].note || ""; if (recNames.has(name.toLowerCase().trim())) return null; return { name, categoryId: g[0].categoryId, walletId: g[0].walletId || "bank", count: g.length, avgAmt }; }).filter(Boolean).sort((a, b) => b.count - a.count).slice(0, 5); }, [ex, rec]);
   const flt = useMemo(() => fm === "all" ? { expenses: ex, incomes: inc, settlements: stl } : { expenses: ex.filter(e => mk(e.date) === fm), incomes: inc.filter(i => mk(i.date) === fm), settlements: stl.filter(s => mk(s.date) === fm) }, [ex, inc, stl, fm]);
@@ -2160,6 +2305,16 @@ export default function Nomad() {
   }, [loaded]);
 
   const dance = () => { sLd(true); setTimeout(() => sLd(false), 1800) };
+  // Streak milestone celebration — once per milestone (lastCelebrated guards
+  // re-fires across re-renders/devices reloading the same day).
+  useEffect(() => {
+    const m = streakInfo.milestoneToday;
+    if (!m || m <= streakStore.lastCelebrated) return;
+    sStreakStore(s => saveStreakStore({ ...s, lastCelebrated: m }));
+    dance();
+    showT(`🔥 ${m}-day streak — milestone reached!`, "success");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streakInfo.milestoneToday]);
   const toSB = (obj, keys) => Object.fromEntries(keys.map(k => [k, obj[k] ?? null]));
   // Compute historical balance up to and including a given date for a wallet
   const balanceOnDate = (walletId, date) => {
@@ -2663,18 +2818,86 @@ export default function Nomad() {
     if (toast) showT(`${matched.length} matched · ${missing.length} missing — review below`, "info");
     return { walletId: wid, total: rows.length, matched: matched.length, missing: missing.length, already: alreadyImported.length, missingRows: missing };
   };
-  // Statement file → rows. CSV parses on-device; PDF goes to the vision OCR
-  // endpoint (same plumbing as ledger photos, `type: "statement"`).
+  // Statement file → rows. Ordered so the paths that CANNOT fail on a flaky
+  // network / down AI provider run first:
+  // 1. CSV                → parseBankCsv on-device (no network).
+  // 2. Text PDF, GPay/UPI → pdfjs text extraction + parseUpiStatement, both
+  //                        fully on-device. This is the primary PDF path — a
+  //                        GPay statement now parses with ZERO server calls.
+  // 3. Text PDF, other    → extracted text to /api/ai-analyze `statement-parse`
+  //                        (any text provider, not just Gemini).
+  // 4. Scanned PDF/image  → Gemini vision OCR (`type: "statement"`), the only
+  //                        path that can read pixels.
+  const parseStatementText = async (text) => {
+    // Cap client-side to what the server reads anyway (24 KB) — a 12-page
+    // statement over a slow mobile link shouldn't upload more than that.
+    const res = await fetch("/api/ai-analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "statement-parse", text: String(text).slice(0, 24000) }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Couldn't read the statement");
+    return (data.rows || []).map(r => ({ date: r.date, amount: r.amount, type: r.type, note: r.note || "", ref: r.ref || "" }));
+  };
+  const statementVisionOcr = async (file, { isPdf }) => {
+    let b64, mimeType;
+    if (isPdf) {
+      const dataUrl = await new Promise((resolve, reject) => { const r = new FileReader(); r.onerror = () => reject(new Error("Failed to read PDF file")); r.onload = () => resolve(r.result); r.readAsDataURL(file); });
+      [, b64] = String(dataUrl).split(",");
+      mimeType = "application/pdf";
+    } else {
+      // Screenshot / photo of a statement — compress to 1400px JPEG so a
+      // full-page screenshot stays under the 2.8 MB backend limit.
+      b64 = await new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+          const scale = Math.min(1, 1400 / Math.max(img.width, img.height));
+          const c = document.createElement("canvas");
+          c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+          c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+          URL.revokeObjectURL(url);
+          resolve(c.toDataURL("image/jpeg", 0.75).split(",")[1]);
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Couldn't read that image.")); };
+        img.src = url;
+      });
+      mimeType = "image/jpeg";
+    }
+    if (!b64 || b64.length > 2_800_000) throw new Error(isPdf ? "PDF too large — export a shorter date range or use CSV." : "Image too large — try a smaller screenshot.");
+    const res = await fetch("/api/food-vision", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "statement", imageBase64: b64, mimeType }) });
+    const data = await res.json().catch(() => ({}));
+    // Append the first provider error so a failure is diagnosable from the
+    // chat bubble (e.g. "gemini HTTP 429: quota") instead of a dead generic.
+    if (!res.ok) throw new Error((data.error || "Statement OCR failed") + (Array.isArray(data.details) && data.details[0] ? ` (${String(data.details[0]).slice(0, 120)})` : ""));
+    return (data.rows || []).map(r => ({ date: r.date, amount: r.amount, type: r.type, note: r.note || "", ref: r.ref || "" }));
+  };
   const statementFileToRows = async (file) => {
     const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
+    const isImage = /^image\//.test(file.type || "") || /\.(png|jpe?g|webp|heic)$/i.test(file.name || "");
+    if (isImage && !isPdf) return statementVisionOcr(file, { isPdf: false });
     if (!isPdf) return parseBankCsv(await file.text());
-    const dataUrl = await new Promise((resolve, reject) => { const r = new FileReader(); r.onerror = () => reject(new Error("Failed to read PDF file")); r.onload = () => resolve(r.result); r.readAsDataURL(file); });
-    const [, b64] = String(dataUrl).split(",");
-    if (!b64 || b64.length > 2_800_000) throw new Error("PDF too large — export a shorter date range or use CSV.");
-    const res = await fetch("/api/food-vision", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "statement", imageBase64: b64, mimeType: "application/pdf" }) });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || "Statement OCR failed");
-    return (data.rows || []).map(r => ({ date: r.date, amount: r.amount, type: r.type, note: r.note || "", ref: r.ref || "" }));
+    // On-device text extraction first — works for the vast majority of
+    // bank/UPI statements.
+    const text = await extractPdfText(file);
+    let localRows = [];
+    if (looksLikeText(text)) {
+      // Deterministic GPay/UPI-layout parse: no network, no AI, can't be down.
+      localRows = parseUpiStatement(text);
+      if (localRows.length >= 3) return localRows;
+      // Not a recognised UPI layout (or barely matched) → AI text parse. If
+      // the providers are down but the local pass DID find something, prefer
+      // those few real rows over dying.
+      try {
+        const rows = await parseStatementText(text);
+        if (rows.length) return rows;
+      } catch (e) {
+        if (localRows.length) return localRows;
+        // Real text was extracted but no parser could read it — say that,
+        // instead of letting vision OCR fail later with a misleading error.
+        throw new Error(`I could read the PDF's text but not its transaction layout (${e?.message || "parse failed"}). A CSV export will work.`);
+      }
+      if (localRows.length) return localRows;
+    }
+    // No usable text (scanned/image PDF) → vision OCR is the only option left.
+    return statementVisionOcr(file, { isPdf: true });
   };
   const impRecon = async (file) => {
     if (reconOcrBusy) return;
@@ -2706,9 +2929,10 @@ export default function Nomad() {
     try {
       const isCsv = /\.csv$/i.test(file.name || "") || file.type === "text/csv";
       const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
-      if (!isCsv && !isPdf) throw new Error("Attach your bank/UPI statement as a **CSV** or **PDF** and I'll compare it against everything you've logged.");
+      const isImage = /^image\//.test(file.type || "") || /\.(png|jpe?g|webp|heic)$/i.test(file.name || "");
+      if (!isCsv && !isPdf && !isImage) throw new Error("Attach your bank/UPI statement as a **CSV**, **PDF**, or **screenshot** and I'll compare it against everything you've logged.");
       const rows = await statementFileToRows(file);
-      if (!rows.length) { sChatMsgs(p => [...p, { role: "assistant", content: "I couldn't read any transactions from that file. A CSV export from your bank works best; for PDFs, make sure it's a real statement (not a scanned photo)." }]); return; }
+      if (!rows.length) { sChatMsgs(p => [...p, { role: "assistant", content: "I couldn't read any transactions from that file. A **CSV export** from your bank works best. PDFs and screenshots also work — just make sure the transactions are clearly visible." }]); return; }
       const sum = runRecon(rows, { toast: false });
       if (!sum) { sChatMsgs(p => [...p, { role: "assistant", content: "Add a wallet first, then I can reconcile against it." }]); return; }
       const wName = wallets.find(w => w.id === sum.walletId)?.name || "your wallet";
@@ -2721,7 +2945,9 @@ export default function Nomad() {
         sChatMsgs(p => [...p, { role: "assistant", content: `I compared ${sum.total} statement row${sum.total === 1 ? "" : "s"} against **${wName}**: **${sum.matched} matched**, **${sum.missing} missing** from NOMAD${already}.\n\nMissing:\n${lines}${more}\n\nOpen the review to tick & import. The **AI review** button there asks every configured AI provider and majority-votes the verdicts.`, action: "recon" }]);
       }
     } catch (err) {
-      sChatMsgs(p => [...p, { role: "assistant", content: err.message || "Couldn't process that file — try again or use the Settings → Reconcile uploader." }]);
+      // fetch()'s bare TypeError reads like a bug to users; name the culprit.
+      const msg = /failed to fetch|networkerror|load failed/i.test(err?.message || "") ? "The upload didn't reach the server — your connection dropped mid-way. Try again on a steadier network." : (err.message || "Couldn't process that file — try again or use the Settings → Reconcile uploader.");
+      sChatMsgs(p => [...p, { role: "assistant", content: msg }]);
     } finally { sChatLoading(false); }
   };
   const confirmRecon = () => {
@@ -3097,7 +3323,10 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
       return <div style={{ position: "sticky", top: 0, zIndex: 100, background: dm ? "rgba(0,0,0,0.97)" : "rgba(242,240,235,0.97)", borderBottom: `1px solid ${dm ? "#1F1F1F" : "rgba(0,0,0,0.06)"}`, padding: "12px 20px 10px", transition: "padding 0.2s" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: SHOW_ROUTINE ? 10 : 0 }}>
           <div style={{ fontFamily: "'Plus Jakarta Sans',sans-serif", fontSize: 20, fontWeight: 700, color: dm ? "#E5E7EB" : "#1A1A2E", letterSpacing: "0.04em", lineHeight: 1 }}>NOMAD</div>
-          <span style={{ fontFamily: "var(--font-h)", fontSize: 11, color: dm ? "#6B7280" : "var(--muted)", fontWeight: 600, letterSpacing: "1.5px" }}>{new Date().toLocaleDateString("en-US", { weekday: "short" }).toUpperCase()} · {new Date().getDate()} {new Date().toLocaleDateString("en-US", { month: "short" }).toUpperCase()}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {(streakInfo.current > 0 || streakInfo.todayLogged) && <button onClick={() => { hapticSelection(); sStreakOpen(true); }} title={streakInfo.atRisk ? "Streak at risk — log today" : "Logging streak"} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 9px", borderRadius: 100, border: `1.5px solid ${streakInfo.atRisk ? (dm ? "#4B5563" : "#D1CDC4") : "#FBBF24"}`, background: streakInfo.atRisk ? "transparent" : "#FBBF2418", cursor: "pointer" }}><Fire size={13} weight="fill" color={streakInfo.atRisk ? (dm ? "#6B7280" : "#9A9488") : "#FBBF24"} /><span style={{ fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 800, color: streakInfo.atRisk ? (dm ? "#6B7280" : "#9A9488") : "#FBBF24", lineHeight: 1 }}>{streakInfo.current}</span>{streakInfo.freezesHeld > 0 && <span style={{ fontSize: 10, lineHeight: 1 }}>{"🧊".repeat(streakInfo.freezesHeld)}</span>}</button>}
+            <span style={{ fontFamily: "var(--font-h)", fontSize: 11, color: dm ? "#6B7280" : "var(--muted)", fontWeight: 600, letterSpacing: "1.5px" }}>{new Date().toLocaleDateString("en-US", { weekday: "short" }).toUpperCase()} · {new Date().getDate()} {new Date().toLocaleDateString("en-US", { month: "short" }).toUpperCase()}</span>
+          </div>
         </div>
         {SHOW_ROUTINE && <div style={{ display: "flex", gap: 8 }}>
           <button onClick={() => { hapticSelection(); setModule("finance") }} style={{ flex: 1, padding: "7px 0", borderRadius: 100, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, border: `1.5px solid ${module === "finance" ? "#E07A5F" : dm ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.1)"}`, cursor: "pointer", background: module === "finance" ? "#E07A5F" : "transparent", color: module === "finance" ? "#fff" : dm ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.35)", letterSpacing: "0.5px", transition: "all 0.2s" }}>Finance</button>
@@ -3121,13 +3350,14 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
           const payDue = (r, walletId) => { const ok = addE({ amount: r.amount, categoryId: r.categoryId, walletId, date: todS, note: r.name + " (recurring)", recurring: true }); if (ok === false) return; const updated = { ...r, lastPaidDate: todS, lastSkippedDate: null }; sRec(p => p.map(x => x.id === r.id ? updated : x)); sbUpsert("recurring", [toSB(updated, COLS.recurring)], null, getVersion("recurring", r.id) ? { "If-Unmodified-Since": getVersion("recurring", r.id) } : {}); showT(`${r.name} paid from ${wallets.find(w => w.id === walletId)?.name || "wallet"} — ${fmt(r.amount)}`, "success"); sPayRec(null); sPayRecWal(null); };
           return due.length > 0 && <div style={{ marginBottom: 14 }}>{due.map(r => { const cat = resolveRecCategory(r.categoryId, [RC, recCats], r.categoryName); const wal = wallets.find(w => w.id === r.walletId) || { name: r.walletId }; const picking = payRec === r.id; const selWal = payRecWal || r.walletId; return <div key={r.id} style={{ ...cc, borderLeft: "3px solid #E07A5F", borderRadius: 14, padding: "14px 16px", marginBottom: 8 }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}><Warning size={16} color="#E07A5F" weight="fill" /><div style={{ flex: 1 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{(() => { const od = recurringDaysOverdue(r, todS); return <>{r.name} {od > 0 ? "overdue" : "due today"} — {fmt(r.amount)}{od > 0 ? <span style={{ marginLeft: 6, padding: "2px 6px", borderRadius: 4, background: "#D4726A", color: "#fff", fontSize: 10, fontWeight: 600 }}>{od}d overdue</span> : null}</>; })()}</div><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{wal.name} → {cat.name}</div></div></div>{picking ? <div><div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: "0.5px", marginBottom: 6 }}>PAID FROM</div><div style={{ display: "flex", gap: 6, marginBottom: 8 }}>{wallets.map(w => { const on = selWal === w.id; return <button key={w.id} onClick={() => sPayRecWal(w.id)} style={{ flex: 1, padding: "8px 4px", borderRadius: 9, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, border: `2px solid ${on ? w.color : "var(--border)"}`, background: on ? w.color + "15" : "var(--card)", cursor: "pointer" }}><DI2 id={w.id} accent={w.neon || w.color} size={15} /><span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: on ? 700 : 500, color: on ? w.color : "var(--muted)" }}>{w.name}</span></button>; })}</div>{isUpiLite(wallets.find(w => w.id === selWal) || {}) && <div style={{ fontSize: 10, color: "#00B4D8", fontFamily: "var(--font-h)", fontWeight: 600, marginBottom: 8 }}>UPI Lite · ₹5000 cap — blocked if short, just pick another.</div>}<div style={{ display: "flex", gap: 6 }}><button onClick={(ev) => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; payDue(r, selWal); ev.currentTarget.disabled = false; }} style={{ flex: 2, padding: "8px", border: "none", borderRadius: 8, background: "#6BAA75", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>✓ Confirm paid</button><button onClick={() => { sPayRec(null); sPayRecWal(null); }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Cancel</button></div></div> : <div style={{ display: "flex", gap: 6 }}><button onClick={() => { sPayRec(r.id); sPayRecWal(r.walletId); }} style={{ flex: 1, padding: "8px", border: "none", borderRadius: 8, background: "#6BAA75", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>✓ Paid</button><button onClick={(ev) => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; const updated = { ...r, lastSkippedDate: todS }; sRec(p => p.map(x => x.id === r.id ? updated : x)); sbUpsert("recurring", [toSB(updated, COLS.recurring)], null, getVersion("recurring", r.id) ? { "If-Unmodified-Since": getVersion("recurring", r.id) } : {}); showT("Skipped for this cycle", "info") }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Skip</button><button onClick={() => { const snoozeUntil = localDateKey(new Date(Date.now() + 864e5)); const snoozed = JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); snoozed[r.id] = snoozeUntil; localStorage.setItem("nomad-rec-snooze", JSON.stringify(snoozed)); sRec(p => [...p]); showT("Snoozed until tomorrow", "info") }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Snooze</button></div>}</div> })}</div>
         })()}
+        {streakInfo.atRisk && streakInfo.current >= 3 && !streakNudgeGone && new Date().getHours() >= 19 && <div style={{ ...cc, borderLeft: "3px solid #FBBF24", padding: "12px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 10 }}><Fire size={18} weight="fill" color="#FBBF24" /><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>{streakInfo.current}-day streak at risk</div><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>Log today's transactions — or confirm a no-spend day.{streakInfo.freezesHeld > 0 ? ` (${streakInfo.freezesHeld} freeze${streakInfo.freezesHeld === 1 ? "" : "s"} in reserve)` : ""}</div></div><button onClick={markNoSpendToday} style={{ padding: "7px 10px", border: "none", borderRadius: 8, background: "#6BAA75", color: "#fff", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" }}>No spend ✓</button><button onClick={() => { sStreakNudgeGone(true); try { localStorage.setItem("nomad-streak-nudge", localDateKey()); } catch { /* quota */ } }} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 14, opacity: 0.5, flexShrink: 0, padding: "0 2px" }}>✕</button></div>}
         {loaded && ex.length === 0 && inc.length === 0 && <div style={{ ...cc, padding: "18px 20px", marginBottom: 14, borderLeft: "3px solid #7B8CDE" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}><HandWaving size={16} weight="fill" />Welcome to NOMAD</div><div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6, marginBottom: 12 }}>Track expenses, income, and recurring bills.<br />Tap <strong>Add</strong> below to log your first transaction.</div><div style={{ display: "flex", gap: 8 }}><button onClick={() => sTab("add")} style={{ flex: 1, padding: "9px", border: "none", borderRadius: 9, background: "#E07A5F", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>+ Add Expense</button><button onClick={() => sTab("settings")} style={{ padding: "9px 14px", border: "1.5px solid var(--border)", borderRadius: 9, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Settings</button></div></div>}
         {(() => { const saved = roundMoney(tI - tE); const savedPct = tI > 0 ? Math.round((saved / tI) * 100) : null; return <div style={{ ...cc, padding: "26px 22px 20px", marginBottom: 16, textAlign: "center" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 11, color: "var(--muted)", letterSpacing: "1.5px", textTransform: "uppercase", fontWeight: 500 }}>Total Balance</div><div style={{ fontSize: 36, fontWeight: 700, fontFamily: "var(--font-h)", color: mBal >= 0 ? "#6BAA75" : "#E07A5F", marginTop: 6, lineHeight: 1.2 }}>{fmt(mBal)}</div><div style={{ borderTop: "1px dashed var(--border)", marginTop: 18, paddingTop: 16 }}><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 4 }}><div><div style={{ fontFamily: "var(--font-h)", fontSize: 9, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600 }}>IN</div><div style={{ fontFamily: "var(--font-h)", fontSize: 13, color: "#6BAA75", marginTop: 3, fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(tI)}</div></div><div style={{ borderLeft: "1px solid var(--border)", borderRight: "1px solid var(--border)", padding: "0 4px" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 9, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600 }}>OUT</div><div style={{ fontFamily: "var(--font-h)", fontSize: 13, color: "#E07A5F", marginTop: 3, fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(tE)}</div></div><div><div style={{ fontFamily: "var(--font-h)", fontSize: 9, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600 }}>{saved >= 0 ? "SAVED" : "OVERSPEND"}</div><div style={{ fontFamily: "var(--font-h)", fontSize: 13, color: saved >= 0 ? "#7B8CDE" : "#D4726A", marginTop: 3, fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(Math.abs(saved))}</div>{savedPct !== null && saved >= 0 && <div style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", marginTop: 1, fontWeight: 600 }}>{savedPct}% of in</div>}</div></div></div></div>; })()}
 
         <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(wallets.length, 3)}, minmax(0, 1fr))`, gap: 8, marginBottom: 14 }}>{wallets.map(w => { const b = roundMoney(wBal[w.id] || 0); return <div key={w.id} onClick={() => { hapticLight(); sCalW(w); }} className="card-hover" style={{ ...cc, minWidth: 0, padding: "12px 10px", cursor: "pointer", borderLeft: `3px solid ${w.color}`, borderRadius: 14 }}><div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 8 }}><DI2 id={w.id} accent={w.neon || w.color} size={14} /><span style={{ fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, flex: 1 }}>{w.name}</span>{w.id === "cash" && <button onClick={e => { e.stopPropagation(); sRecountW(w); }} title="Count cash" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12, padding: "1px 3px", lineHeight: 1, opacity: 0.5, flexShrink: 0 }}>⟳</button>}</div><div style={{ fontSize: 16, fontWeight: 700, fontFamily: "var(--font-h)", color: b >= 0 ? w.color : "#E07A5F" }}>{fmt(b)}</div>{(() => { const v = walletVerify[w.id] || { state: "new" }; const cfg = { ok: { c: "#6BAA75", icon: <IconCheck size={9} stroke={3} />, t: "Verified" }, stale: { c: "#FBBF24", icon: <IconClock size={9} />, t: "Check" }, drift: { c: "#D4726A", icon: <Warning size={9} weight="fill" />, t: "Drift" }, new: { c: "var(--muted)", icon: <Scales size={9} />, t: "Verify" } }[v.state]; return <div title={v.state === "drift" ? `Last check was off by ${fmt(Math.abs(v.last.gap))} — tap to reconcile & find the missing entry` : v.state === "stale" ? `${v.newTx ? v.newTx + " new txn" + (v.newTx === 1 ? "" : "s") : v.days + "d"} ${v.last ? "since last verified" : "logged — never verified"} — tap to reconcile` : v.state === "ok" ? `Verified ${v.last.date}` : "Never verified — tap to set your real balance"} style={{ marginTop: 5, display: "inline-flex", alignItems: "center", gap: 3, fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 700, color: cfg.c, background: v.state === "new" ? "var(--bg)" : cfg.c + "1A", borderRadius: 5, padding: "2px 5px", lineHeight: 1, maxWidth: "100%" }}>{cfg.icon}<span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cfg.t}</span></div>; })()}</div> })}</div>
 
         <LionM balance={mBal} dancing={ld} aiMsg={lionMsg} aiLoading={lionMsgLoading} onTap={() => sChatOpen(true)} />
-        {(() => { const sl = scoreLabel(finScore.score); return <div style={{ ...cc, padding: "10px 16px", marginBottom: 12 }}><div onClick={() => sScoreOpen(o => !o)} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}><div style={{ width: 44, height: 44, borderRadius: "50%", border: `2.5px solid ${sl.color}`, background: sl.color + "18", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><span style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 800, color: sl.color }}>{finScore.score}</span></div><div style={{ flex: 1 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, color: "var(--text)" }}>Health Score — {sl.label}</div><div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>Savings · Bills · Spread · Logging</div></div>{finStreak > 1 && <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 8, background: "#FBBF2415", border: "1px solid #FBBF24" }}><Fire size={14} weight="fill" color="#FBBF24" /><span style={{ fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, color: "#FBBF24" }}>{finStreak}d</span></div>}<span style={{ fontSize: 10, color: "var(--muted)", transition: "transform 0.2s", display: "inline-block", transform: scoreOpen ? "rotate(0deg)" : "rotate(-90deg)" }}>▾</span></div>{scoreOpen && <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>{[{ label: "Savings", score: finScore.breakdown.savings, max: 35, hint: "income vs spending" }, { label: "Bills", score: finScore.breakdown.bills, max: 25, hint: "recurring bills" }, { label: "Spread", score: finScore.breakdown.spread, max: 20, hint: "category diversity" }, { label: "Logging", score: finScore.breakdown.logging, max: 20, hint: "days tracked" }].map(({ label, score: sc, max, hint }) => { const pct = Math.round(sc / max * 100); const bc = pct >= 80 ? "#6BAA75" : pct >= 50 ? "#FBBF24" : "#E07A5F"; return <div key={label}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}><span style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--text)" }}>{label}</span><span style={{ fontSize: 10, color: "var(--muted)" }}>{sc}/{max} · {hint}</span></div><div style={{ height: 4, borderRadius: 2, background: "var(--border)" }}><div style={{ height: "100%", width: `${pct}%`, background: bc, borderRadius: 2 }} /></div></div>; })}</div>}</div>; })()}
+        {(() => { const sl = scoreLabel(finScore.score); return <div style={{ ...cc, padding: "10px 16px", marginBottom: 12 }}><div onClick={() => sScoreOpen(o => !o)} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}><div style={{ width: 44, height: 44, borderRadius: "50%", border: `2.5px solid ${sl.color}`, background: sl.color + "18", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><span style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 800, color: sl.color }}>{finScore.score}</span></div><div style={{ flex: 1 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, color: "var(--text)" }}>Health Score — {sl.label}</div><div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>Savings · Bills · Spread · Logging</div></div><span style={{ fontSize: 10, color: "var(--muted)", transition: "transform 0.2s", display: "inline-block", transform: scoreOpen ? "rotate(0deg)" : "rotate(-90deg)" }}>▾</span></div>{scoreOpen && <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>{[{ label: "Savings", score: finScore.breakdown.savings, max: 35, hint: "income vs spending" }, { label: "Bills", score: finScore.breakdown.bills, max: 25, hint: "recurring bills" }, { label: "Spread", score: finScore.breakdown.spread, max: 20, hint: "category diversity" }, { label: "Logging", score: finScore.breakdown.logging, max: 20, hint: "days tracked" }].map(({ label, score: sc, max, hint }) => { const pct = Math.round(sc / max * 100); const bc = pct >= 80 ? "#6BAA75" : pct >= 50 ? "#FBBF24" : "#E07A5F"; return <div key={label}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}><span style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--text)" }}>{label}</span><span style={{ fontSize: 10, color: "var(--muted)" }}>{sc}/{max} · {hint}</span></div><div style={{ height: 4, borderRadius: 2, background: "var(--border)" }}><div style={{ height: "100%", width: `${pct}%`, background: bc, borderRadius: 2 }} /></div></div>; })}</div>}</div>; })()}
         {stalePersonal.length > 0 && (() => { const owed = stalePersonal.filter(s => s.direction === "owed"); const owe = stalePersonal.filter(s => s.direction === "owe"); const owedTot = owed.reduce((t, s) => t + (s.amount - (stl||[]).filter(x => x.splitId === s.id).reduce((u, x) => u + x.amount, 0)), 0); const oweTot = owe.reduce((t, s) => t + (s.amount - (stl||[]).filter(x => x.splitId === s.id).reduce((u, x) => u + x.amount, 0)), 0); return <div onClick={() => { sTab("add"); sAddSeg("iou"); }} style={{ ...cc, padding: "12px 14px", marginBottom: 12, border: "1.5px solid #F4A261", background: "#F4A26115", cursor: "pointer", display: "flex", alignItems: "center", gap: 10 }}><IconClock size={20} color="#D4726A" style={{ flexShrink: 0 }} /><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, color: "#D4726A" }}>{stalePersonal.length} IOU{stalePersonal.length === 1 ? "" : "s"} pending 2+ days</div><div style={{ fontSize: 11, color: "var(--ts)", fontFamily: "var(--font-b)", marginTop: 2 }}>{owed.length > 0 && <span style={{ color: "#6BAA75" }}>Owed {fmt(owedTot)}</span>}{owed.length > 0 && owe.length > 0 && " · "}{owe.length > 0 && <span style={{ color: "#E07A5F" }}>You owe {fmt(oweTot)}</span>}</div></div><IconChevronRight size={18} color="var(--muted)" /></div>; })()}
         {/* IOU summary card — MUST mirror IOUWallet's personMap scope (personal IOUs + IOUs of explicitly ACTIVE events; completed / deleted / legacy-status events excluded) so this net and the wallet's Net tile always agree. */}
         {(() => { const activeEv = new Set(evs.filter(e => e.status === "active").map(e => e.id)); const paid = {}; (stl || []).forEach(x => { if (x.splitId != null) paid[x.splitId] = (paid[x.splitId] || 0) + x.amount; }); const remOf = s => roundMoney(s.amount - (paid[s.id] || 0)); const nameNet = {}; sp.filter(s => !s.deleted_at && !s.settled && !s.skipped && (!s.eventId || activeEv.has(s.eventId))).forEach(s => { const n = (s.name || "").trim().toLowerCase(); if (!n) return; nameNet[n] = (nameNet[n] || 0) + (s.direction === "owed" ? remOf(s) : -remOf(s)); }); const nets = Object.values(nameNet); const owedT = nets.filter(v => v > 0.5).reduce((t, v) => t + v, 0); const oweT = nets.filter(v => v < -0.5).reduce((t, v) => t - v, 0); const netT = roundMoney(owedT - oweT); const ppl = nets.filter(v => Math.abs(v) > 0.5).length; const near0 = Math.abs(netT) < 0.5; return <div onClick={() => { sTab("add"); sAddSeg("iou"); }} className="card-hover" style={{ ...cc, padding: "16px 18px", marginBottom: 14, cursor: "pointer", position: "relative", overflow: "hidden" }}><div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "#D4726A" }} /><div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: ppl ? 12 : 0 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "#D4726A", letterSpacing: "0.5px", fontWeight: 700 }}>IOUs · 1:1 Splits</div><div style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-h)" }}>{ppl ? `${ppl} ${ppl === 1 ? "person" : "people"} · manage` : "All settled · add"}</span><IconChevronRight size={16} color="var(--muted)" /></div></div>{ppl > 0 && <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12 }}><div><div style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600, letterSpacing: "0.5px" }}>NET</div><div style={{ fontFamily: "var(--font-h)", fontSize: 24, fontWeight: 800, color: near0 ? "var(--muted)" : netT >= 0 ? "#6BAA75" : "#E07A5F", lineHeight: 1.1 }}>{near0 ? "₹0" : (netT >= 0 ? "+" : "−") + fmt(Math.abs(netT)).slice(1)}</div></div><div style={{ display: "flex", gap: 14 }}><div style={{ textAlign: "right" }}><div style={{ fontSize: 9, color: "#6BAA75", fontFamily: "var(--font-h)", fontWeight: 600, letterSpacing: "0.5px" }}>OWED ↑</div><div style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 700, color: "#6BAA75", marginTop: 2 }}>{fmt(owedT)}</div></div><div style={{ textAlign: "right" }}><div style={{ fontSize: 9, color: "#E07A5F", fontFamily: "var(--font-h)", fontWeight: 600, letterSpacing: "0.5px" }}>YOU OWE ↓</div><div style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 700, color: "#E07A5F", marginTop: 2 }}>{fmt(oweT)}</div></div></div></div>}</div>; })()}
@@ -3140,7 +3370,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         <div style={{ ...cc, padding: 18, marginBottom: 16, position: "relative", overflow: "hidden" }}><div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "#E07A5F" }} /><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "#E07A5F", marginBottom: 16, letterSpacing: "0.5px", fontWeight: 700 }}>Spending by Category</div>{fltExAll.length === 0 ? <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: 20 }}>No expenses yet</p> : (() => { const t = {}; fltExAll.forEach(e => { t[e.categoryId] = (t[e.categoryId] || 0) + e.amount }); const s = Object.entries(t).sort((a, b) => b[1] - a[1]), mx = s[0]?.[1] || 1; const curM = fm !== "all" ? fm : localDateKey().slice(0, 7); const [pY, pM] = curM.split("-").map(Number); const prevM = pM === 1 ? `${pY - 1}-12` : `${pY}-${String(pM - 1).padStart(2, "0")}`; const prevT = {}; exAll.filter(e => mk(e.date) === prevM).forEach(e => { prevT[e.categoryId] = (prevT[e.categoryId] || 0) + e.amount }); return s.map(([cid, total]) => { const c = cats.find(x => x.id === cid) || { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#6366F1", neon: "#818CF8" }; const cExps = fltExAll.filter(e => e.categoryId === cid); const realEx = cExps.filter(e => !e.__settlement); const ctag = realEx.length > 0 && realEx.every(isFix) ? "fixed" : "flexible"; const prevTotal = prevT[cid] || 0; const momPct = fm !== "all" && prevTotal > 0 ? Math.round((total - prevTotal) / prevTotal * 100) : null; const isDrilled = drillCat === cid; const allTx = isDrilled ? [...cExps].sort((a, b) => (b.date || "").localeCompare(a.date || "")) : []; return <div key={cid} style={{ marginBottom: 12 }}><div onClick={() => sDrillCat(isDrilled ? null : cid)} style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}><span style={{ width: 30, display: "flex", justifyContent: "center" }}><DI2 id={c.id} accent={c.neon || c.color} size={20} /></span><div style={{ flex: 1 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><div style={{ display: "flex", alignItems: "center" }}><span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{c.name}</span><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: ctag === "fixed" ? "#A78BFA" : "#FBBF24", background: ctag === "fixed" ? "#A78BFA15" : "#FBBF2415", padding: "2px 6px", borderRadius: 4, marginLeft: 6 }}>{ctag === "fixed" ? "FIXED" : "FLEX"}</span><span style={{ fontSize: 9, color: "var(--muted)", marginLeft: 6, fontFamily: "var(--font-h)" }}>{cExps.length} tx</span></div><div style={{ display: "flex", alignItems: "center", gap: 6 }}>{momPct !== null && <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: momPct > 0 ? "#E07A5F" : "#6BAA75", background: momPct > 0 ? "#E07A5F15" : "#6BAA7515", padding: "1px 5px", borderRadius: 3 }}>{momPct > 0 ? "+" : ""}{momPct}% MoM</span>}<span style={{ fontSize: 13, fontFamily: "var(--font-h)", color: "var(--ts)", fontWeight: 500 }}>{fmt(total)}</span></div></div><div style={{ height: 5, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${(total / mx) * 100}%`, background: c.color, borderRadius: 3 }} /></div></div><span style={{ fontSize: 10, color: "var(--muted)" }}>{isDrilled ? "▲" : "▼"}</span></div>{isDrilled && <div style={{ marginLeft: 42, marginTop: 6, padding: "8px 10px", background: "var(--bg)", borderRadius: 8, border: "1px solid var(--border)", maxHeight: 260, overflowY: "auto" }}>{allTx.length === 0 && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: 8 }}>No entries</div>}{allTx.map(tx => <div key={tx.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, paddingBottom: 6, borderBottom: "1px dashed var(--border)" }}><div style={{ flex: 1, minWidth: 0, marginRight: 8 }}><div style={{ fontSize: 11, color: "var(--ts)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-h)", fontWeight: 600 }}>{tx.note || "(no note)"}{tx.__settlement && <span style={{ marginLeft: 5, fontSize: 8, color: "#D4726A", background: "#D4726A15", padding: "1px 4px", borderRadius: 3, fontWeight: 700 }}>SPLIT</span>}</div><div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 1 }}>{dl(tx.date)}</div></div><span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--text)", fontWeight: 600, flexShrink: 0 }}>{fmt(tx.amount)}</span></div>)}</div>}</div> }) })()}</div>
         </div>}
 
-      {tab === "add" && <div className="pse" style={{ paddingTop: 20 }}><div style={{ display: "flex", gap: 6, marginBottom: 16 }}>{[["log", "Log"], ["iou", "IOU · Splits"]].map(([s, lbl]) => <button key={s} onClick={() => sAddSeg(s)} style={{ flex: 1, padding: "9px", borderRadius: 10, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, cursor: "pointer", border: `1.5px solid ${addSeg === s ? "#E07A5F" : "var(--border)"}`, background: addSeg === s ? "#E07A5F" : "var(--card)", color: addSeg === s ? "#fff" : "var(--muted)" }}>{lbl}</button>)}</div>{addSeg === "log" && <AddPage categories={cats} incomeSources={isrc} recurringCats={recCats} onAddExpense={addE} onAddIncome={addI} onAddTransfer={addT} onAddRec={addRec} onError={showT} patterns={quickPatterns} autoRules={autoRules} onLearnRule={rule => { sAutoRules(prev => { if (prev.find(r => r.keyword === rule.keyword)) return prev; return [...prev, rule]; }); }} wallets={wallets} cloudinaryEnabled={!!_creds.cloudName} />}{addSeg === "iou" && <IOUWallet splits={sp} settlements={stl} categories={cats} wallets={wallets} events={evs} fmt={fmt} uid={uid} isUpiLite={isUpiLite} SettleModal={SettleM} onAdd={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); }} onSettle={settle} onSettleNet={settleNet} onSettleEventNet={settleEventNet} onSkip={skipSplit} onUnskip={unskipSplit} onDelete={id => delItem(id, "split")} onError={msg => showT(msg, "error")} />}</div>}
+      {tab === "add" && <div className="pse" style={{ paddingTop: 20 }}><div style={{ display: "flex", gap: 6, marginBottom: 16 }}>{[["log", "Log"], ["iou", "IOU · Splits"]].map(([s, lbl]) => <button key={s} onClick={() => sAddSeg(s)} style={{ flex: 1, padding: "9px", borderRadius: 10, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, cursor: "pointer", border: `1.5px solid ${addSeg === s ? "#E07A5F" : "var(--border)"}`, background: addSeg === s ? "#E07A5F" : "var(--card)", color: addSeg === s ? "#fff" : "var(--muted)" }}>{lbl}</button>)}</div>{addSeg === "log" && <AddPage categories={cats} incomeSources={isrc} recurringCats={recCats} onAddExpense={addE} onAddIncome={addI} onAddTransfer={addT} onAddRec={addRec} onError={showT} patterns={quickPatterns} autoRules={autoRules} onLearnRule={rule => { sAutoRules(prev => { if (prev.find(r => r.keyword === rule.keyword)) return prev; return [...prev, rule]; }); }} wallets={wallets} cloudinaryEnabled={!!_creds.cloudName} splitPeople={[...new Set(sp.map(s => (s.name || "").trim()).filter(Boolean))].slice(0, 12)} onAddSplits={rows => { if (!rows.length) return; sSp(p => [...p, ...rows]); sbUpsert("splits", rows.map(r => ({ ...toSB(r, COLS.splits), deleted_at: null }))); const tot = roundMoney(rows.reduce((s, r) => s + r.amount, 0)); showT(`${rows.length} IOU${rows.length === 1 ? "" : "s"} created · ${fmt(tot)} to collect`, "success"); }} />}{addSeg === "iou" && <IOUWallet splits={sp} settlements={stl} categories={cats} wallets={wallets} events={evs} fmt={fmt} uid={uid} isUpiLite={isUpiLite} SettleModal={SettleM} onAdd={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); }} onSettle={settle} onSettleNet={settleNet} onSettleEventNet={settleEventNet} onSkip={skipSplit} onUnskip={unskipSplit} onDelete={id => delItem(id, "split")} onError={msg => showT(msg, "error")} />}</div>}
       {tab === "events" && <div className="pse" style={{ background: "transparent", padding: 0 }}><Events events={evs} expenses={ex} splits={sp} settlements={stl} categories={cats} wallets={wallets} staleByEvent={staleByEvent} onCreate={ev => { sEvs(p => [...p, ev]); sbUpsert("events", [toSB(ev, COLS.events)]) }} onAddExp={addE} onAddSplit={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); showT(sr.direction === "owe" ? `You owe ${sr.name} ${fmt(sr.amount)}` : `${sr.name} owes you ${fmt(sr.amount)}`, "info") }} onSettleSplit={settle} onSettleEventNet={settleEventNet} onDeleteSplit={id => delItem(id, "split")} onSkipSplit={skipSplit} onUnskipSplit={unskipSplit} onEditSplit={(id, patch) => { sSp(p => p.map(s => s.id === id ? { ...s, ...patch } : s)); sbUpsert("splits", [{ id, ...patch }]); }} onDeleteExp={id => delItem(id, "expense")} onEditExp={(id, patch) => { const exp = ex.find(e => e.id === id); if (!exp) return false; const gid = exp.groupId || exp.id; sSp(p => p.filter(s => s.groupId !== gid)); sStl(p => p.filter(s => s.groupId !== gid)); sbDeleteWhere("splits", `group_id=eq.${gid}`); sbDeleteWhere("settlements", `group_id=eq.${gid}`); const wallet = patch.paidBy && patch.paidBy !== "me" ? "__tracked__" : (patch.walletId ?? exp.walletId); const updated = { ...exp, ...patch, walletId: wallet }; sEx(p => p.map(e => e.id === id ? updated : e)); sbUpsert("expenses", [toSB(updated, COLS.expenses)]); return true; }} onMarkDone={id => { sEvs(p => p.map(e => e.id === id ? { ...e, status: "completed" } : e)); sbUpsert("events", [{ id, status: "completed" }]) }} onReopen={id => { sEvs(p => p.map(e => e.id === id ? { ...e, status: "active" } : e)); sbUpsert("events", [{ id, status: "active" }]); showT("Event reopened", "info") }} onUpdate={ev => { sEvs(p => p.map(e => e.id === ev.id ? ev : e)); sbUpsert("events", [toSB(ev, COLS.events)]); showT("Event updated", "success") }} onToast={showT} onDelete={id => { const ev = evs.find(e => e.id === id); if (!ev) return; const evSplits = sp.filter(s => s.eventId === id && !s.deleted_at); const evStls = stl.filter(s => s.eventId === id); sEvs(p => p.filter(e => e.id !== id)); sbDelete("events", id); if (evSplits.length) { sSp(p => p.filter(s => s.eventId !== id)); evSplits.forEach(s => sbDelete("splits", s.id)); } if (evStls.length) { sStl(p => p.filter(s => s.eventId !== id)); sbDeleteWhere("settlements", `event_id=eq.${id}`); } showUndoToast(ev.name + " deleted", { type: "event", exp: ev, splits: evSplits, settlements: evStls }); }} dm={dm} /></div>}
       {tab === "history" && <div className="pe"><CalendarView compact expenses={exAll} incomes={inc} transfers={tr} categories={cats.concat(isrc)} wallets={wallets} selectedDay={hCalDay} onDayClick={d => { sHCalDay(d); if (d) { const dm = d.slice(0, 7); if (fm !== "all" && fm !== dm) sFm(dm); if (typeof document !== "undefined") { const scrollToDay = () => { const el = document.querySelector(`[data-history-date="${d}"]`); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }; requestAnimationFrame(() => requestAnimationFrame(scrollToDay)); } } }} />{(() => { const activeCount = [hSearch.trim(), hMinAmt, hMaxAmt, hDateFrom, hDateTo, hType !== "all" ? "x" : "", hWallet].filter(Boolean).length; const clearAll = () => { sHSearch(""); sHMinAmt(""); sHMaxAmt(""); sHDateFrom(""); sHDateTo(""); sHType("all"); sHWallet(""); sHShowFilters(false); }; return <div style={{ marginBottom: 14 }}><input value={hSearch} onChange={e => sHSearch(e.target.value)} placeholder="Search note, category…" style={{ ...is, marginBottom: 8, padding: "10px 14px" }} /><div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}><button onClick={() => { sBulkMode(v => !v); sBulkSel(new Set()); }} style={{ flex: "1 1 auto", padding: "9px 12px", borderRadius: 10, border: `1.5px solid ${bulkMode ? "#E07A5F" : "var(--border)"}`, background: bulkMode ? "#E07A5F18" : "var(--card)", color: bulkMode ? "#E07A5F" : "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Select</button><button onClick={() => sHShowFilters(!hShowFilters)} style={{ flex: "1 1 auto", padding: "9px 12px", borderRadius: 10, border: `1.5px solid ${activeCount > 0 ? "#E07A5F" : "var(--border)"}`, background: activeCount > 0 ? "#E07A5F18" : "var(--card)", color: activeCount > 0 ? "#E07A5F" : "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 5 }}>Filter{activeCount > 0 && <span style={{ background: "#E07A5F", color: "#fff", borderRadius: "50%", width: 16, height: 16, fontSize: 9, display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>{activeCount}</span>}</button>{activeCount > 0 && <button onClick={clearAll} style={{ flex: "1 1 auto", padding: "9px 12px", borderRadius: 10, border: "1.5px solid var(--border)", background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>Clear</button>}<button onClick={() => sHTimeline(v => !v)} title="Timeline view" style={{ padding: "9px 12px", borderRadius: 10, border: `1.5px solid ${hTimeline ? "#A78BFA" : "var(--border)"}`, background: hTimeline ? "#A78BFA18" : "var(--card)", color: hTimeline ? "#A78BFA" : "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}><Timer size={14} /></button></div>{hShowFilters && <div style={{ ...cc, padding: 14, marginBottom: 8 }}><div style={{ display: "flex", gap: 5, marginBottom: 10, flexWrap: "wrap" }}>{["all", "expense", "income", "transfer", "settlement", "recurring"].map(t => <button key={t} onClick={() => sHType(t)} style={{ padding: "6px 12px", borderRadius: 8, fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 600, border: `1.5px solid ${hType === t ? "#7B8CDE" : "var(--border)"}`, background: hType === t ? "#7B8CDE18" : "var(--card)", color: hType === t ? "#7B8CDE" : "var(--muted)", cursor: "pointer" }}>{t.charAt(0).toUpperCase() + t.slice(1)}</button>)}</div><div style={{ display: "flex", gap: 5, marginBottom: 12, flexWrap: "wrap" }}><button onClick={() => sHWallet("")} style={{ padding: "6px 12px", borderRadius: 8, fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 600, border: `1.5px solid ${hWallet === "" ? "#2DD4BF" : "var(--border)"}`, background: hWallet === "" ? "#2DD4BF18" : "var(--card)", color: hWallet === "" ? "#2DD4BF" : "var(--muted)", cursor: "pointer" }}>All wallets</button>{wallets.map(w => <button key={w.id} onClick={() => sHWallet(hWallet === w.id ? "" : w.id)} style={{ padding: "6px 12px", borderRadius: 8, fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 600, border: `1.5px solid ${hWallet === w.id ? "#2DD4BF" : "var(--border)"}`, background: hWallet === w.id ? "#2DD4BF18" : "var(--card)", color: hWallet === w.id ? "#2DD4BF" : "var(--muted)", cursor: "pointer" }}>{w.name}</button>)}</div><div style={{ display: "flex", gap: 8, marginBottom: 10 }}><div style={{ flex: 1 }}><label style={{ ...ls, fontSize: 10 }}>Min ₹</label><input type="number" value={hMinAmt} onChange={e => sHMinAmt(e.target.value)} placeholder="0" style={{ ...is, padding: "8px 10px", marginBottom: 0 }} /></div><div style={{ flex: 1 }}><label style={{ ...ls, fontSize: 10 }}>Max ₹</label><input type="number" value={hMaxAmt} onChange={e => sHMaxAmt(e.target.value)} placeholder="∞" style={{ ...is, padding: "8px 10px", marginBottom: 0 }} /></div></div><div style={{ display: "flex", gap: 8 }}><div style={{ flex: 1 }}><label style={{ ...ls, fontSize: 10 }}>From Date</label><input type="date" value={hDateFrom} onChange={e => sHDateFrom(e.target.value)} style={{ ...is, padding: "8px 10px", marginBottom: 0 }} /></div><div style={{ flex: 1 }}><label style={{ ...ls, fontSize: 10 }}>To Date</label><input type="date" value={hDateTo} onChange={e => sHDateTo(e.target.value)} style={{ ...is, padding: "8px 10px", marginBottom: 0 }} /></div></div></div>}{activeCount > 0 && <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-h)", textAlign: "center", marginTop: 4 }}>{historyItems.length} result{historyItems.length !== 1 ? "s" : ""}</div>}</div>; })()}{bulkMode && bulkSel.size > 0 && <div style={{ position: "sticky", top: 0, zIndex: 10, background: "#E07A5F", color: "#fff", padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", borderRadius: 10, marginBottom: 8 }}><span style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 600 }}>{bulkSel.size} selected</span><div style={{ display: "flex", gap: 8 }}><button onClick={() => { [...bulkSel].forEach(id => { const it = historyItems.find(x => x.id === id); if (it) delItem(id, it.type); }); sBulkSel(new Set()); sBulkMode(false); showT(`Deleted ${bulkSel.size} items`, "success"); }} style={{ padding: "6px 14px", border: "none", borderRadius: 8, background: "#fff", color: "#E07A5F", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Delete {bulkSel.size}</button><button onClick={() => { sBulkMode(false); sBulkSel(new Set()); }} style={{ padding: "6px 12px", border: "1.5px solid rgba(255,255,255,0.5)", borderRadius: 8, background: "transparent", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, cursor: "pointer" }}>Cancel</button></div></div>}
 {renderItems.map(it => { const tlBal = hTimeline ? timelineData[it.id] : null; const hasSB = hTimeline && (it.balBefore !== undefined || it.fromBalBefore !== undefined); const showTL = tlBal || hasSB; const tlWallets = showTL ? (it.type === "transfer" ? [{ id: it.fromWallet }, { id: it.toWallet }] : [{ id: it.type === "expense" ? (it.walletId || "upi_lite") : it.type === "income" ? (it.walletId || "bank") : it.walletId }]) : []; return <div key={it.id} data-history-date={it.date} className={hCalDay === it.date ? "day-selected" : undefined} style={{ position: "relative", ...(hTimeline ? { paddingLeft: 28, marginBottom: 4 } : {}) }}>{hTimeline && <div style={{ position: "absolute", left: 10, top: 0, bottom: 0, width: 2, background: "var(--border)" }} />}{hTimeline && <div style={{ position: "absolute", left: 5, top: 22, width: 12, height: 12, borderRadius: "50%", background: it.type === "expense" ? "#E07A5F" : it.type === "income" ? "#6BAA75" : "#7B8CDE", border: "2px solid var(--bg)", zIndex: 1 }} />}<div style={{ display: "flex", alignItems: "stretch", gap: 6 }}>{bulkMode && <div onClick={() => sBulkSel(p => { const n = new Set(p); n.has(it.id) ? n.delete(it.id) : n.add(it.id); return n; })} style={{ display: "flex", alignItems: "center", padding: "0 4px", cursor: "pointer", flexShrink: 0 }}><div style={{ width: 20, height: 20, borderRadius: 5, border: `2px solid ${bulkSel.has(it.id) ? "#E07A5F" : "var(--border)"}`, background: bulkSel.has(it.id) ? "#E07A5F" : "var(--card)", display: "flex", alignItems: "center", justifyContent: "center" }}>{bulkSel.has(it.id) && <span style={{ color: "#fff", fontSize: 11, fontWeight: 700 }}>✓</span>}</div></div>}<div style={{ flex: 1, minWidth: 0 }}><TxCard item={it} categories={cats} incomeSources={isrc} events={evs} onDelete={delItem} recurringCats={recCats} wallets={wallets} onRefund={refundItem} />{showTL && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "0 4px 10px 4px", marginTop: -4 }}>{tlWallets.map(tw => { const wName = wallets.find(w => w.id === tw.id)?.name || tw.id; let bef, aft; if (it.type === "transfer" && it.fromBalBefore !== undefined) { bef = tw.id === it.fromWallet ? it.fromBalBefore : (it.toBalBefore ?? 0); aft = tw.id === it.fromWallet ? roundMoney(it.fromBalBefore - it.amount) : roundMoney((it.toBalBefore ?? 0) + it.amount); } else if (it.balBefore !== undefined) { bef = it.balBefore; aft = roundMoney(it.balBefore + (it.type === "expense" ? -it.amount : it.amount)); } else { bef = tlBal?.before[tw.id] ?? 0; aft = tlBal?.after[tw.id] ?? 0; } return <div key={tw.id} style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", background: "var(--bg)", borderRadius: 6, padding: "3px 8px", display: "inline-flex", alignItems: "center", gap: 5, border: "1px solid var(--border)" }}><span style={{ fontWeight: 600, color: "var(--ts)", fontSize: 9 }}>{wName}</span><span>{fmt(bef)}</span><span style={{ opacity: 0.4, fontSize: 9 }}>→</span><span style={{ fontWeight: 700, color: bef > aft ? "#E07A5F" : bef < aft ? "#6BAA75" : "var(--muted)" }}>{fmt(aft)}</span></div>; })}</div>}</div></div></div>; })}{historyItems.length === 0 && <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--muted)", fontSize: 14, lineHeight: 1.8 }}>{flt.expenses.length === 0 && flt.incomes.length === 0 ? <><div style={{ marginBottom: 12 }}><ClipboardText size={32} color="var(--muted)" /></div><div style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 600, color: "var(--ts)", marginBottom: 6 }}>No transactions yet</div><div style={{ fontSize: 12, marginBottom: 20 }}>Log expenses, income, and transfers<br />to see your spending history here.</div><button onClick={() => sTab("add")} style={{ padding: "12px 28px", border: "none", borderRadius: 12, background: "#E07A5F", color: "#fff", fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>+ Add First Transaction</button></> : "No results match your filters."}</div>}</div>}
@@ -3302,10 +3532,201 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
 
     </div>}
 
-    {module === "finance" && (() => { const cm = localDateKey().slice(0, 7); const totalInc = inc.reduce((s, i) => s + i.amount, 0); const myEx = ex.filter(e => !isTrackedExp(e)); const totalExp = myEx.reduce((s, e) => s + e.amount, 0); const catTotals = {}; myEx.forEach(e => { catTotals[e.categoryId] = (catTotals[e.categoryId] || 0) + e.amount; }); const topCats = Object.entries(catTotals).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([id, amt]) => ({ name: cats.find(c => c.id === id)?.name || id, amount: amt, pct: totalExp > 0 ? Math.round(amt / totalExp * 100) : 0 })); const wBals = wallets.map(w => ({ name: w.name, balance: roundMoney(wBal[w.id] || 0) })); const allTxRedacted = redactTransactions(ex).map(e => ({ date: e.date, amount: e.amount, category: cats.find(c => c.id === e.categoryId)?.name || e.categoryId || "Unknown", note: e.note || "" })).sort((a, b) => (b.date || "").localeCompare(a.date || "")); const sendChat = async (q) => { if (!q.trim() || chatLoading) return; const userMsg = { role: "user", content: q.trim() }; sChatMsgs(p => [...p, userMsg]); sChatInput(""); sChatLoading(true); try { const r = await fetch("/api/ai-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q.trim(), context: { month: cm, totalIncome: totalInc, totalExpense: totalExp, topCategories: topCats, recentExpenses: allTxRedacted.slice(0, 300), totalTransactions: ex.length + inc.length, walletBalances: wBals, recurringCount: rec.filter(r => r.active !== false).length, streak: finStreak } }) }); const d = await r.json(); sChatMsgs(p => [...p, { role: "assistant", content: r.ok ? d.answer : (d.error || "Something went wrong.") }]); } catch { sChatMsgs(p => [...p, { role: "assistant", content: "Network error — check your connection." }]); } finally { sChatLoading(false); } }; const QUICK_QS = ["Where am I overspending?", "How's my savings rate?", "Any unusual spending?", "Can I afford a big purchase?"]; const chatView = chatMsgs.length > 0 ? "chat" : "home"; return <><style>{`@keyframes chatBounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.4; } 30% { transform: translateY(-6px); opacity: 1; } } @keyframes chatSlideUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } } @keyframes chatFadeIn { from { opacity: 0; } to { opacity: 1; } } @keyframes chatExpand { from { opacity: 0; transform: scale(0.92) translateY(20px); transform-origin: bottom center; } to { opacity: 1; transform: scale(1) translateY(0); transform-origin: bottom center; } }`}</style>{chatOpen && <div style={{ position: "fixed", inset: 0, background: "rgba(44,40,32,0.45)", zIndex: 54, display: "flex", flexDirection: "column", justifyContent: "flex-end", animation: "chatFadeIn 0.2s ease" }} onClick={(e) => { if (e.target === e.currentTarget) sChatOpen(false); }}><div style={{ background: "#F5F0EB", borderRadius: "24px 24px 0 0", height: "82%", display: "flex", flexDirection: "column", overflow: "hidden", animation: "chatExpand 0.28s cubic-bezier(0.34,1.56,0.64,1) forwards" }}><div style={{ padding: "16px 20px 12px", borderBottom: "1px solid #D9D0C4", display: "flex", alignItems: "center", justifyContent: "space-between", background: "#FFFFFF" }}><div style={{ display: "flex", alignItems: "center", gap: 10 }}><Lion mood="happy" size={36} /><div><div style={{ fontSize: 15, fontWeight: 700, color: "#D4704A", letterSpacing: 0.5 }}>Ask NOMAD</div><div style={{ fontSize: 11, color: "#8C8278" }}>All-time data · always honest</div></div></div><div style={{ display: "flex", gap: 8, alignItems: "center" }}>{chatMsgs.length > 0 && <button onClick={() => { sChatMsgs([]); sChatInput(""); }} style={{ fontSize: 12, color: "#8C8278", background: "none", border: "none", cursor: "pointer", padding: "4px 8px", borderRadius: 8, fontFamily: "inherit" }}>Clear</button>}<button onClick={() => sChatOpen(false)} style={{ width: 28, height: 28, borderRadius: "50%", background: "#EAE4DC", border: "none", cursor: "pointer", fontSize: 14, color: "#8C8278", display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button></div></div><div style={{ flex: 1, overflowY: "auto", padding: "16px 16px 8px", display: "flex", flexDirection: "column" }}>{chatView === "home" ? <><div style={{ display: "flex", gap: 10, marginBottom: 20, animation: "chatSlideUp 0.3s ease forwards" }}><div style={{ flexShrink: 0, marginTop: 2 }}><Lion mood="happy" size={28} /></div><div style={{ background: "#FFFFFF", borderRadius: "4px 16px 16px 16px", padding: "12px 14px", fontSize: 13.5, color: "#2C2820", lineHeight: 1.6, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", maxWidth: "80%" }}>Ask anything about your finances. I'm grounded in your <strong>full transaction history</strong>.</div></div><div style={{ fontSize: 11, letterSpacing: 1.5, color: "#8C8278", marginBottom: 10, paddingLeft: 2 }}>QUICK QUESTIONS</div>{QUICK_QS.map((q, i) => <button key={q} onClick={() => sendChat(q)} style={{ background: "#FFFFFF", border: "1px solid #D9D0C4", borderRadius: 14, padding: "12px 16px", textAlign: "left", fontSize: 13.5, color: "#2C2820", cursor: "pointer", marginBottom: 8, fontFamily: "'Georgia', serif", lineHeight: 1.4, animation: `chatSlideUp 0.3s ease ${i * 0.07}s forwards`, opacity: 0 }}>{q}</button>)}<div style={{ fontSize: 11.5, color: "#8C8278", marginTop: 8, paddingLeft: 2, lineHeight: 1.5, fontFamily: "'Georgia', serif" }}>📎 Attach your bank/UPI statement (CSV or PDF) and I'll find transactions you forgot to log.</div></> : <>{chatMsgs.map((m, i) => <Fragment key={i}><div style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 10, animation: "chatSlideUp 0.3s ease forwards", opacity: 0 }}>{m.role === "assistant" && <div style={{ flexShrink: 0, marginRight: 8, marginTop: 2 }}><Lion mood="happy" size={28} /></div>}<div style={{ maxWidth: "76%", padding: "10px 13px", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "4px 16px 16px 16px", background: m.role === "user" ? "#D4704A" : "#FFFFFF", color: m.role === "user" ? "#FFFFFF" : "#2C2820", fontSize: 13.5, lineHeight: 1.55, boxShadow: m.role === "user" ? "0 2px 8px rgba(212,112,74,0.25)" : "0 1px 4px rgba(0,0,0,0.08)", fontFamily: "'Georgia', serif" }} dangerouslySetInnerHTML={{ __html: String(m.content || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>") }} /></div>{m.action === "recon" && <div style={{ display: "flex", justifyContent: "flex-start", margin: "-2px 0 12px 36px" }}><button onClick={() => { sChatOpen(false); sTab("settings"); showT("Review & import is under RECONCILE BANK STATEMENT", "info"); }} style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: "#7B8CDE", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", boxShadow: "0 2px 8px rgba(123,140,222,0.3)" }}>Review & import →</button></div>}</Fragment>)}{chatLoading && <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 10 }}><div style={{ flexShrink: 0, marginRight: 8, marginTop: 2 }}><Lion mood="happy" size={28} /></div><div style={{ background: "#FFFFFF", borderRadius: "4px 16px 16px 16px", padding: "10px 13px", boxShadow: "0 1px 4px rgba(0,0,0,0.08)" }}><div style={{ display: "flex", gap: 4, alignItems: "center", padding: "4px 0" }}>{[0,1,2].map(j => <div key={j} style={{ width: 7, height: 7, borderRadius: "50%", background: "#D4704A", animation: `chatBounce 1.2s ease-in-out ${j * 0.2}s infinite` }} />)}</div></div></div>}</>}</div><div style={{ padding: "10px 12px", borderTop: "1px solid #D9D0C4", display: "flex", gap: 8, background: "#FFFFFF" }}><label title="Attach bank/UPI statement (CSV or PDF) to find unlogged transactions" style={{ width: 38, borderRadius: 10, border: "1.5px solid #D9D0C4", background: chatLoading ? "#EAE4DC" : "#F5F0EB", display: "flex", alignItems: "center", justifyContent: "center", cursor: chatLoading ? "not-allowed" : "pointer", fontSize: 16, flexShrink: 0 }}>📎<input type="file" accept=".csv,.pdf,application/pdf" disabled={chatLoading} onChange={e => { if (e.target.files[0]) handleChatFile(e.target.files[0]); e.target.value = ""; }} style={{ display: "none" }} /></label><input value={chatInput} onChange={e => sChatInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(chatInput); } }} placeholder="Ask about your finances…" style={{ flex: 1, padding: "9px 12px", borderRadius: 10, border: "1.5px solid #D9D0C4", background: "#F5F0EB", color: "#2C2820", fontSize: 13, fontFamily: "'Georgia', serif", outline: "none" }} /><button onClick={() => sendChat(chatInput)} disabled={chatLoading || !chatInput.trim()} style={{ padding: "9px 14px", borderRadius: 10, border: "none", background: chatLoading || !chatInput.trim() ? "#D9D0C4" : "#D4704A", color: "#fff", fontSize: 16, fontWeight: 700, cursor: chatLoading || !chatInput.trim() ? "not-allowed" : "pointer" }}>→</button></div></div></div>}</>; })()}
+    {module === "finance" && (() => {
+      // ——— Ask NOMAD (v2) ———
+      // The model now receives the FULL redacted ledger (every expense/income
+      // row with wallet + category names, capped at 500/200 newest), month and
+      // all-time summaries, recurring bills with due dates and pending IOUs —
+      // so filter questions ("over ₹500 from cash last month") are answerable.
+      // UI: theme-var colors (dark-mode safe), real icons, coverage badge,
+      // voice input, copy-on-answer.
+      // Everything below is render-path work over the full ledger — bail
+      // before any of it while the sheet is closed (the common case), or every
+      // App re-render pays for redaction/sorts it immediately throws away.
+      if (!chatOpen) return null;
+      const today = localDateKey();
+      const cm = today.slice(0, 7);
+      const myEx = ex.filter(e => !isTrackedExp(e));
+      const wNameOf = id => wallets.find(w => w.id === id)?.name || id || "?";
+      const cNameOf = id => trendCatOf(id, cats).name;
+      const sNameOf = id => isrc.find(s => s.id === id)?.name || id || "?";
+      // Sort + cap BEFORE redacting: redactTransactions runs 8 regexes per
+      // note, so it must only see the rows that actually get sent.
+      const expRows = redactTransactions([...myEx].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 500)).map(e => ({ d: e.date, a: e.amount, c: cNameOf(e.categoryId), w: wNameOf(e.walletId), n: (e.note || "").slice(0, 48) }));
+      const incRows = redactTransactions([...inc].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 200)).map(i => ({ d: i.date, a: i.amount, s: sNameOf(i.sourceId), w: wNameOf(i.walletId), n: (i.note || "").slice(0, 48) }));
+      const monthExpense = roundMoney(myEx.filter(e => (e.date || "").startsWith(cm)).reduce((s, e) => s + e.amount, 0));
+      const monthIncome = roundMoney(inc.filter(i => (i.date || "").startsWith(cm)).reduce((s, i) => s + i.amount, 0));
+      const allTimeExpense = roundMoney(myEx.reduce((s, e) => s + e.amount, 0));
+      const allTimeIncome = roundMoney(inc.reduce((s, i) => s + i.amount, 0));
+      const catTotals = {};
+      myEx.forEach(e => { catTotals[e.categoryId] = (catTotals[e.categoryId] || 0) + e.amount; });
+      const topCats = Object.entries(catTotals).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([id, amt]) => ({ name: cNameOf(id), amount: amt, pct: allTimeExpense > 0 ? Math.round(amt / allTimeExpense * 100) : 0 }));
+      const wBals = wallets.map(w => ({ name: w.name, balance: roundMoney(wBal[w.id] || 0) }));
+      const activeRec = rec.filter(r => r.active !== false);
+      const recurringBills = activeRec.slice(0, 20).map(r => ({ name: r.name || "bill", amount: r.amount, due: getRecurringDueDate(r, today) }));
+      const iou = { owedToMe: roundMoney(sp.filter(s => s.direction === "owed" && !s.settled).reduce((t, s) => t + s.amount, 0)), iOwe: roundMoney(sp.filter(s => s.direction === "owe" && !s.settled).reduce((t, s) => t + s.amount, 0)) };
+      const totalTx = myEx.length + inc.length;
+      // Single source for the coverage extremes — the header badge and the
+      // coverage object sent to the model must describe the same range.
+      const oldestD = expRows[expRows.length - 1]?.d || null, newestD = expRows[0]?.d || null;
+      const monLbl = k => { if (!k) return "?"; const d = new Date(`${k}T12:00:00`); return `${d.toLocaleDateString("en-US", { month: "short" })} ’${String(d.getFullYear()).slice(2)}`; };
+      const covLabel = totalTx === 0 ? "No data yet" : oldestD ? `${totalTx} txns · ${monLbl(oldestD)} – ${monLbl(newestD)}` : `${totalTx} txns`;
+      const sendChat = async (q) => {
+        if (!q.trim() || chatLoading) return;
+        sChatMsgs(p => [...p, { role: "user", content: q.trim() }]);
+        sChatInput("");
+        sChatLoading(true);
+        try {
+          const r = await fetch("/api/ai-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q.trim(), context: { today, month: cm, monthIncome, monthExpense, allTimeIncome, allTimeExpense, expenses: expRows, incomes: incRows, coverage: { from: oldestD, to: newestD, total: myEx.length, sent: expRows.length }, topCategories: topCats, walletBalances: wBals, recurringBills, recurringCount: activeRec.length, iou, streak: finStreak } }) });
+          const d = await r.json();
+          sChatMsgs(p => [...p, { role: "assistant", content: r.ok ? d.answer : (d.error || "Something went wrong.") }]);
+        } catch {
+          sChatMsgs(p => [...p, { role: "assistant", content: "Network error — check your connection." }]);
+        } finally { sChatLoading(false); }
+      };
+      const micSupported = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+      const toggleMic = () => {
+        if (chatMic) { try { chatRecRef.current?.stop(); } catch { /* already stopped */ } sChatMic(false); return; }
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SR) return;
+        try {
+          const r = new SR();
+          r.lang = "en-IN"; r.interimResults = false; r.maxAlternatives = 1; r.continuous = false;
+          r.onresult = ev => { const t = ev.results?.[0]?.[0]?.transcript || ""; if (t) sChatInput(p => (p ? p + " " : "") + t); sChatMic(false); };
+          r.onerror = () => sChatMic(false);
+          r.onend = () => sChatMic(false);
+          chatRecRef.current = r;
+          r.start();
+          sChatMic(true);
+        } catch { sChatMic(false); }
+      };
+      const copyMsg = t => {
+        if (!navigator.clipboard?.writeText) { showT("Clipboard unavailable in this browser", "error"); return; }
+        navigator.clipboard.writeText(String(t || "")).then(() => showT("Copied to clipboard", "success")).catch(() => showT("Copy failed", "error"));
+      };
+      const QUICK_QS = [
+        { q: "Everything over ₹500 last month", icon: Receipt, color: "#D4704A" },
+        { q: "How much did I spend from cash this month?", icon: Wallet, color: "#6BAA75" },
+        { q: "Compare this month vs last month", icon: ArrowsLeftRight, color: "#7B8CDE" },
+        { q: "Which bills are due soon?", icon: Timer, color: "#E0A44A" },
+      ];
+      const chatView = chatMsgs.length > 0 ? "chat" : "home";
+      const iconBtn = (disabled) => ({ width: 40, height: 40, borderRadius: 12, border: "1.5px solid var(--border)", background: "var(--bg)", display: "flex", alignItems: "center", justifyContent: "center", cursor: disabled ? "not-allowed" : "pointer", flexShrink: 0, padding: 0, transition: "transform 0.12s ease" });
+      return <>
+        <style>{`
+@keyframes chatBounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.35; } 30% { transform: translateY(-6px); opacity: 1; } }
+@keyframes chatSlideUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes chatFadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes chatExpand { from { opacity: 0; transform: scale(0.94) translateY(24px); transform-origin: bottom center; } to { opacity: 1; transform: scale(1) translateY(0); transform-origin: bottom center; } }
+@keyframes chatMicPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(224,82,82,0.35); } 50% { box-shadow: 0 0 0 7px rgba(224,82,82,0); } }
+@keyframes chatAurora { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+@keyframes chatGlow { 0%, 100% { box-shadow: 0 0 0 0 rgba(224,122,95,0.45); } 50% { box-shadow: 0 0 0 6px rgba(224,122,95,0); } }
+@keyframes chatPop { from { opacity: 0; transform: scale(0.9) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+@keyframes chatLiveDot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.7); } }
+@keyframes chatSweep { 0% { transform: translateX(-120%); } 100% { transform: translateX(220%); } }
+.nmd-body .nmd-p { margin: 3px 0; }
+.nmd-body .nmd-p:first-child { margin-top: 0; }
+.nmd-body .nmd-h { font-weight: 800; margin: 9px 0 4px; color: var(--text); font-family: var(--font-h); font-size: 12px; letter-spacing: 0.3px; }
+.nmd-body .nmd-sp { height: 5px; }
+.nmd-body .nmd-li { display: flex; gap: 7px; margin: 4px 0; align-items: flex-start; }
+.nmd-body .nmd-li .nmd-dot { color: #D4704A; font-weight: 800; line-height: 1.5; }
+.nmd-body .nmd-txs { display: flex; flex-direction: column; margin: 9px 0; border-radius: 13px; overflow: hidden; border: 1px solid var(--border); box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+.nmd-body .nmd-tx { display: flex; align-items: center; gap: 9px; padding: 9px 11px; background: var(--bg); }
+.nmd-body .nmd-tx + .nmd-tx { border-top: 1px solid var(--border); }
+.nmd-body .nmd-tx-d { font-size: 10.5px; color: var(--muted); min-width: 42px; font-family: var(--font-h); font-weight: 700; letter-spacing: 0.2px; }
+.nmd-body .nmd-tx-n { flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.35; color: var(--text); }
+.nmd-body .nmd-tx-a { font-weight: 800; color: #D4704A; font-family: var(--font-h); white-space: nowrap; font-size: 13px; }
+.nmd-body .nmd-tx-a.nmd-in { color: #6BAA75; }
+.nmd-body code { background: rgba(125,140,222,0.14); border-radius: 5px; padding: 1px 5px; font-size: 12px; font-family: ui-monospace, monospace; }
+`}</style>
+        {chatOpen && <div style={{ position: "fixed", inset: 0, background: "rgba(20,14,10,0.55)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)", zIndex: 54, display: "flex", flexDirection: "column", justifyContent: "flex-end", animation: "chatFadeIn 0.2s ease" }} onClick={(e) => { if (e.target === e.currentTarget) sChatOpen(false); }}>
+          <div style={{ background: "var(--bg)", borderRadius: "26px 26px 0 0", height: "86%", display: "flex", flexDirection: "column", overflow: "hidden", animation: "chatExpand 0.3s cubic-bezier(0.34,1.56,0.64,1) forwards", boxShadow: "0 -8px 40px rgba(0,0,0,0.28)" }}>
+            {/* Aurora gradient header — the signature look of Ask NOMAD */}
+            <div style={{ position: "relative", padding: "12px 16px 14px", background: "linear-gradient(120deg, #E07A5F, #D4704A, #E0A44A, #D4704A)", backgroundSize: "300% 300%", animation: "chatAurora 9s ease infinite", overflow: "hidden" }}>
+              <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: "100%", background: "linear-gradient(100deg, transparent, rgba(255,255,255,0.22), transparent)", transform: "translateX(-120%)", animation: "chatSweep 5s ease-in-out 0.6s infinite", pointerEvents: "none" }} />
+              <div style={{ width: 38, height: 4, borderRadius: 4, background: "rgba(255,255,255,0.55)", margin: "0 auto 12px" }} />
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, position: "relative" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
+                  <div style={{ width: 42, height: 42, borderRadius: "50%", background: "rgba(255,255,255,0.92)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, animation: "chatGlow 2.6s ease infinite", boxShadow: "0 3px 10px rgba(0,0,0,0.14)" }}><Lion mood="happy" size={32} /></div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ fontSize: 16.5, fontWeight: 800, color: "#fff", letterSpacing: 0.3, fontFamily: "var(--font-h)" }}>Ask NOMAD</span><Sparkle size={15} weight="fill" color="#FFF3D6" /></div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 1 }}><span style={{ width: 6, height: 6, borderRadius: "50%", background: "#BFF3C6", animation: "chatLiveDot 1.8s ease infinite", flexShrink: 0 }} /><span style={{ fontSize: 10.5, color: "rgba(255,255,255,0.9)", fontFamily: "var(--font-h)", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{covLabel}</span></div>
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 7, alignItems: "center", flexShrink: 0 }}>
+                  {chatMsgs.length > 0 && <button onClick={() => { sChatMsgs([]); sChatInput(""); }} style={{ fontSize: 12, color: "#fff", background: "rgba(255,255,255,0.18)", border: "none", cursor: "pointer", padding: "6px 11px", borderRadius: 10, fontFamily: "var(--font-h)", fontWeight: 700 }}>Clear</button>}
+                  <button onClick={() => sChatOpen(false)} aria-label="Close" style={{ width: 30, height: 30, borderRadius: "50%", background: "rgba(255,255,255,0.2)", border: "none", cursor: "pointer", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}><IconX size={16} /></button>
+                </div>
+              </div>
+            </div>
+            <div ref={chatScrollRef} className="nmd-body" style={{ flex: 1, overflowY: "auto", padding: "18px 16px 10px", display: "flex", flexDirection: "column", scrollBehavior: "smooth" }}>
+              {chatView === "home" ? <>
+                <div style={{ display: "flex", gap: 10, marginBottom: 22, animation: "chatSlideUp 0.35s ease forwards" }}>
+                  <div style={{ flexShrink: 0, marginTop: 2 }}><Lion mood="happy" size={28} /></div>
+                  <div style={{ background: "var(--card)", borderRadius: "4px 18px 18px 18px", padding: "13px 15px", fontSize: 13.5, color: "var(--text)", lineHeight: 1.6, border: "1px solid var(--border)", maxWidth: "82%", fontFamily: "var(--font-b)", boxShadow: "0 2px 12px rgba(0,0,0,0.05)" }}>Hi! I know every transaction you've logged. Ask me to <strong>filter, total or compare</strong> them — by wallet, category, amount or date. 🦁</div>
+                </div>
+                <div style={{ fontSize: 10.5, letterSpacing: 1.8, color: "var(--muted)", marginBottom: 11, paddingLeft: 3, fontFamily: "var(--font-h)", fontWeight: 700 }}>TRY ASKING</div>
+                {QUICK_QS.map((item, i) => { const Ic = item.icon; return <button key={item.q} onClick={() => sendChat(item.q)} style={{ display: "flex", alignItems: "center", gap: 12, background: "var(--card)", border: "1px solid var(--border)", borderRadius: 16, padding: "12px 13px", textAlign: "left", fontSize: 13.5, color: "var(--text)", cursor: "pointer", marginBottom: 9, fontFamily: "var(--font-b)", lineHeight: 1.35, animation: `chatPop 0.4s cubic-bezier(0.34,1.56,0.64,1) ${0.08 + i * 0.07}s both`, boxShadow: "0 1px 8px rgba(0,0,0,0.04)" }}><span style={{ width: 34, height: 34, borderRadius: 11, background: item.color + "1c", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Ic size={18} weight="bold" color={item.color} /></span><span style={{ flex: 1, fontWeight: 600 }}>{item.q}</span><ArrowRight size={15} weight="bold" color="var(--muted)" style={{ flexShrink: 0, opacity: 0.5 }} /></button>; })}
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginTop: 12, padding: "13px 14px", background: "linear-gradient(135deg, rgba(123,140,222,0.09), rgba(224,122,95,0.07))", border: "1px dashed var(--border)", borderRadius: 16, animation: "chatPop 0.4s ease 0.4s both" }}><span style={{ width: 34, height: 34, borderRadius: 11, background: "#7B8CDE1c", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><FilePdf size={18} weight="bold" color="#7B8CDE" /></span><div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.55, fontFamily: "var(--font-b)" }}><strong style={{ color: "var(--text)" }}>Attach a statement</strong> — tap the clip and drop a bank/UPI export (CSV, PDF or screenshot). I'll find the transactions you forgot to log.</div></div>
+              </> : <>
+                {chatMsgs.map((m, i) => <Fragment key={i}>
+                  <div style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: m.role === "assistant" ? 4 : 12, animation: "chatSlideUp 0.32s ease forwards", opacity: 0 }}>
+                    {m.role === "assistant" && <div style={{ flexShrink: 0, marginRight: 8, marginTop: 2 }}><Lion mood="happy" size={28} /></div>}
+                    {m.role === "user"
+                      ? <div style={{ maxWidth: "78%", padding: "11px 14px", borderRadius: "18px 18px 5px 18px", background: "linear-gradient(135deg, #E07A5F, #D4704A)", color: "#fff", fontSize: 13.5, lineHeight: 1.5, boxShadow: "0 3px 12px rgba(212,112,74,0.32)", fontFamily: "var(--font-b)", wordBreak: "break-word" }} dangerouslySetInnerHTML={{ __html: String(m.content || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>") }} />
+                      : <div style={{ maxWidth: "82%", padding: "11px 14px", borderRadius: "5px 18px 18px 18px", background: "var(--card)", color: "var(--text)", border: "1px solid var(--border)", fontSize: 13.5, lineHeight: 1.55, fontFamily: "var(--font-b)", boxShadow: "0 2px 12px rgba(0,0,0,0.05)", wordBreak: "break-word" }} dangerouslySetInnerHTML={{ __html: renderChatHtml(m.content) }} />}
+                  </div>
+                  {m.role === "assistant" && <div style={{ display: "flex", justifyContent: "flex-start", margin: "0 0 12px 36px", gap: 4 }}><button onClick={() => copyMsg(m.content)} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, color: "var(--muted)", background: "var(--card)", border: "1px solid var(--border)", cursor: "pointer", padding: "4px 9px", borderRadius: 8, fontFamily: "var(--font-h)", fontWeight: 600 }}><CopySimple size={12} />Copy</button></div>}
+                  {m.action === "recon" && <div style={{ display: "flex", justifyContent: "flex-start", margin: "-4px 0 14px 36px" }}><button onClick={() => { sChatOpen(false); sTab("settings"); showT("Review & import is under RECONCILE BANK STATEMENT", "info"); }} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 15px", borderRadius: 12, border: "none", background: "linear-gradient(135deg, #7B8CDE, #6A7BD0)", color: "#fff", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "var(--font-h)", boxShadow: "0 3px 12px rgba(123,140,222,0.35)" }}><Receipt size={15} weight="bold" />Review &amp; import<ArrowRight size={14} weight="bold" /></button></div>}
+                </Fragment>)}
+                {chatLoading && <div style={{ display: "flex", justifyContent: "flex-start", marginBottom: 12, animation: "chatSlideUp 0.3s ease forwards" }}><div style={{ flexShrink: 0, marginRight: 8, marginTop: 2 }}><Lion mood="happy" size={28} /></div><div style={{ display: "flex", alignItems: "center", gap: 9, background: "var(--card)", borderRadius: "5px 18px 18px 18px", padding: "11px 15px", border: "1px solid var(--border)", boxShadow: "0 2px 12px rgba(0,0,0,0.05)" }}><div style={{ display: "flex", gap: 5, alignItems: "center" }}>{[0, 1, 2].map(j => <div key={j} style={{ width: 7, height: 7, borderRadius: "50%", background: "#D4704A", animation: `chatBounce 1.2s ease-in-out ${j * 0.18}s infinite` }} />)}</div><span style={{ fontSize: 11.5, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600 }}>crunching your numbers…</span></div></div>}
+              </>}
+            </div>
+            <div style={{ padding: "10px 12px calc(env(safe-area-inset-bottom, 0px) + 10px)", borderTop: "1px solid var(--border)", display: "flex", gap: 8, background: "var(--card)", alignItems: "center" }}>
+              <label title="Attach a bank/UPI statement (CSV, PDF or screenshot)" style={{ ...iconBtn(chatLoading), opacity: chatLoading ? 0.5 : 1 }}>
+                <Paperclip size={18} weight="bold" color="var(--muted)" />
+                <input type="file" accept=".csv,.pdf,application/pdf,image/*" disabled={chatLoading} onChange={e => { if (e.target.files[0]) handleChatFile(e.target.files[0]); e.target.value = ""; }} style={{ display: "none" }} />
+              </label>
+              <input value={chatInput} onChange={e => sChatInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(chatInput); } }} placeholder={chatMic ? "Listening…" : "Ask about your finances…"} style={{ flex: 1, minWidth: 0, padding: "11px 14px", borderRadius: 22, border: `1.5px solid ${chatMic ? "#E05252" : "var(--border)"}`, background: "var(--bg)", color: "var(--text)", fontSize: 13.5, fontFamily: "var(--font-b)", outline: "none" }} />
+              {micSupported && <button onClick={toggleMic} title={chatMic ? "Stop listening" : "Speak your question"} style={{ ...iconBtn(false), borderRadius: "50%", border: `1.5px solid ${chatMic ? "#E05252" : "var(--border)"}`, background: chatMic ? "rgba(224,82,82,0.12)" : "var(--bg)", animation: chatMic ? "chatMicPulse 1.4s ease infinite" : "none" }}><Microphone size={18} weight={chatMic ? "fill" : "regular"} color={chatMic ? "#E05252" : "var(--muted)"} /></button>}
+              <button onClick={() => sendChat(chatInput)} disabled={chatLoading || !chatInput.trim()} aria-label="Send" style={{ width: 40, height: 40, borderRadius: "50%", border: "none", background: chatLoading || !chatInput.trim() ? "var(--border)" : "linear-gradient(135deg, #E07A5F, #D4704A)", color: "#fff", cursor: chatLoading || !chatInput.trim() ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, padding: 0, boxShadow: chatLoading || !chatInput.trim() ? "none" : "0 3px 12px rgba(212,112,74,0.4)", transition: "transform 0.12s ease" }}><PaperPlaneTilt size={17} weight="fill" /></button>
+            </div>
+          </div>
+        </div>}
+      </>;
+    })()}
     {module === "finance" && dlBanner && deadLetterCount > 0 && <div style={{ position: "fixed", bottom: 84, left: 0, right: 0, maxWidth: 430, margin: "0 auto", background: "#D4726A", color: "#fff", padding: "10px 14px", display: "flex", alignItems: "center", gap: 8, zIndex: 49, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, boxShadow: "0 -2px 10px rgba(212,114,106,0.4)" }}><span style={{ flex: 1 }}>⚠ {deadLetterCount} change{deadLetterCount === 1 ? "" : "s"} failed to sync</span><button onClick={() => { sTab("settings"); sDlBanner(false); }} style={{ background: "rgba(255,255,255,0.25)", border: "none", borderRadius: 8, color: "#fff", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, padding: "4px 10px", cursor: "pointer" }}>Fix ›</button><button onClick={() => sDlBanner(false)} style={{ background: "none", border: "none", color: "#fff", fontSize: 18, cursor: "pointer", padding: "0 2px", lineHeight: 1, opacity: 0.8 }}>✕</button></div>}
-{module === "finance" && <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 430, margin: "0 auto", zIndex: 50, paddingBottom: "env(safe-area-inset-bottom)" }}><div style={{ position: "relative", height: 76 }}><svg width="100%" height="76" viewBox="0 0 430 76" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, display: "block", filter: "drop-shadow(0 -2px 12px rgba(0,0,0,0.07))" }}><path d="M0,18 L158,18 C184,18 185,52 215,52 C245,52 246,18 272,18 L430,18 L430,76 L0,76 Z" fill="var(--nav-bg)" stroke="var(--border)" strokeWidth="1" /></svg><div style={{ position: "absolute", inset: "18px 0 0 0", display: "flex" }}>{[{ id: "dashboard", label: "Home" }, { id: "events", label: "Events" }, { id: "__fab", label: "" }, { id: "history", label: "History" }, { id: "settings", label: "Settings" }].map(n => n.id === "__fab" ? <div key="__fab" style={{ flex: 1 }} /> : <button key={n.id} onClick={() => { hapticSelection(); sTab(n.id); }} style={{ flex: 1, padding: "8px 0 0", border: "none", background: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, cursor: "pointer", opacity: tab === n.id ? 1 : 0.45 }}><div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>{tab === n.id && <span key={"rip" + n.id} style={{ position: "absolute", top: "50%", left: "50%", width: 30, height: 30, borderRadius: "50%", background: "#E07A5F", pointerEvents: "none", animation: "ripple 0.6s ease-out forwards" }} />}<NI type={n.id} active={tab === n.id} />{n.id === "settings" && deadLetterCount > 0 && <div style={{ position: "absolute", top: -2, right: -2, width: 8, height: 8, borderRadius: "50%", background: "#D4726A", border: "2px solid var(--nav-bg)" }} />}</div><span style={{ fontFamily: "var(--font-h)", fontSize: 9, color: tab === n.id ? "#E07A5F" : "var(--muted)", fontWeight: tab === n.id ? 600 : 400 }}>{n.label}</span></button>)}</div><button onClick={() => { hapticLight(); sTab("add"); }} aria-label="Add" style={{ position: "absolute", top: -18, left: "50%", width: 58, height: 58, borderRadius: "50%", border: "none", background: tab === "add" ? "#D4704A" : "#E07A5F", color: "#fff", cursor: "pointer", boxShadow: "0 8px 20px rgba(224,122,95,0.42), 0 2px 6px rgba(224,122,95,0.28)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", transform: `translateX(-50%) scale(${tab === "add" ? 0.94 : 1})`, transition: "transform 0.18s cubic-bezier(0.34,1.56,0.64,1), background 0.18s ease" }}>{tab === "add" && <span key="fabrip" style={{ position: "absolute", top: "50%", left: "50%", width: 58, height: 58, borderRadius: "50%", background: "rgba(255,255,255,0.45)", pointerEvents: "none", animation: "navsplash 0.6s ease-out forwards" }} />}<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round" style={{ position: "relative", zIndex: 1 }}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg></button></div></div>}
+{module === "finance" && <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 430, margin: "0 auto", zIndex: 50, paddingBottom: "env(safe-area-inset-bottom)" }}><div style={{ position: "relative", height: 76 }}><svg width="100%" height="76" viewBox="0 0 430 76" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, display: "block", filter: "drop-shadow(0 -2px 12px rgba(0,0,0,0.07))" }}><path d="M0,18 L430,18 L430,76 L0,76 Z" fill="var(--nav-bg)" stroke="var(--border)" strokeWidth="1" /></svg><div style={{ position: "absolute", inset: "18px 0 0 0", display: "flex" }}>{[{ id: "dashboard", label: "Home" }, { id: "events", label: "Events" }, { id: "__fab", label: "" }, { id: "history", label: "History" }, { id: "settings", label: "Settings" }].map(n => n.id === "__fab" ? <div key="__fab" style={{ flex: 1 }} /> : <button key={n.id} onClick={() => { hapticSelection(); sTab(n.id); }} style={{ flex: 1, padding: "8px 0 0", border: "none", background: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, cursor: "pointer", opacity: tab === n.id ? 1 : 0.45 }}><div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>{tab === n.id && <span key={"rip" + n.id} style={{ position: "absolute", top: "50%", left: "50%", width: 30, height: 30, borderRadius: "50%", background: "#E07A5F", pointerEvents: "none", animation: "ripple 0.6s ease-out forwards" }} />}<NI type={n.id} active={tab === n.id} />{n.id === "settings" && deadLetterCount > 0 && <div style={{ position: "absolute", top: -2, right: -2, width: 8, height: 8, borderRadius: "50%", background: "#D4726A", border: "2px solid var(--nav-bg)" }} />}</div><span style={{ fontFamily: "var(--font-h)", fontSize: 9, color: tab === n.id ? "#E07A5F" : "var(--muted)", fontWeight: tab === n.id ? 600 : 400 }}>{n.label}</span></button>)}</div><button onClick={() => { hapticLight(); sTab("add"); }} aria-label="Add" style={{ position: "absolute", top: 16, left: "50%", width: 52, height: 52, borderRadius: "50%", border: "3px solid var(--nav-bg)", background: tab === "add" ? "#D4704A" : "#E07A5F", color: "#fff", cursor: "pointer", boxShadow: "0 6px 16px rgba(224,122,95,0.42), 0 2px 6px rgba(224,122,95,0.28)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", transform: `translateX(-50%) scale(${tab === "add" ? 0.94 : 1})`, transition: "transform 0.18s cubic-bezier(0.34,1.56,0.64,1), background 0.18s ease" }}>{tab === "add" && <span key="fabrip" style={{ position: "absolute", top: "50%", left: "50%", width: 58, height: 58, borderRadius: "50%", background: "rgba(255,255,255,0.45)", pointerEvents: "none", animation: "navsplash 0.6s ease-out forwards" }} />}<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round" style={{ position: "relative", zIndex: 1 }}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg></button></div></div>}
 
+    {streakOpen && <div onClick={e => { if (e.target === e.currentTarget) sStreakOpen(false); }} style={{ position: "fixed", inset: 0, background: "rgba(44,40,32,0.45)", zIndex: 60, display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+      <div style={{ background: "var(--card)", borderRadius: "24px 24px 0 0", maxWidth: 430, width: "100%", margin: "0 auto", padding: "22px 20px calc(20px + env(safe-area-inset-bottom))", maxHeight: "84%", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+          <div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)", letterSpacing: "0.5px" }}>Logging Streak</div>
+          <button onClick={() => sStreakOpen(false)} style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--bg)", border: "none", cursor: "pointer", fontSize: 14, color: "var(--muted)" }}>✕</button>
+        </div>
+        <div style={{ textAlign: "center", marginBottom: 16 }}>
+          <Fire size={52} weight="fill" color={streakInfo.atRisk ? (dm ? "#4B5563" : "#D1CDC4") : "#FBBF24"} />
+          <div style={{ fontFamily: "var(--font-h)", fontSize: 40, fontWeight: 800, color: "var(--text)", lineHeight: 1.1 }}>{streakInfo.current}</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600 }}>day streak{streakInfo.atRisk ? " — today still unlogged" : streakInfo.todayLogged ? " — today ✓" : ""}</div>
+          <div style={{ display: "flex", justifyContent: "center", gap: 14, marginTop: 10 }}>
+            <span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-h)" }}>Longest <strong style={{ color: "var(--text)" }}>{streakInfo.longest}</strong></span>
+            <span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-h)" }}>Freezes <strong style={{ color: "var(--text)" }}>{streakInfo.freezesHeld > 0 ? "🧊".repeat(streakInfo.freezesHeld) : "0"}</strong>/2</span>
+          </div>
+        </div>
+        {!streakInfo.todayLogged && <button onClick={markNoSpendToday} style={{ width: "100%", padding: "12px", border: "none", borderRadius: 12, background: "#6BAA75", color: "#fff", fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, cursor: "pointer", marginBottom: 16 }}>Nothing spent today — keep the flame ✓</button>}
+        {streakInfo.nextMilestone && <div style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><span style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--ts)" }}>Next milestone</span><span style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 700, color: "#FBBF24" }}>{streakInfo.current} / {streakInfo.nextMilestone}</span></div>
+          <div style={{ height: 6, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${Math.min(100, Math.round(streakInfo.current / streakInfo.nextMilestone * 100))}%`, background: "#FBBF24", borderRadius: 3 }} /></div>
+        </div>}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--ts)", marginBottom: 7 }}>Last 4 weeks</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 5 }}>
+            {streakInfo.calendar.map(c => <div key={c.date} title={`${c.date} — ${c.state}`} style={{ aspectRatio: "1", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, background: c.state === "active" ? "#FBBF24" : c.state === "frozen" ? "#7B8CDE" : "var(--bg)", border: c.state === "pending" ? "1.5px dashed #FBBF24" : "1px solid var(--border)", color: c.state === "active" ? "#7A5A00" : "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 700 }}>{c.state === "frozen" ? "🧊" : Number(c.date.slice(8))}</div>)}
+          </div>
+        </div>
+        <p style={{ fontSize: 10.5, color: "var(--muted)", fontFamily: "var(--font-b)", lineHeight: 1.55, margin: 0 }}>Any log keeps the day — expense, income, transfer, settlement, or a "no spend" confirmation. Every 7 straight days earns a freeze (max 2); a freeze auto-covers a fully missed day. Backfilling a missed day's transactions repairs it retroactively.</p>
+      </div>
+    </div>}
     {calW && <CalM wallet={calW} currentBal={wBal[calW.id] || 0} onSave={(v, note) => handleCal(calW.id, v, note)} onViewLedger={() => { const wv = calW; sCalW(null); sLedgerW(wv); }} onClose={() => sCalW(null)} />}{recountW && <RecountM wallet={recountW} currentBal={wBal[recountW.id] || 0} onClose={() => sRecountW(null)} />}{ledgerW && (() => { const wid = ledgerW.id; const touches = (it) => it.type === "expense" ? (it.walletId || "upi_lite") === wid : it.type === "income" ? (it.walletId || "bank") === wid : it.type === "transfer" ? (it.fromWallet === wid || it.toWallet === wid) : it.type === "settlement" ? it.walletId === wid : false; const all = [...ex.map(e => ({ ...e, type: "expense" })), ...inc.map(i => ({ ...i, type: "income" })), ...tr.map(t => ({ ...t, type: "transfer" })), ...stl.map(s => ({ ...s, type: "settlement" }))].filter(touches).sort(historySortCompare); const labelFor = (it) => it.type === "expense" ? (cats.find(c => c.id === it.categoryId)?.name || recCats.find(c => c.id === it.categoryId)?.name || "Expense") : it.type === "income" ? (isrc.find(s => s.id === it.sourceId)?.name || "Income") : it.type === "transfer" ? (it.fromWallet === wid ? `Transfer → ${wallets.find(x => x.id === it.toWallet)?.name || "?"}` : `Transfer ← ${wallets.find(x => x.id === it.fromWallet)?.name || "?"}`) : (it.splitName ? `Settle · ${it.splitName}` : "Settlement"); const lastV = walletVerify[wid]?.last; const rowVerified = (it) => { if (!lastV) return false; const precise = it.created_at || it.createdAt || it.updated_at; if (precise) return new Date(precise).getTime() <= lastV.ts; if (!it.date) return false; return it.date <= lastV.date; }; const wD = (it) => { if (it.type === "expense") return (it.walletId || "upi_lite") === wid ? -it.amount : 0; if (it.type === "income") return (it.walletId || "bank") === wid ? it.amount : 0; if (it.type === "transfer") return it.fromWallet === wid ? -it.amount : it.toWallet === wid ? it.amount : 0; if (it.type === "settlement") return it.walletId === wid ? (it.direction === "owed" ? it.amount : -it.amount) : 0; return 0; }; const _txTs = (it) => { const t = it.created_at || it.createdAt || it.updated_at; return t ? new Date(t).getTime() : new Date(it.date + "T23:59:59").getTime(); }; const _cals = (calLog || []).filter(c => c.wId === wid); const _chrono = [...all].sort((a, b) => { const dd = new Date(a.date) - new Date(b.date); if (dd !== 0) return dd; return new Date(a.created_at || a.createdAt || a.updated_at || 0) - new Date(b.created_at || b.createdAt || b.updated_at || 0); }); const _afterById = {}; let _prefix = 0; _chrono.forEach(it => { const _fg = _cals.filter(c => c.ts > _txTs(it)).reduce((s, c) => s + (c.gap || 0), 0); _prefix += wD(it); _afterById[it.id] = (wsb[wid] || 0) - _fg + _prefix; }); const rows = all.map(it => { const d = wD(it); return { id: it.id, label: labelFor(it), date: it.date, note: dispNote(it.note), delta: roundMoney(d), after: roundMoney(_afterById[it.id] ?? 0), verified: rowVerified(it) }; }); const lastVerifyLabel = lastV ? dl(lastV.date) : null; return <LedgerM wallet={ledgerW} rows={rows} curBal={roundMoney(wBal[wid] || 0)} lastVerifyLabel={lastVerifyLabel} onReconcile={() => { const wv = ledgerW; sLedgerW(null); sCalW(wv); }} onClose={() => sLedgerW(null)} />; })()}
     {recEditId && (() => {
       const r = rec.find(x => x.id === recEditId);
