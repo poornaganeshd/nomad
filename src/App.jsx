@@ -1821,23 +1821,25 @@ export default function Nomad() {
         setTimeout(() => sToasts(prev => prev.filter(t => t.id !== id)), 4000);
       }, i * 700);
     });
-    // Mirror the same reminders to ntfy (real phone push). checkBillReminders
-    // already de-dupes to once-per-day per bill, so this fires at most once a
-    // day per item. Fire-and-forget; publishNtfy no-ops when not configured.
+    // Mirror the reminders to the notification shade + ntfy as ONE coalesced
+    // digest. A per-reminder fan-out flooded the shade with N separate entries
+    // on the first open of the day; a single digest (fixed tag, so re-fires
+    // replace instead of stack) carries the same information in one card.
+    // checkBillReminders de-dupes to once/day, so this shows at most once a
+    // day per device. Fire-and-forget; publishNtfy no-ops when unconfigured.
+    const warnCount = reminders.filter(r => r.type === "warn").length;
+    const digestTitle = warnCount > 0 ? `${warnCount} payment${warnCount !== 1 ? "s" : ""} need attention` : "Bill reminders";
+    const MAX_DIGEST_LINES = 6;
+    const digestBody = reminders.slice(0, MAX_DIGEST_LINES).map(r => "• " + r.msg).join("\n") + (reminders.length > MAX_DIGEST_LINES ? `\n+${reminders.length - MAX_DIGEST_LINES} more` : "");
     const nc = getNtfyConfig();
     if (isNtfyConfigured(nc)) {
-      reminders.forEach(r => {
-        publishNtfy(nc, { title: r.type === "warn" ? "Payment due" : "Bill reminder", message: r.msg, type: r.type });
-      });
+      publishNtfy(nc, { title: digestTitle, message: digestBody, type: warnCount > 0 ? "warn" : "info" });
     }
-    // Also surface them as system notifications (notification shade) when the
-    // user granted permission — works in every mode incl. local-only, no
-    // server involved: the SW registration shows them directly.
+    // System notification (shade) when permission granted — works in every
+    // mode incl. local-only, no server involved: the SW shows it directly.
     if (typeof Notification !== "undefined" && Notification.permission === "granted" && "serviceWorker" in navigator) {
       navigator.serviceWorker.ready.then(reg => {
-        reminders.forEach(r => {
-          reg.showNotification(r.type === "warn" ? "Payment due" : "Bill reminder", { body: r.msg, icon: "/icon-192.png", badge: "/icon-192.png", tag: "nomad-local-" + r.id }).catch(() => { });
-        });
+        reg.showNotification(digestTitle, { body: digestBody, icon: "/icon-192.png", badge: "/icon-192.png", tag: "nomad-reminders" }).catch(() => { });
       }).catch(() => { });
     }
   }, [loaded, rec, sp]);
