@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseAmount, parseVoiceTx, parseBankCsv, parseUpiStatement } from "../txParsers.js";
+import { parseAmount, parseVoiceTx, parseBankCsv, parseUpiStatement, htmlStatementToText } from "../txParsers.js";
 
 // ---------------------------------------------------------------------------
 // parseAmount
@@ -238,5 +238,26 @@ Page 1 of 12`;
     expect(parseUpiStatement("")).toEqual([]);
     expect(parseUpiStatement("date,amount\n2026-06-01,500")).toEqual([]);
     expect(parseUpiStatement("Hello, this is not a statement at all.")).toEqual([]);
+  });
+});
+
+describe('htmlStatementToText', () => {
+  it('converts table rows to one line per row with cells joined', () => {
+    const html = '<html><body><table><tr><th>Date</th><th>Amount</th></tr><tr><td>01/07/2026</td><td>-150.00</td></tr><tr><td>02/07/2026</td><td>+2,000.00</td></tr></table></body></html>';
+    const text = htmlStatementToText(html);
+    expect(text.split('\n')).toEqual(['Date  Amount', '01/07/2026  -150.00', '02/07/2026  +2,000.00']);
+  });
+
+  it('strips script/style and collapses whitespace', () => {
+    const html = '<body><style>.x{color:red}</style><script>alert(1)</script><div>UPI   Ref\n 12345</div><div>Paid to  Chai Wala</div></body>';
+    const text = htmlStatementToText(html);
+    expect(text).not.toMatch(/alert|color/);
+    expect(text).toContain('UPI Ref 12345');
+    expect(text).toContain('Paid to Chai Wala');
+  });
+
+  it('handles empty/garbage input without throwing', () => {
+    expect(htmlStatementToText('')).toBe('');
+    expect(htmlStatementToText(null)).toBe('');
   });
 });
