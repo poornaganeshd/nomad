@@ -629,6 +629,17 @@ function VoiceAdd({ onParsed, accent = "#E07A5F", compact = false }) {
 function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], autoRules = [], onLearnRule = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false, splitPeople = [], onAddSplits = () => {}, defaults = {} }) {
   const _AD = (() => { try { return JSON.parse(sessionStorage.getItem("nomad-add-draft") || "{}"); } catch { return {}; } })();
   const [type, sType] = useState(_AD.type || "expense"), [amt, sAmt] = useState(_AD.amt || "0"), [catId, sCat] = useState(_AD.catId || defaults.categoryId || cats[0]?.id || ""), [srcId, sSrc] = useState(isrc[0]?.id || ""), [wid, sW] = useState(_AD.wid || defaults.walletId || "bank"), [iwid, sIW] = useState("bank"), [tFrom, sTF] = useState("bank"), [tTo, sTT] = useState("upi_lite"), [date, sDate] = useState(_AD.date || localDateKey()), [note, sNote] = useState(_AD.note || ""), [fixed, sFixed] = useState(false);
+  // Smart defaults can land AFTER mount (history loads async, so a cold start
+  // straight onto the Add tab computes them from an empty list). Adopt a late
+  // suggestion only while the field still holds the auto-picked value — the
+  // moment the user (or a draft/chip/voice parse) changes it, hands off for good.
+  const autoSel = useRef({ cat: _AD.catId ? null : (defaults.categoryId || cats[0]?.id || ""), wid: _AD.wid ? null : (defaults.walletId || "bank") });
+  useEffect(() => {
+    const a = autoSel.current;
+    if (a.cat !== null && defaults.categoryId && catId === a.cat && defaults.categoryId !== catId) { a.cat = defaults.categoryId; sCat(defaults.categoryId); }
+    if (a.wid !== null && defaults.walletId && wid === a.wid && defaults.walletId !== wid) { a.wid = defaults.walletId; sW(defaults.walletId); }
+  }, [defaults.categoryId, defaults.walletId, catId, wid]);
+
   // "Split with friends": selected friend names + the new-name input. Friends'
   // equal shares become "owed" IOUs alongside the expense at submit time.
   const [splitOn, sSplitOn] = useState(false), [splitSel, sSplitSel] = useState([]), [splitNew, sSplitNew] = useState("");
