@@ -11,9 +11,27 @@
     <link rel="apple-touch-icon" href="/icon-192.png">
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>NOMAD</title>
+    <script>/* pre-paint theme sniff so the splash matches the app theme (darkMode lives in the nomad-v5 backup) */try{if((localStorage.getItem("nomad-v5")||"").indexOf('"darkMode":true')>-1)document.documentElement.setAttribute("data-nomad-dark","")}catch(e){/* storage blocked — default to light */}</script>
+    <style>
+      /* Boot splash: pure CSS, renders the instant HTML arrives and is wiped
+         automatically when React mounts into #root. Keep it dependency-free —
+         it exists to cover the JS parse/boot gap after the OS splash screen. */
+      #nomad-splash{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:#F2F0EB}
+      html[data-nomad-dark] #nomad-splash{background:#000}
+      #nomad-splash .nm-word{font-family:system-ui,'Segoe UI',Roboto,sans-serif;font-size:26px;font-weight:800;letter-spacing:9px;padding-left:9px;color:#1A1A2E;animation:nmPulse 1.6s ease-in-out infinite}
+      html[data-nomad-dark] #nomad-splash .nm-word{color:#E5E7EB}
+      #nomad-splash .nm-dots{display:flex;gap:6px}
+      #nomad-splash .nm-dots i{width:7px;height:7px;border-radius:50%;background:#E07A5F;animation:nmBounce 1.2s ease-in-out infinite}
+      #nomad-splash .nm-dots i:nth-child(2){animation-delay:.15s}
+      #nomad-splash .nm-dots i:nth-child(3){animation-delay:.3s}
+      @keyframes nmPulse{0%,100%{opacity:1}50%{opacity:.55}}
+      @keyframes nmBounce{0%,100%{transform:translateY(0);opacity:.5}50%{transform:translateY(-6px);opacity:1}}
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="nomad-splash"><div class="nm-word">NOMAD</div><div class="nm-dots"><i></i><i></i><i></i></div></div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
