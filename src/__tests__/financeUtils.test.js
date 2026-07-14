@@ -13,6 +13,7 @@ import {
   expenseShareMap,
   historySortCompare,
   itemTimestamp,
+  suggestAddDefaults,
 } from '../financeUtils.js';
 
 // ---------------------------------------------------------------------------
@@ -500,5 +501,59 @@ describe('itemTimestamp', () => {
   it('prefers created_at over any id heuristic', () => {
     const t = Date.parse('2026-05-19T10:00:00Z');
     expect(itemTimestamp({ id: 'ffffffff-aaaa', created_at: '2026-05-19T10:00:00Z' })).toBe(t);
+  });
+});
+
+describe('suggestAddDefaults', () => {
+  const NOW = new Date(2026, 6, 14, 9); // Tue 2026-07-14
+  const e = (date, categoryId, walletId, extra = {}) => ({ id: date + categoryId, amount: 10, date, categoryId, walletId, ...extra });
+
+  it('returns nulls with no usable history', () => {
+    expect(suggestAddDefaults([], { now: NOW })).toEqual({ categoryId: null, walletId: null });
+    expect(suggestAddDefaults(undefined, { now: NOW })).toEqual({ categoryId: null, walletId: null });
+    expect(suggestAddDefaults([e('bad-date', 'food', 'cash')], { now: NOW })).toEqual({ categoryId: null, walletId: null });
+  });
+
+  it('picks the most frequent recent category and wallet', () => {
+    const rows = [
+      e('2026-07-13', 'transport', 'cash'),
+      e('2026-07-12', 'transport', 'cash'),
+      e('2026-07-11', 'transport', 'cash'),
+      e('2026-07-10', 'food', 'bank'),
+    ];
+    expect(suggestAddDefaults(rows, { now: NOW })).toEqual({ categoryId: 'transport', walletId: 'cash' });
+  });
+
+  it('recency outweighs stale volume', () => {
+    const rows = [
+      // 3 old food entries (~100 days ago) vs 2 fresh transport ones
+      e('2026-04-05', 'food', 'bank'), e('2026-04-06', 'food', 'bank'), e('2026-04-07', 'food', 'bank'),
+      e('2026-07-13', 'transport', 'cash'), e('2026-07-12', 'transport', 'cash'),
+    ];
+    expect(suggestAddDefaults(rows, { now: NOW })).toEqual({ categoryId: 'transport', walletId: 'cash' });
+  });
+
+  it('same weekday breaks a near tie', () => {
+    const rows = [
+      e('2026-07-07', 'coffee', 'upi_lite'), // Tuesday, same dow as NOW
+      e('2026-07-08', 'food', 'bank'),       // Wednesday, fresher but no boost
+    ];
+    expect(suggestAddDefaults(rows, { now: NOW }).categoryId).toBe('coffee');
+  });
+
+  it('ignores deleted, future, and >120-day-old rows', () => {
+    const rows = [
+      e('2026-07-13', 'food', 'bank', { deleted_at: '2026-07-13T10:00:00Z' }),
+      e('2026-08-01', 'food', 'bank'),
+      e('2026-01-01', 'food', 'bank'),
+      e('2026-07-10', 'transport', 'cash'),
+    ];
+    expect(suggestAddDefaults(rows, { now: NOW })).toEqual({ categoryId: 'transport', walletId: 'cash' });
+  });
+
+  it('skips ids outside the valid sets (deleted category cannot be suggested)', () => {
+    const rows = [e('2026-07-13', 'ghost_cat', 'ghost_wallet'), e('2026-07-12', 'food', 'bank')];
+    const r = suggestAddDefaults(rows, { now: NOW, validCategoryIds: new Set(['food']), validWalletIds: new Set(['bank']) });
+    expect(r).toEqual({ categoryId: 'food', walletId: 'bank' });
   });
 });
