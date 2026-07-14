@@ -29,7 +29,10 @@ import { useLockBodyScroll } from "./scrollLock";
 // Code-split the heavy, conditionally-rendered surfaces (Routine sub-app, NomadLite,
 // IOU wallet, calendar, credential setup, recharts donut) out of the initial bundle.
 // Each lazy component is pre-wrapped in Suspense so every call site stays unchanged.
-const lazyView = (loader, fallback = null) => { const C = lazy(loader); return function LazyView(props) { return <Suspense fallback={fallback}><C {...props} /></Suspense>; }; };
+// If a chunk fetch fails (offline before it was ever downloaded), render a hint
+// instead of crashing the whole tree — React.lazy has no built-in error path.
+const chunkFailed = () => ({ default: () => <div style={{ padding: 48, textAlign: "center", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 13, lineHeight: 1.6 }}>This section isn't downloaded yet.<br />Reconnect, then reload the app.</div> });
+const lazyView = (loader, fallback = null) => { const C = lazy(() => loader().catch(chunkFailed)); return function LazyView(props) { return <Suspense fallback={fallback}><C {...props} /></Suspense>; }; };
 const viewLoading = <div style={{ padding: 48, textAlign: "center", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 13 }}>Loading…</div>;
 const RoutineApp = lazyView(() => import("./Routine"), viewLoading);
 const NomadLite = lazyView(() => import("./NomadLite"), viewLoading);
@@ -1760,6 +1763,14 @@ export default function Nomad() {
 
 
   useEffect(() => subscribePendingSync(sPendingSync), []);
+
+  // Warm every lazy chunk once first paint is done: the SW can only serve
+  // offline what has been fetched at least once, so idle-prefetching keeps the
+  // offline story identical to the old single-bundle build.
+  useEffect(() => {
+    const warm = () => { import("./CatDonut"); import("./CalendarView"); import("./IOUWallet"); import("./Routine"); import("./NomadLite"); import("./CredentialSetup"); };
+    if ("requestIdleCallback" in window) window.requestIdleCallback(warm, { timeout: 3000 }); else setTimeout(warm, 1500);
+  }, []);
 
   useEffect(() => subscribeSyncDrops((info) => {
     if (info.kind === "storage") { showT("Storage full — clear some data or export and reset", "error"); return; }
