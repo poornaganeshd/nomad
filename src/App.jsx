@@ -1,8 +1,6 @@
-import { useState, useEffect, useMemo, useRef, useCallback, memo, Fragment } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, memo, Fragment, lazy, Suspense } from "react";
 import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning, Wallet, Target, Lightning, Envelope, Fire, Sparkle, Lightbulb, ClipboardText, Timer, HandWaving, BellSlash, Robot, Receipt, FilePdf, Trash, Moon, Sun, Scales, Gear, PushPin, Hash, Microphone, CheckCircle, ArrowsLeftRight, CaretLeft, Users, ArrowRight, ArrowUpRight, ArrowDownLeft, PencilSimple, ShareNetwork, Compass, Paperclip, PaperPlaneTilt, CopySimple } from "@phosphor-icons/react";
 import { IconCheck, IconTrash, IconHistory, IconChevronRight, IconChevronLeft, IconSend, IconAlertTriangle, IconX, IconClock, IconArrowDown, IconArrowUp, IconPlus, IconPlayerSkipForward, IconPencil } from "@tabler/icons-react";
-import { PieChart, Pie, Cell } from "recharts";
-import RoutineApp from "./Routine";
 import { flushSyncQueue, getPendingSyncCount, getPendingSyncSummary, getDeadLetterCount, clearDeadLetter, sendSupabaseRequest, subscribePendingSync, subscribeSyncDrops, isPendingDelete, isPendingUpsert, hasPendingDedupeKey } from "./offlineSync";
 import { checkBillReminders } from "./billReminders";
 import { getNtfyConfig, saveNtfyConfig, isNtfyConfigured, publishNtfy } from "./ntfy";
@@ -11,7 +9,6 @@ import { computeStreak, loadStreakStore, saveStreakStore } from "./streak";
 import { getExchangeRate, saveCurrencyMeta, getCurrencyMeta, getRateMeta } from "./currencyConverter";
 import { hapticForToast, hapticLight, hapticMedium, hapticSelection, hapticsEnabled, setHapticsEnabled } from "./haptics";
 import ReceiptPicker from "./ReceiptPicker";
-import CredentialSetup from "./CredentialSetup";
 import { getCredentials, isLocalMode } from "./credentials";
 import { uploadReceipt } from "./receiptUpload";
 import { COLS } from "./dbCols";
@@ -27,10 +24,19 @@ import { parseAmount, parseVoiceTx, parseBankCsv, parseUpiStatement } from "./tx
 import { extractPdfText, looksLikeText } from "./pdfText";
 import { renderChatHtml } from "./chatFormat";
 import { buildLedger, reconcile, statementClosingBalance, loadImportedRefs, saveImportedRefs } from "./bankReconcile";
-import CalendarView from "./CalendarView";
-import NomadLite from "./NomadLite";
-import IOUWallet from "./IOUWallet";
 import { useLockBodyScroll } from "./scrollLock";
+
+// Code-split the heavy, conditionally-rendered surfaces (Routine sub-app, NomadLite,
+// IOU wallet, calendar, credential setup, recharts donut) out of the initial bundle.
+// Each lazy component is pre-wrapped in Suspense so every call site stays unchanged.
+const lazyView = (loader, fallback = null) => { const C = lazy(loader); return function LazyView(props) { return <Suspense fallback={fallback}><C {...props} /></Suspense>; }; };
+const viewLoading = <div style={{ padding: 48, textAlign: "center", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 13 }}>Loading…</div>;
+const RoutineApp = lazyView(() => import("./Routine"), viewLoading);
+const NomadLite = lazyView(() => import("./NomadLite"), viewLoading);
+const CredentialSetup = lazyView(() => import("./CredentialSetup"), viewLoading);
+const IOUWallet = lazyView(() => import("./IOUWallet"));
+const CalendarView = lazyView(() => import("./CalendarView"));
+const CatDonut = lazyView(() => import("./CatDonut"));
 const APP = "NOMAD", CUR = "₹";
 // Use crypto.randomUUID() when available (all modern browsers + Node 14.17+).
 // Falls back to a longer random suffix than the previous 4 chars to keep
@@ -532,11 +538,7 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
       ) : (
         <>
           <div style={{ position: "relative", width: 208, height: 208, margin: "2px auto 6px" }}>
-            <PieChart width={208} height={208}>
-              <Pie data={rows.map(r => ({ name: r.cat.name, value: r.amt }))} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={64} outerRadius={96} paddingAngle={rows.length > 1 ? 2 : 0} cornerRadius={3} stroke="none" isAnimationActive={false} onClick={(_, idx) => { const r = rows[idx]; if (r) toggleCat(r.cid); }}>
-                {rows.map(r => <Cell key={r.cid} fill={r.cat.color} fillOpacity={selCid && r.cid !== selCid ? 0.3 : 1} style={{ cursor: "pointer", outline: "none" }} />)}
-              </Pie>
-            </PieChart>
+            <CatDonut rows={rows} selCid={selCid} toggleCat={toggleCat} />
             <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none", textAlign: "center" }}>
               {sel ? (
                 <>
