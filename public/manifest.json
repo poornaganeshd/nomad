@@ -7,6 +7,15 @@
   "background_color": "#F2F0EB",
   "theme_color": "#E07A5F",
   "orientation": "portrait",
+  "shortcuts": [
+    {
+      "name": "Log expense",
+      "short_name": "Log",
+      "description": "Jump straight to the Add tab",
+      "url": "/?add=1",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    }
+  ],
   "icons": [
     {
       "src": "/icon-192.png",

@@ -236,3 +236,28 @@ export const resolveRecCategory = (categoryId, lists = [], categoryName) => {
   }
   return { id: categoryId, name: categoryName || categoryId, color: "#8A8A9A", neon: "#A0A0B0" };
 };
+
+// Smart Add-form defaults: the category/wallet you most plausibly log next,
+// from recency-weighted frequency over the last 120 days with a same-weekday
+// boost (expenses only store a day-precision `date`, so time-of-day is not
+// available). Candidates are restricted to ids in validCategoryIds /
+// validWalletIds when provided, so a deleted category can never be suggested.
+// Returns { categoryId, walletId } with nulls when there's no usable history.
+export const suggestAddDefaults = (expenses, { now = new Date(), validCategoryIds, validWalletIds } = {}) => {
+  const nowNoon = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12);
+  const todayDow = nowNoon.getDay();
+  const catScore = {}, walScore = {};
+  for (const e of expenses || []) {
+    if (!e || e.deleted_at || !e.date) continue;
+    const [y, m, d] = String(e.date).split("-").map(Number);
+    if (!y || !m || !d) continue;
+    const when = new Date(y, m - 1, d, 12);
+    const age = Math.round((nowNoon - when) / 86400000);
+    if (age < 0 || age > 120) continue;
+    const w = Math.pow(0.97, age) * (when.getDay() === todayDow ? 1.25 : 1);
+    if (e.categoryId && (!validCategoryIds || validCategoryIds.has(e.categoryId))) catScore[e.categoryId] = (catScore[e.categoryId] || 0) + w;
+    if (e.walletId && (!validWalletIds || validWalletIds.has(e.walletId))) walScore[e.walletId] = (walScore[e.walletId] || 0) + w;
+  }
+  const top = scores => { let best = null, bestW = 0; for (const [id, sc] of Object.entries(scores)) if (sc > bestW) { best = id; bestW = sc; } return best; };
+  return { categoryId: top(catScore), walletId: top(walScore) };
+};
