@@ -101,13 +101,13 @@ export default function CalendarView({
           minWidth: 0,
           boxSizing: "border-box",
           borderRadius: 10,
-          background: isSel ? "#E07A5F" : cellColor(dat.exp),
+          background: isSel ? "var(--neg)" : cellColor(dat.exp),
           // Keep the border width constant across every cell so the inner
           // content width never changes — the selected/today ring is drawn as
           // an inset shadow instead, which doesn't steal layout space (a 2px
           // border used to shrink the cell enough to truncate the amount).
           border: "1px solid var(--border)",
-          boxShadow: isSel ? "inset 0 0 0 2px #E07A5F" : isT ? "inset 0 0 0 2px var(--text)" : "none",
+          boxShadow: isSel ? "inset 0 0 0 2px var(--neg)" : isT ? "inset 0 0 0 2px var(--text)" : "none",
           padding: 4,
           cursor: "pointer",
           display: "flex",
@@ -130,7 +130,7 @@ export default function CalendarView({
               width: 5,
               height: 5,
               borderRadius: "50%",
-              background: isSel ? "#fff" : "#6BAA75",
+              background: isSel ? "#fff" : "var(--pos)",
               flexShrink: 0,
             }} />
           )}
@@ -188,7 +188,7 @@ export default function CalendarView({
             {!iC && (
               <button
                 onClick={() => { sY(today.getFullYear()); sM(today.getMonth()); sSel(localDateKey()); }}
-                style={{ background: "none", border: "none", fontSize: 10, color: "#E07A5F", cursor: "pointer", fontFamily: "var(--font-h)", fontWeight: 600, marginTop: 2 }}
+                style={{ background: "none", border: "none", fontSize: 10, color: "var(--neg)", cursor: "pointer", fontFamily: "var(--font-h)", fontWeight: 600, marginTop: 2 }}
               >Jump to today</button>
             )}
           </div>
@@ -197,8 +197,8 @@ export default function CalendarView({
 
         <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
           {[
-            { l: "SPENT", v: fmt(monthTotal.exp), c: "#E07A5F" },
-            { l: "EARNED", v: fmt(monthTotal.inc), c: "#6BAA75" },
+            { l: "SPENT", v: fmt(monthTotal.exp), c: "var(--neg)" },
+            { l: "EARNED", v: fmt(monthTotal.inc), c: "var(--pos)" },
             { l: "DAYS", v: `${monthTotal.days}/${dim}`, c: "var(--muted)" },
           ].map(x => (
             <div key={x.l} style={{ flex: 1, background: "var(--bg)", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
@@ -247,7 +247,7 @@ export default function CalendarView({
               const isExp = t._type === "expense";
               const isInc = t._type === "income";
               const isTr = t._type === "transfer";
-              const color = isExp ? "#E07A5F" : isInc ? "#6BAA75" : "#7B8CDE";
+              const color = isExp ? "var(--neg)" : isInc ? "var(--pos)" : "var(--acc)";
               const label = isExp ? catName(t.categoryId) : isInc ? catName(t.sourceId) : `${walName(t.fromWallet)} → ${walName(t.toWallet)}`;
               const sign = isExp ? "−" : isInc ? "+" : "↔";
               return (
@@ -303,20 +303,20 @@ export default function CalendarView({
                   {exp > 0 && (
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600 }}>SPENT</div>
-                      <div style={{ fontSize: 13, color: "#E07A5F", fontFamily: "var(--font-h)", fontWeight: 700, marginTop: 2 }}>{fmt(exp)}</div>
+                      <div style={{ fontSize: 13, color: "var(--neg)", fontFamily: "var(--font-h)", fontWeight: 700, marginTop: 2 }}>{fmt(exp)}</div>
                     </div>
                   )}
                   {inc > 0 && (
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600 }}>EARNED</div>
-                      <div style={{ fontSize: 13, color: "#6BAA75", fontFamily: "var(--font-h)", fontWeight: 700, marginTop: 2 }}>{fmt(inc)}</div>
+                      <div style={{ fontSize: 13, color: "var(--pos)", fontFamily: "var(--font-h)", fontWeight: 700, marginTop: 2 }}>{fmt(inc)}</div>
                     </div>
                   )}
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600 }}>NET</div>
                     <div style={{
                       fontSize: 13,
-                      color: inc - exp >= 0 ? "#6BAA75" : "#E07A5F",
+                      color: inc - exp >= 0 ? "var(--pos)" : "var(--neg)",
                       fontFamily: "var(--font-h)",
                       fontWeight: 700,
                       marginTop: 2,
