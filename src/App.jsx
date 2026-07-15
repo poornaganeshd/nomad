@@ -14,6 +14,7 @@ import { uploadReceipt } from "./receiptUpload";
 import { COLS } from "./dbCols";
 import { mergeRemote, isRecentRow, unionById } from "./syncMerge";
 import { computeFinanceScore, scoreLabel } from "./financeScore";
+import { buildDailyInsight } from "./insights";
 import { redactTransactions, redact } from "./redactor";
 import {
   roundMoney, localDateKey, getRecurringDueDate, isRecurringDueToday,
@@ -2263,6 +2264,7 @@ export default function Nomad() {
   }, [sp, stl]);
 
   const wBal = useMemo(() => { const b = {}; wallets.forEach(w => { b[w.id] = roundMoney(wsb[w.id] || 0); }); inc.forEach(i => { const w = i.walletId || "bank"; if (b[w] !== undefined) b[w] = roundMoney(b[w] + i.amount) }); ex.forEach(e => { const w = e.walletId || "upi_lite"; if (b[w] !== undefined) b[w] = roundMoney(b[w] - e.amount) }); tr.forEach(t => { if (b[t.fromWallet] !== undefined) b[t.fromWallet] = roundMoney(b[t.fromWallet] - t.amount); if (b[t.toWallet] !== undefined) b[t.toWallet] = roundMoney(b[t.toWallet] + t.amount) }); stl.forEach(s => { if (b[s.walletId] !== undefined) { if (s.direction === "owed") b[s.walletId] = roundMoney(b[s.walletId] + s.amount); else b[s.walletId] = roundMoney(b[s.walletId] - s.amount) } }); return b }, [ex, inc, tr, stl, wsb, wallets]);
+  const dayInsight = useMemo(() => buildDailyInsight({ expenses: ex, recurring: rec, walletBalances: wBal, wallets }), [ex, rec, wBal, wallets]);
   const mBal = roundMoney(Object.values(wBal).reduce((s, v) => s + v, 0));
   // Per-wallet verification state. NOMAD can't read your bank, so "verified"
   // means "you recently confirmed the real balance here and nothing has piled
@@ -3389,6 +3391,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
       {(tab === "dashboard" || tab === "history") && <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "12px 0 16px", scrollbarWidth: "none" }}><button onClick={() => { sFm("all"); sHCalDay(null); }} style={{ padding: "7px 16px", borderRadius: 20, fontSize: 12, fontFamily: "var(--font-h)", border: `1.5px solid ${fm === "all" ? "#E07A5F" : "var(--border)"}`, background: fm === "all" ? "#E07A5F" : "var(--card)", color: fm === "all" ? "#fff" : "var(--muted)", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 500 }}>All</button>{allM.map(m => <button key={m} onClick={() => { sFm(m); sHCalDay(null); }} style={{ padding: "7px 16px", borderRadius: 20, fontSize: 12, fontFamily: "var(--font-h)", border: `1.5px solid ${fm === m ? "#6BAA75" : "var(--border)"}`, background: fm === m ? "#6BAA75" : "var(--card)", color: fm === m ? "#fff" : "var(--muted)", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 500 }}>{ml(m)}</button>)}</div>}
 
       {tab === "dashboard" && <div className="pe">
+        {dayInsight && <div style={{ ...cc, padding: "12px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 10, borderLeft: `3px solid ${dayInsight.tone === "warn" ? "var(--danger)" : dayInsight.tone === "good" ? "var(--pos)" : "var(--acc)"}` }}><Sparkle size={16} weight="fill" color={dayInsight.tone === "warn" ? "var(--danger)" : dayInsight.tone === "good" ? "var(--pos)" : "var(--acc)"} style={{ flexShrink: 0 }} /><span style={{ fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--text)", lineHeight: 1.5 }}>{dayInsight.text}</span></div>}
         {(() => {
           const tod = new Date(), todS = localDateKey(tod), snoozed = (() => { try { return JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); } catch { return {}; } })(), due = rec.filter(r => isRecurringDueToday(r, todS) && !(snoozed[r.id] && snoozed[r.id] > todS));
           // Pay a due bill from the chosen wallet (the per-cycle override). The
