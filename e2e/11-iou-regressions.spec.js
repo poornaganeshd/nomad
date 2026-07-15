@@ -108,7 +108,7 @@ test("Settle everything validates the COMBINED payout atomically (no overdraft)"
   await page.getByRole("button", { name: /Settle everything/ }).click();
   await page.getByRole("button", { name: "Bank", exact: true }).click();
   await page.getByRole("button", { name: /Pay .*& settle/ }).click();
-  await expect(page.getByText(/Not enough — net is/)).toBeVisible();
+  await expect(page.getByText(/Not enough — need/)).toBeVisible();
   const b = await readBackup(page);
   expect(b.settlements?.length ?? 0).toBe(0);
   expect(b.splits.every((s) => !s.settled)).toBe(true);

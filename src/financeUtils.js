@@ -224,6 +224,28 @@ export const defaultSettleWalletId = (direction, wallets, isUpiLiteFn) => {
   return (usable[0] || list[0])?.id;
 };
 
+// A settlement's contribution to the SPLIT ledger. `amount` is the cash that
+// actually moved (wallet math must always use it in full); `excess` is the part
+// paid over and above the IOU's remainder (an overpay — e.g. owed ₹11.66, friend
+// sends ₹12). Every place that reconciles settlements against splits/shares
+// (paid-so-far, remaining, group ledgers, spending stats) must use this net
+// value or the extra paise leak in as phantom credit. The excess itself is
+// surfaced only in the write-off ledger, as recovery.
+export const settlementNetAmount = (s) =>
+  roundMoney((Number(s?.amount) || 0) - (Number(s?.excess) || 0));
+
+// Fat-finger guard for overpaid settles. A small tip-sized surplus (₹12 against
+// ₹11.66) sails through; a surplus that's large in absolute terms (> ₹50) or
+// relative to the amount due (> 20%) is more likely a typo (120 for 12), so the
+// settle button demands a second, explicit tap before moving real money.
+// Single source for every settle surface (per-IOU modal, net-settle sheet).
+export const isSuspiciousExcess = (excess, due) => {
+  const e = Number(excess) || 0;
+  const d = Number(due) || 0;
+  if (e <= 0.005) return false;
+  return e > 50 || (d > 0 && e > roundMoney(d * 0.2));
+};
+
 // Resolve a recurring bill's category to a display object. Recurring bills use
 // the recurring category lists (built-in defaults + the user's custom ones), NOT
 // the expense categories — looking them up against expense categories showed a
