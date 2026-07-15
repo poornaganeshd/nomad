@@ -4,6 +4,8 @@ import {
   exceedsUpiLiteBalance,
   defaultSettleWalletId,
   resolveRecCategory,
+  settlementNetAmount,
+  isSuspiciousExcess,
 } from '../financeUtils.js';
 
 // Regression "wall" for the class of bugs that kept recurring in App.jsx:
@@ -91,5 +93,53 @@ describe('resolveRecCategory — recurring bills use recurring categories', () =
     const a = [{ id: 'dup', name: 'From A' }];
     const b = [{ id: 'dup', name: 'From B' }];
     expect(resolveRecCategory('dup', [a, b]).name).toBe('From A');
+  });
+});
+
+describe('settlementNetAmount — split ledgers reconcile net of overpay excess', () => {
+  it('subtracts the excess from an overpaid settlement (owed ₹11.66, sent ₹12)', () => {
+    // `amount` is the cash that moved (wallet truth); the split ledger must see
+    // only the portion that pays the IOU or the extra paise become phantom credit.
+    expect(settlementNetAmount({ amount: 12, excess: 0.34 })).toBe(11.66);
+  });
+
+  it('is the full amount when there is no excess (normal settlement)', () => {
+    expect(settlementNetAmount({ amount: 11.66 })).toBe(11.66);
+    expect(settlementNetAmount({ amount: 11.66, excess: null })).toBe(11.66);
+  });
+
+  it('rounds to paisa like every other money path', () => {
+    expect(settlementNetAmount({ amount: 10.005, excess: 0.001 })).toBe(10.0);
+  });
+
+  it('treats junk/blank input as zero', () => {
+    expect(settlementNetAmount(null)).toBe(0);
+    expect(settlementNetAmount({})).toBe(0);
+    expect(settlementNetAmount({ amount: 'x', excess: 'y' })).toBe(0);
+  });
+});
+
+describe('isSuspiciousExcess — fat-finger guard on overpaid settles', () => {
+  it('lets a tip-sized surplus through (₹0.34 on ₹11.66)', () => {
+    expect(isSuspiciousExcess(0.34, 11.66)).toBe(false);
+  });
+
+  it('flags a surplus over 20% of the amount due (typo territory)', () => {
+    // 120 typed instead of 12 → excess 108.34 on 11.66 due.
+    expect(isSuspiciousExcess(108.34, 11.66)).toBe(true);
+    expect(isSuspiciousExcess(3, 11.66)).toBe(true); // 3 > 20% of 11.66
+  });
+
+  it('flags any surplus above ₹50 regardless of ratio', () => {
+    expect(isSuspiciousExcess(51, 1000)).toBe(true); // 5.1% but large absolute
+  });
+
+  it('allows under both thresholds (₹40 extra on ₹1000 due)', () => {
+    expect(isSuspiciousExcess(40, 1000)).toBe(false);
+  });
+
+  it('no excess or junk input → never suspicious', () => {
+    expect(isSuspiciousExcess(0, 11.66)).toBe(false);
+    expect(isSuspiciousExcess(undefined, undefined)).toBe(false);
   });
 });

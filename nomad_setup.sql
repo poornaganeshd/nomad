@@ -109,6 +109,12 @@ ALTER TABLE splits      ADD COLUMN IF NOT EXISTS "categoryId" TEXT;
 ALTER TABLE settlements ADD COLUMN IF NOT EXISTS "categoryId" TEXT;
 ALTER TABLE settlements ADD COLUMN IF NOT EXISTS note         TEXT;
 
+-- Overpay recovery: when someone settles an IOU with MORE than the remainder
+-- (owed ₹11.66, they send ₹12), `amount` stays the real cash moved and `excess`
+-- records the extra. Split ledgers reconcile on (amount - excess); the excess
+-- offsets the write-off ledger as recovered/repaid-extra.
+ALTER TABLE settlements ADD COLUMN IF NOT EXISTS excess NUMERIC;
+
 ALTER TABLE expenses        REPLICA IDENTITY DEFAULT;
 ALTER TABLE incomes         REPLICA IDENTITY DEFAULT;
 ALTER TABLE transfers       REPLICA IDENTITY DEFAULT;

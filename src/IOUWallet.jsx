@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from "react";
-import { roundMoney, localDateKey, defaultSettleWalletId } from "./financeUtils";
+import { roundMoney, localDateKey, defaultSettleWalletId, settlementNetAmount, isSuspiciousExcess } from "./financeUtils";
 import { parseAmount } from "./txParsers";
 import { useLockBodyScroll } from "./scrollLock";
 import { CaretLeft, CaretRight, CheckCircle, ArrowUp, ArrowDown, Plus, Trash, SkipForward, CurrencyInr, Wallet, X, ArrowCounterClockwise, PencilSimple } from "@phosphor-icons/react";
@@ -96,7 +96,7 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
     // (payments there credit the wallet as always), and reopening an event
     // brings its pending IOUs back here automatically.
     const activeEv = new Set(events.filter(e => e.status === "active").map(e => e.id));
-    const paidBy = {}; settlements.forEach(s => { if (s.splitId != null) paidBy[s.splitId] = (paidBy[s.splitId] || 0) + s.amount; });
+    const paidBy = {}; settlements.forEach(s => { if (s.splitId != null) paidBy[s.splitId] = (paidBy[s.splitId] || 0) + settlementNetAmount(s); });
     const rem = s => roundMoney(s.amount - (paidBy[s.id] || 0));
     const canon = {}; const dispOf = raw => { const k = String(raw || "").trim().toLowerCase(); if (!k) return ""; if (!canon[k]) canon[k] = String(raw).trim(); return canon[k]; };
     const personMap = {};
@@ -156,7 +156,7 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
   // Settle modals shared by BOTH views (person detail + wallet home) — a single
   // definition so the net-settle routing can't drift between render sites.
   const sheets = <>
-    {SettleModal && settleTgt && <SettleModal split={settleTgt} remaining={remOf(settleTgt)} wallets={wallets} onConfirm={(wid, amount, date) => { const r = onSettle(settleTgt.id, wid, amount, date); sSettleTgt(null); if (r !== false) sBurst(b => b + 1); }} onClose={() => sSettleTgt(null)} />}
+    {SettleModal && settleTgt && <SettleModal split={settleTgt} remaining={remOf(settleTgt)} wallets={wallets} onConfirm={(wid, amount, date, opts) => { const r = onSettle(settleTgt.id, wid, amount, date, opts); sSettleTgt(null); if (r !== false) sBurst(b => b + 1); }} onClose={() => sSettleTgt(null)} />}
     {netSheet && <NetSheet desc={netSheet} wallets={wallets} fmt={fmt} isUpiLite={isUpiLite} onConfirm={(wid, amt) => { const r = netSheet.all ? settleAllWith(netSheet.name, netSheet.groups, wid, amt) : netSheet.eventId ? onSettleEventNet(netSheet.eventId, netSheet.name, wid, amt) : onSettleNet(netSheet.name, wid, amt); if (r !== false) sBurst(b => b + 1); return r; }} onClose={() => sNetSheet(null)} />}
     {burst > 0 && <Confetti key={burst} />}
   </>;
@@ -422,8 +422,17 @@ function NetSheet({ desc, wallets, fmt, isUpiLite, onConfirm, onClose }) {
   const opts = recv ? wallets.filter(w => !isUpiLite(w)) : wallets;
   const [wid, sWid] = useState(defaultSettleWalletId(pos ? "owed" : "owe", wallets, isUpiLite));
   const [amt, sAmt] = useState(String(absNet));
+  const [armed, sArmed] = useState(false);
   const entered = parseAmount(amt); const validEntered = Number.isFinite(entered) && entered > 0;
   const partial = validEntered && roundMoney(entered) < absNet - 0.005;
+  // Overpay (entered > net) is honoured for general/whole-person settles: the
+  // wallet takes the real cash and the surplus offsets the write-off ledger.
+  // Event-scoped settles stay capped at the net — their amount must line up
+  // with the group ledger's grpSettled reconciliation.
+  const overAllowed = !desc?.eventId;
+  const over = validEntered && overAllowed && roundMoney(entered) > absNet + 0.005;
+  const extra = over ? roundMoney(entered - absNet) : 0;
+  const bigOver = isSuspiciousExcess(extra, absNet);
   const accent = pos ? MINT : CORAL;
   return <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(20,18,30,.5)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
     <div onClick={e => e.stopPropagation()} style={{ background: SURF, borderRadius: "24px 24px 0 0", width: "100%", maxWidth: 430, boxShadow: NEU_RAISED, overflow: "hidden" }}>
@@ -433,13 +442,14 @@ function NetSheet({ desc, wallets, fmt, isUpiLite, onConfirm, onClose }) {
       </div>
       <div style={{ padding: 20 }}>
         <div style={{ textAlign: "center", marginBottom: 16 }}><div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700 }}>{pos ? `Collect from ${name}` : `Pay ${name}`}</div><div style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 36, letterSpacing: "-1.2px", color: accent, margin: "4px 0", fontVariantNumeric: "tabular-nums" }}>{fmt(absNet)}</div></div>
-        <div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: ".5px", marginBottom: 7, textTransform: "uppercase" }}>Amount{partial ? " (partial)" : ""}</div>
-        <input type="number" inputMode="decimal" value={amt} onChange={e => sAmt(e.target.value)} style={{ ...inpN, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 18 }} />
+        <div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: ".5px", marginBottom: 7, textTransform: "uppercase" }}>Amount{partial ? " (partial)" : over ? " (includes extra)" : ""}</div>
+        <input type="number" inputMode="decimal" value={amt} onChange={e => { sAmt(e.target.value); sArmed(false); }} style={{ ...inpN, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 18 }} />
+        {over && <div style={{ fontSize: 10.5, fontFamily: "var(--font-h)", fontWeight: 700, color: AMBER, margin: "-6px 0 10px" }}>{fmt(extra)} over the {fmt(absNet)} net — extra goes to the wallet and offsets write-offs</div>}
         <div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: ".5px", marginBottom: 8, textTransform: "uppercase" }}>{pos ? "Receive into" : "Pay from"}</div>
         <div style={{ display: "flex", gap: 9, marginBottom: 18 }}>{opts.map(w => { const on = wid === w.id; return <button key={w.id} onClick={() => sWid(w.id)} style={{ flex: 1, padding: "11px 5px", borderRadius: 14, display: "flex", flexDirection: "column", alignItems: "center", gap: 5, cursor: "pointer", border: "none", boxShadow: on ? NEU_INSET : NEU_SM, background: on ? w.color + "30" : SURF, transition: "box-shadow .15s, background .15s" }}><span style={{ width: 14, height: 14, borderRadius: 5, background: w.color }} /><span style={{ fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 700, color: on ? "var(--text)" : "var(--muted)" }}>{w.name}</span></button>; })}</div>
         <div style={{ display: "flex", gap: 11 }}>
           <button onClick={onClose} style={{ flex: 1, padding: 13, border: "none", borderRadius: 14, background: SURF, boxShadow: NEU_SM, color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
-          <button onClick={ev => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; const ok = onConfirm(wid, partial ? amt : ""); if (ok !== false) onClose(); else ev.currentTarget.disabled = false; }} style={{ flex: 2, padding: 13, border: "none", borderRadius: 14, boxShadow: NEU_SM, background: accent, color: ink(accent), fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>{pos ? "Collect" : "Pay"} {fmt(partial ? roundMoney(entered) : absNet)} & settle</button>
+          <button onClick={ev => { if (ev.currentTarget.disabled) return; if (bigOver && !armed) { sArmed(true); return; } ev.currentTarget.disabled = true; const ok = onConfirm(wid, partial || over ? amt : ""); if (ok !== false) onClose(); else ev.currentTarget.disabled = false; }} style={{ flex: 2, padding: 13, border: "none", borderRadius: 14, boxShadow: NEU_SM, background: bigOver && armed ? AMBER : accent, color: ink(bigOver && armed ? AMBER : accent), fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>{bigOver && armed ? `Tap again — ${fmt(extra)} extra is intentional` : `${pos ? "Collect" : "Pay"} ${fmt(partial || over ? roundMoney(entered) : absNet)} & settle`}</button>
         </div>
       </div>
     </div>
