@@ -1,4 +1,4 @@
-const CACHE_NAME = 'nomad-app-v12';
+const CACHE_NAME = 'nomad-app-v13';
 const APP_SHELL = ['/', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {
@@ -76,11 +76,25 @@ self.addEventListener('fetch', (event) => {
   const isSameOrigin = new URL(request.url).origin === self.location.origin;
   const isAsset = ['style', 'script', 'worker', 'font', 'image'].includes(request.destination);
 
-  if (isNavigation || (isSameOrigin && isAsset && ['style', 'script', 'worker'].includes(request.destination))) {
+  // App shell: serve the cached document INSTANTLY. The OS splash screen lasts
+  // until first paint, and the old network-first document made every cold open
+  // wait a full network round-trip before showing anything. The network fetch
+  // still runs to refresh the cached shell in the background; new deploys keep
+  // arriving through the SW update banner, not through this response. Scripts/
+  // styles are content-hashed, so they fall through to the cache-first branch
+  // below without any staleness risk.
+  if (isNavigation) {
+    const refresh = fetch(request)
+      .then(async (response) => {
+        if (response && response.ok && response.type !== 'opaque') {
+          const cache = await caches.open(CACHE_NAME);
+          await cache.put('/', response.clone());
+        }
+        return response;
+      });
+    event.waitUntil(refresh.catch(() => {}));
     event.respondWith(
-      fetch(request)
-        .then((response) => cacheResponse(request, response))
-        .catch(async () => (await caches.match(request)) || (isNavigation ? caches.match('/') : undefined))
+      caches.match('/').then((cached) => cached || refresh.catch(() => undefined))
     );
     return;
   }

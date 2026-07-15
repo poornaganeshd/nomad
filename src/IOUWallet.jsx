@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { roundMoney, localDateKey, defaultSettleWalletId } from "./financeUtils";
 import { parseAmount } from "./txParsers";
 import { useLockBodyScroll } from "./scrollLock";
-import { CaretLeft, CaretRight, CheckCircle, ArrowUp, ArrowDown, Plus, Trash, SkipForward, CurrencyInr, Wallet, X, ArrowCounterClockwise } from "@phosphor-icons/react";
+import { CaretLeft, CaretRight, CheckCircle, ArrowUp, ArrowDown, Plus, Trash, SkipForward, CurrencyInr, Wallet, X, ArrowCounterClockwise, PencilSimple } from "@phosphor-icons/react";
 
 // ── 1:1 IOU "card wallet" — NEUMORPHIC / pastel re-skin ─────────────────────
 // The dedicated IOU section. Shows ONE merged net per person (general 1:1 IOUs
@@ -59,7 +59,7 @@ const fmtSigned = (v, fmt) => (v > 0 ? "+" : "−") + fmt(Math.abs(v)).slice(1);
 // vertical gap between the flat person cards
 const GAP = 18;
 
-export default function IOUWallet({ splits = [], settlements = [], categories = [], wallets = [], events = [], fmt = n => "₹" + n, uid = () => Math.random().toString(36).slice(2), isUpiLite = () => false, SettleModal = null, onAdd = () => {}, onSettle = () => {}, onSettleNet = () => {}, onSettleEventNet = () => {}, onSkip = () => {}, onUnskip = () => {}, onDelete = () => {}, onError = () => {} }) {
+export default function IOUWallet({ splits = [], settlements = [], categories = [], wallets = [], events = [], fmt = n => "₹" + n, uid = () => Math.random().toString(36).slice(2), isUpiLite = () => false, SettleModal = null, onAdd = () => {}, onSettle = () => {}, onSettleNet = () => {}, onSettleEventNet = () => {}, onSkip = () => {}, onUnskip = () => {}, onDelete = () => {}, onRenamePerson = () => {}, onError = () => {} }) {
   const [view, sView] = useState("home");        // home | person
   const [cur, sCur] = useState(null);            // current person name
   const [settleTgt, sSettleTgt] = useState(null);// single split → SettleModal
@@ -69,6 +69,7 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
   const [seg, sSeg] = useState("personal");      // person-detail pill: personal | events
   const [netBk, sNetBk] = useState(false);       // home Net tile → breakdown sheet
   const [morph, sMorph] = useState(null);        // { name, rect } → card-morph quick-add
+  const [renName, sRenName] = useState(null);    // person-detail rename/merge draft (null = closed)
   const [burst, sBurst] = useState(0);           // confetti trigger (increments on a settle)
   const openMorph = (name, rect) => sMorph({ name, rect });
 
@@ -140,7 +141,7 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
     const sub = open.length ? (srcSummary || (last ? `${last.note || (catMap.get(last.categoryId)?.name || "IOU")} · ${relDate(last.date || last.createdAt)}` : "")) : "All settled";
     return { n, up, down, c1, openCount: open.length, sub, dir: up ? "Owes you" : down ? "You owe" : "Settled", amt: Math.abs(n) < 0.5 ? "—" : fmt(Math.abs(n)) };
   };
-  const openPerson = name => { sCur(name); sView("person"); sAdding(false); sSeg(personMap[name]?.splits.some(s => !s.eventId) ? "personal" : "events"); sMorph(null); };
+  const openPerson = name => { sCur(name); sView("person"); sAdding(false); sSeg(personMap[name]?.splits.some(s => !s.eventId) ? "personal" : "events"); sMorph(null); sRenName(null); };
   const addFormProps = { categories, uid, onAdd, onError, onDone: () => sAdding(false) };
 
   // Whole-person "settle everything": ONE atomic call into App's settleNet with
@@ -194,6 +195,18 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
     const curSeg = evGroups.length ? seg : "personal";
     const evNetSum = roundMoney(evGroups.reduce((t, g) => t + g.net, 0));
     const segNetTxt = v => Math.abs(v) < 0.005 ? "" : ` ${fmtSigned(v, fmt)}`;
+    // Rename person; if the new name matches ANOTHER existing person it becomes
+    // a merge — every IOU moves under that person (dupes like "Jay akash" vs
+    // "Jayakash" collapse into one row, zero data loss).
+    const mergeTarget = renName ? people.find(p => p.toLowerCase() === renName.trim().toLowerCase() && p.toLowerCase() !== cur.toLowerCase()) : null;
+    const saveRename = () => {
+      const t = (renName || "").trim();
+      if (!t || t === cur) { sRenName(null); return; }
+      const target = people.find(p => p.toLowerCase() === t.toLowerCase() && p.toLowerCase() !== cur.toLowerCase());
+      onRenamePerson(cur, target || t);
+      sRenName(null);
+      sCur(target || t);
+    };
     const renderGroup = g => { const gpos = g.net > 0.5, gactive = Math.abs(g.net) > 0.5; const gcol = gpos ? MINT : CORAL; return <div key={g.key} style={{ marginBottom: 18 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10, paddingLeft: 2 }}>
         <div style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0 }}>{g.eventId ? <span style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 800, color: VIOLET, background: VIOLET + "22", padding: "4px 10px", borderRadius: 9, display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 190 }}><span style={{ width: 6, height: 6, borderRadius: 6, background: VIOLET, flexShrink: 0 }} />{g.label}</span> : <span style={{ fontSize: 10.5, fontFamily: "var(--font-h)", fontWeight: 800, color: "var(--muted)", letterSpacing: ".7px", textTransform: "uppercase" }}>General</span>}<span style={{ fontSize: 11.5, fontWeight: 800, fontFamily: "var(--font-h)", color: gactive ? gcol : "var(--muted)", fontVariantNumeric: "tabular-nums" }}>{!gactive ? "settled" : fmtSigned(g.net, fmt)}</span></div>
@@ -233,7 +246,7 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
       <div onClick={() => { sView("home"); sCur(null); }} role="button" tabIndex={0} onKeyDown={kbd(() => { sView("home"); sCur(null); })} aria-label="Back to wallet" style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--muted)", fontSize: 12.5, fontWeight: 700, fontFamily: "var(--font-h)", cursor: "pointer", padding: "7px 12px", marginBottom: 8, borderRadius: 12, background: SURF, boxShadow: NEU_SM }}><CaretLeft size={14} weight="bold" /> Wallet</div>
       <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 16 }}>
         <div style={{ width: 50, height: 50, borderRadius: 16, background: ac, color: ink(ac), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 17, boxShadow: NEU_SM }}>{initials(cur)}</div>
-        <div><div style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 19, color: "var(--text)" }}>{cur}</div><div style={{ fontSize: 12.5, fontWeight: 700, marginTop: 2, color: Math.abs(n) < 0.5 ? "var(--muted)" : pos ? MINT : CORAL }}>{Math.abs(n) < 0.5 ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><CheckCircle size={13} weight="fill" /> All settled up</span> : pos ? `Owes you ${fmt(n)}` : `You owe ${fmt(-n)}`}</div></div>
+        <div style={{ minWidth: 0, flex: 1 }}>{renName === null ? <div style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 19, color: "var(--text)", display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}><span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cur}</span><button onClick={() => sRenName(cur)} aria-label={`Rename or merge ${cur}`} title="Rename / merge" style={{ border: "none", background: "none", color: "var(--muted)", cursor: "pointer", padding: 3, display: "inline-flex", flexShrink: 0 }}><PencilSimple size={15} /></button></div> : <div><div style={{ display: "flex", alignItems: "center", gap: 7 }}><input value={renName} onChange={e => sRenName(e.target.value)} onKeyDown={e => { if (e.key === "Enter") saveRename(); if (e.key === "Escape") sRenName(null); }} autoFocus aria-label="New name" style={{ ...inpN, marginBottom: 0, padding: "8px 11px", fontSize: 14, fontWeight: 700, flex: 1, minWidth: 0 }} /><button onClick={saveRename} aria-label="Save name" style={{ width: 34, height: 34, border: "none", borderRadius: 11, boxShadow: NEU_SM, background: MINT, color: ink(MINT), display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><CheckCircle size={16} weight="bold" /></button><button onClick={() => sRenName(null)} aria-label="Cancel rename" style={{ width: 34, height: 34, border: "none", borderRadius: 11, boxShadow: NEU_SM, background: SURF, color: "var(--ts)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><X size={15} weight="bold" /></button></div>{mergeTarget && <div style={{ fontSize: 10.5, color: AMBER, fontFamily: "var(--font-h)", fontWeight: 700, marginTop: 5 }}>Merges into “{mergeTarget}” — all IOUs combine under one person.</div>}</div>}<div style={{ fontSize: 12.5, fontWeight: 700, marginTop: 2, color: Math.abs(n) < 0.5 ? "var(--muted)" : pos ? MINT : CORAL }}>{Math.abs(n) < 0.5 ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><CheckCircle size={13} weight="fill" /> All settled up</span> : pos ? `Owes you ${fmt(n)}` : `You owe ${fmt(-n)}`}</div></div>
       </div>
       {pendGroups.length > 1 && <button onClick={() => sNetSheet({ name: cur, net: n, all: true, groups: pendGroups.map(g => ({ eventId: g.eventId, net: g.net })), count: pendGroups.length })} style={{ width: "100%", border: "none", borderRadius: RAD_SM, padding: "11px 14px", marginBottom: 14, cursor: "pointer", background: pos ? MINT : CORAL, color: ink(pos ? MINT : CORAL), fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 13, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, boxShadow: NEU_SM }}><CheckCircle size={15} weight="fill" /> Settle everything {fmt(Math.abs(n))}</button>}
       {evGroups.length > 0 && <div style={{ display: "flex", gap: 9, marginBottom: 14 }}>
@@ -269,16 +282,16 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
       {active.map(name => <PersonCard key={name} name={name} info={cardInfo(name)} showAdd onOpen={() => openPerson(name)} onQuickAdd={rect => openMorph(name, rect)} />)}
     </div>}
 
-    {settledPeople.length > 0 && <details style={{ marginTop: 18 }}><summary style={{ fontSize: 11.5, color: "var(--muted)", cursor: "pointer", fontFamily: "var(--font-h)", fontWeight: 700 }}><CheckCircle size={12} weight="fill" style={{ verticalAlign: "-2px", marginRight: 4 }} />Settled up ({settledPeople.length})</summary><div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 9 }}>{settledPeople.map(name => <div key={name} onClick={() => openPerson(name)} role="button" tabIndex={0} onKeyDown={kbd(() => openPerson(name))} aria-label={`Open ${name}, settled`} style={{ display: "flex", alignItems: "center", gap: 11, padding: "11px 14px", ...neuCard, opacity: 0.72, cursor: "pointer" }}><div style={{ width: 32, height: 32, borderRadius: 11, background: avatarColor(name), color: ink(avatarColor(name)), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 12, boxShadow: NEU_SM }}>{initials(name)}</div><span style={{ flex: 1, fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--ts)" }}>{name}</span><span style={{ fontSize: 11, color: MINT, fontFamily: "var(--font-h)", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 3 }}><CheckCircle size={12} weight="fill" /> settled</span></div>)}</div></details>}
+    {settledPeople.length > 0 && <details style={{ marginTop: 18 }}><summary style={{ fontSize: 11.5, color: "var(--muted)", cursor: "pointer", fontFamily: "var(--font-h)", fontWeight: 700 }}><CheckCircle size={12} weight="fill" style={{ verticalAlign: "-2px", marginRight: 4 }} />Settled up ({settledPeople.length})</summary><div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 9 }}>{settledPeople.map(name => <div key={name} onClick={() => openPerson(name)} role="button" tabIndex={0} onKeyDown={kbd(() => openPerson(name))} aria-label={`Open ${name}, settled`} style={{ display: "flex", alignItems: "center", gap: 11, padding: "11px 14px", ...neuCard, opacity: 0.72, cursor: "pointer" }}><div style={{ width: 32, height: 32, borderRadius: 11, background: avatarColor(name), color: ink(avatarColor(name)), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 12, boxShadow: NEU_SM }}>{initials(name)}</div><span style={{ flex: 1, fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--ts)" }}>{name}</span><span style={{ fontSize: 11, color: MINT, fontFamily: "var(--font-h)", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 3 }}><CheckCircle size={12} weight="fill" /> settled</span><button onClick={e => { e.stopPropagation(); openMorph(name, e.currentTarget.getBoundingClientRect()); }} aria-label={`New IOU with ${name}`} title="New IOU" style={{ width: 30, height: 30, border: "none", borderRadius: 10, boxShadow: NEU_SM, background: SURF, color: "var(--ts)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><Plus size={14} weight="bold" /></button></div>)}</div></details>}
 
     {sheets}
-    {morph && <MorphCompose rect={morph.rect} name={morph.name} categories={categories} uid={uid} onAdd={onAdd} onError={onError} onClose={() => sMorph(null)} />}
+    {morph && <MorphCompose rect={morph.rect} name={morph.name} categories={categories} uid={uid} onAdd={onAdd} onError={onError} suggestions={people} onClose={() => sMorph(null)} />}
     {netBk && <NetBreakdown rows={bkRows} net={net} owedTot={owedTot} oweTot={oweTot} fmt={fmt} onOpenPerson={name => { sNetBk(false); openPerson(name); }} onClose={() => sNetBk(false)} />}
   </div>;
 }
 
 // ── card-morph quick-add (module-level; grows from a rect to full-screen) ──
-function MorphCompose({ rect, name, categories = [], uid, onAdd, onError = () => {}, onClose }) {
+function MorphCompose({ rect, name, categories = [], uid, onAdd, onError = () => {}, suggestions = [], onClose }) {
   const [open, sOpen] = useState(false);
   useLockBodyScroll();
   useEffect(() => { const id = requestAnimationFrame(() => sOpen(true)); return () => cancelAnimationFrame(id); }, []);
@@ -289,26 +302,30 @@ function MorphCompose({ rect, name, categories = [], uid, onAdd, onError = () =>
   // centered, content-sized card (not full-screen) — free-name needs the extra name field
   const W = Math.min(vw - 2 * M, 440);
   const H = Math.min(vh - 2 * M, isNew ? 472 : 414);
-  const r = rect || { top: vh / 2 - 60, left: (vw - W) / 2, width: W, height: 120 };
-  const pos = open ? { top: Math.max(M, (vh - H) / 2), left: (vw - W) / 2, width: W, height: H } : { top: r.top, left: r.left, width: r.width, height: r.height };
+  const pos = { top: Math.max(M, (vh - H) / 2), left: (vw - W) / 2, width: W, height: H };
+  const r = rect || { top: pos.top + 40, left: pos.left + W * 0.2, width: W * 0.6, height: 120 };
+  // GPU-only morph: the card sits at its FINAL rect and animates `transform`
+  // from the source button's rect. Animating top/left/width/height re-layouts
+  // every frame under the heavy neumorphic shadows and visibly lags on phones.
+  const closedT = `translate(${r.left - pos.left}px, ${r.top - pos.top}px) scale(${r.width / W}, ${r.height / H})`;
   const accent = name === "__new__" ? CORAL : avatarColor(name);
   const at = ink(accent);
   return <div style={{ position: "fixed", inset: 0, zIndex: 260, pointerEvents: open ? "auto" : "none" }}>
     <div onClick={close} style={{ position: "absolute", inset: 0, background: "rgba(20,18,30,.45)", opacity: open ? 1 : 0, transition: "opacity .34s" }} />
-    <div style={{ position: "fixed", ...pos, background: SURF, borderRadius: open ? RAD : RAD, boxShadow: open ? NEU_RAISED : "none", overflow: "hidden", transition: `top .4s ${EASE}, left .4s ${EASE}, width .4s ${EASE}, height .4s ${EASE}, box-shadow .3s` }}>
-      <div style={{ background: accent, color: at, padding: "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+    <div style={{ position: "fixed", ...pos, background: SURF, borderRadius: RAD, boxShadow: NEU_RAISED, overflow: "hidden", transform: open ? "translate(0px, 0px) scale(1, 1)" : closedT, transformOrigin: "top left", transition: `transform .38s ${EASE}`, willChange: "transform" }}>
+      <div style={{ background: accent, color: at, padding: "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", opacity: open ? 1 : 0, transition: "opacity .22s", transitionDelay: open ? ".1s" : "0s" }}>
         <div style={{ minWidth: 0 }}><div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".8px", opacity: .8 }}>New IOU</div><div style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 23, letterSpacing: "-.3px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{name === "__new__" ? "Someone new" : name}</div></div>
         <button onClick={close} aria-label="Close" style={{ width: 38, height: 38, border: "none", borderRadius: 13, background: "rgba(255,255,255,.35)", color: at, display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><X size={20} weight="bold" /></button>
       </div>
       <div style={{ opacity: open ? 1 : 0, transition: "opacity .25s", transitionDelay: open ? ".16s" : "0s", height: "calc(100% - 72px)", overflowY: "auto", padding: 18, boxSizing: "border-box" }}>
-        <AddForm fixedName={name === "__new__" ? undefined : name} categories={categories} uid={uid} onAdd={s => { onAdd(s); close(); }} onError={onError} onDone={() => {}} bare big />
+        <AddForm fixedName={name === "__new__" ? undefined : name} categories={categories} uid={uid} onAdd={s => { onAdd(s); close(); }} onError={onError} onDone={() => {}} suggestions={suggestions} bare big />
       </div>
     </div>
   </div>;
 }
 
 // ── add-IOU form (module-level so it never remounts on a parent render) ──
-function AddForm({ fixedName, categories = [], uid, onAdd, onError = () => {}, onDone = () => {}, bare = false, big = false }) {
+function AddForm({ fixedName, categories = [], uid, onAdd, onError = () => {}, onDone = () => {}, suggestions = [], bare = false, big = false }) {
   const [dir, sDir] = useState("owed");
   const [nm, sNm] = useState("");
   const [amt, sAmt] = useState("");
@@ -330,6 +347,7 @@ function AddForm({ fixedName, categories = [], uid, onAdd, onError = () => {}, o
       {[["owe", ArrowDown, "I owe them"], ["owed", ArrowUp, "They owe me"]].map(([d, Ico, lbl]) => { const ac = d === "owe" ? CORAL : MINT; const on = dir === d; return <button key={d} onClick={() => sDir(d)} style={{ flex: 1, padding: big ? 13 : 11, borderRadius: RAD_SM, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 700, cursor: "pointer", border: "none", boxShadow: on ? NEU_INSET : NEU_SM, background: on ? ac + "30" : SURF, color: on ? (d === "owe" ? CORAL : MINT) : "var(--muted)", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, transition: "box-shadow .15s, background .15s" }}><Ico size={15} weight="bold" /> {lbl}</button>; })}
     </div>
     {!fixedName && <input value={nm} onChange={e => sNm(e.target.value)} placeholder="Friend's name" style={{ ...inpN, ...(big ? { fontSize: 16 } : {}) }} />}
+    {!fixedName && (() => { const q = nm.trim().toLowerCase(); const sugg = suggestions.filter(p => p.toLowerCase() !== q && (!q || p.toLowerCase().includes(q))).slice(0, 6); return sugg.length ? <div style={{ display: "flex", gap: 7, overflowX: "auto", scrollbarWidth: "none", marginBottom: 11, paddingBottom: 2 }}>{sugg.map(p => <button key={p} onClick={() => sNm(p)} style={{ flexShrink: 0, border: "none", borderRadius: 11, boxShadow: NEU_SM, background: SURF, color: "var(--ts)", fontFamily: "var(--font-h)", fontWeight: 700, fontSize: 11.5, padding: "7px 12px", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 16, height: 16, borderRadius: 6, background: avatarColor(p), color: ink(avatarColor(p)), display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 8.5, fontWeight: 800 }}>{initials(p)}</span>{p}</button>)}</div> : null; })()}
     {categories.length > 0 && <div style={{ display: "flex", gap: 8, overflowX: "auto", scrollbarWidth: "none", marginBottom: 11, paddingBottom: 4, paddingTop: 2 }}>{categories.map(c => { const on = catId === c.id; return <button key={c.id} onClick={() => sCatId(c.id)} style={{ flexShrink: 0, padding: "8px 12px", borderRadius: 12, fontSize: 11.5, fontFamily: "var(--font-h)", fontWeight: on ? 700 : 600, cursor: "pointer", whiteSpace: "nowrap", border: "none", boxShadow: on ? NEU_INSET : NEU_SM, background: on ? c.color + "33" : SURF, color: on ? "var(--text)" : "var(--muted)", display: "inline-flex", alignItems: "center", gap: 6, transition: "box-shadow .15s, background .15s" }}><span style={{ width: 9, height: 9, borderRadius: 9, background: c.color, flexShrink: 0 }} />{c.emoji ? c.emoji + " " : ""}{c.name}</button>; })}</div>}
     <div style={{ display: "flex", gap: 9, marginBottom: 11 }}>
       <input type="number" inputMode="decimal" value={amt} onChange={e => sAmt(e.target.value)} placeholder="₹ amount" style={{ ...inpN, marginBottom: 0, flex: 1, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: big ? 24 : 18 }} />

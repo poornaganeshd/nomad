@@ -170,3 +170,36 @@ export const parseUpiStatement = (text) => {
   }
   return rows;
 };
+
+// BHIM / bank "Transaction History" exports are HTML tables. Convert them to
+// plain text lines (one table row per line, cells space-joined) so the same
+// statement parsers (parseUpiStatement / AI text parse) can read them. Uses
+// DOMParser when available (browser + jsdom); regex-strip fallback otherwise.
+export function htmlStatementToText(html) {
+  const src = String(html || "");
+  try {
+    if (typeof DOMParser !== "undefined") {
+      const doc = new DOMParser().parseFromString(src, "text/html");
+      doc.querySelectorAll("script,style,noscript").forEach((n) => n.remove());
+      const rows = Array.from(doc.querySelectorAll("tr"))
+        .map((tr) => Array.from(tr.querySelectorAll("th,td")).map((c) => (c.textContent || "").replace(/\s+/g, " ").trim()).filter(Boolean).join("  "))
+        .filter(Boolean);
+      if (rows.length) return rows.join("\n");
+      // No tables — treat each leaf block element as one line (body.textContent
+      // would glue sibling blocks together with no separator).
+      const blocks = Array.from(doc.body ? doc.body.querySelectorAll("div,p,li,h1,h2,h3,h4,h5,h6,section,article") : [])
+        .filter((el) => !el.querySelector("div,p,li,table,section,article"))
+        .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      if (blocks.length) return blocks.join("\n");
+      return (doc.body ? doc.body.textContent : "").split("\n").map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n");
+    }
+  } catch { /* malformed markup — fall through to the regex strip */ }
+  return src
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(tr|p|div|li|h[1-6]|table)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">")
+    .split("\n").map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n");
+}
