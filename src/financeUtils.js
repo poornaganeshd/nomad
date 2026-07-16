@@ -283,3 +283,29 @@ export const suggestAddDefaults = (expenses, { now = new Date(), validCategoryId
   const top = scores => { let best = null, bestW = 0; for (const [id, sc] of Object.entries(scores)) if (sc > bestW) { best = id; bestW = sc; } return best; };
   return { categoryId: top(catScore), walletId: top(walScore) };
 };
+
+// Savings-goal progress: the single source for every place that renders a goal
+// (dashboard card + settings editor). A goal is { target, saved, targetDate? }
+// with amounts in INR; contributions are manual markers and never move wallet
+// balances. Pace (monthsLeft/perMonth) only exists for a dated, unfinished,
+// non-overdue goal; months are counted calendar-month to calendar-month with a
+// floor of 1 so "due this month" still yields a finite per-month figure.
+export const goalProgress = (goal, todayKey = localDateKey()) => {
+  const target = roundMoney(Math.max(0, Number(goal?.target) || 0));
+  const saved = roundMoney(Math.max(0, Number(goal?.saved) || 0));
+  const remaining = roundMoney(Math.max(0, target - saved));
+  const done = target > 0 && saved >= target;
+  const pct = target > 0 ? (done ? 100 : Math.min(99, Math.floor((saved / target) * 100))) : 0;
+  const targetDate = (typeof goal?.targetDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(goal.targetDate)) ? goal.targetDate : null;
+  let monthsLeft = null, perMonth = null, overdue = false;
+  if (targetDate && !done) {
+    overdue = targetDate < todayKey;
+    if (!overdue) {
+      const [ty, tm] = targetDate.split("-").map(Number);
+      const [cy, cm] = todayKey.split("-").map(Number);
+      monthsLeft = Math.max(1, (ty - cy) * 12 + (tm - cm));
+      perMonth = roundMoney(remaining / monthsLeft);
+    }
+  }
+  return { target, saved, remaining, pct, done, monthsLeft, perMonth, overdue, targetDate };
+};

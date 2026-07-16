@@ -7,6 +7,7 @@ Personal finance tracker — expenses, income, transfers, recurring bills, and g
 ## Features
 
 - **Finance** — log expenses, income, transfers, and recurring bills; per-wallet running balances with drift detection & reconciliation; multi-currency input (stored in INR).
+- **Budgets & savings goals** — per-category monthly limits with overspend warnings, and savings goals with target dates and per-month pace; both follow you across devices via `user_prefs`.
 - **Events & splits** — group expenses with fair-share distribution (no ₹0.01 residue), two-way settle sync, and IOU wallet.
 - **NOMAD Lite** — standalone quick-calculators (utility-bill splitter, tip & tax split) that stay local-only.
 - **AI Hub** — 11 tools (subscription detector, anomaly/duplicate scanners, merchant cleanup, narrative, what-if, budget recommender, mood↔spend correlation, India tax helper, smart reminders, goal coach). All PII is redacted client-side before any AI call.
