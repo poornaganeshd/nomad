@@ -29,10 +29,10 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 
 ## Baselines (verify before/after edits; don't regress)
 
-- **Tests:** 633 pass / 0 fail, 32 files (`npm test`).
+- **Tests:** 642 pass / 0 fail, 33 files (`npm test`).
 - **Lint:** 0 errors / 12 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
-- **Build:** succeeds. Main chunk ~775 kB (gzip ~204 kB) + lazy chunks (Routine, CatDonut/recharts, IOUWallet, NomadLite, CalendarView, CredentialSetup, pdfjs); the >500 kB warning on the main chunk is expected.
+- **Build:** succeeds. Main chunk ~800 kB (gzip ~210 kB) + lazy chunks (Routine, CatDonut/recharts, IOUWallet, NomadLite, CalendarView, CredentialSetup, pdfjs); the >500 kB warning on the main chunk is expected.
 
 ## Working agreements
 
@@ -67,6 +67,7 @@ Vitest + jsdom (configured in `vite.config.js` under `test`). Coverage via `@vit
 | event group ledger + `grpSettled` reconciliation (mirrors App.jsx Events) | `src/__tests__/eventLedger.test.js` |
 | single-source decision helpers (`exceedsUpiLiteBalance`, `defaultSettleWalletId`, `resolveRecCategory`) | `src/__tests__/guards.test.js` |
 | `goalProgress` (financeUtils — savings-goal pct/pace/overdue) | `src/__tests__/goals.test.js` |
+| `balanceTrail` / `runwayInfo` (financeUtils — terrain-hero series + burn rate) | `src/__tests__/terrain.test.js` |
 | `api/_shared.ts` | `api/__tests__/_shared.test.ts` |
 | `api/_ai-provider.ts` | `api/__tests__/ai-provider.test.ts` |
 | `api/ai-analyze.ts` | `api/__tests__/ai-analyze.test.ts` |
@@ -166,5 +167,6 @@ Cron in `vercel.json` (only `send-reports`). Env: `VITE_SUPABASE_URL`/`SUPABASE_
 - **Semantic color tokens** (`--pos`, `--neg`, `--danger`, `--acc`, `--acc2`, `--warn`, `--gold`) live in the theme maps in `App.jsx`; use them for any new UI color instead of raw hex. Raw hex remains ONLY where var() can't go: 8-digit hex+alpha literals, values fed to `alpha()` or `${x}NN` string concat (`tc`, `acc/grn/ind/gld`), `<input type="color">` state, category/wallet seed data, and the theme maps themselves.
 - **`api/ai-analyze.ts` has a sanitize step** — after AI returns JSON, each mode's `sanitize()` function normalises enum values and resets out-of-list IDs to `null`. Always add sanitization when accepting AI output for a new mode; don't let raw AI strings reach the client.
 - **`balances.test.js` and `helpers.test.js` mirror inline logic in `App.jsx`** — they duplicate and test pure functions that live inside the monolith. If you extract or change `wBal` accumulation or `parseAmount`/`isUpiLite`, update these tests to match.
+- **The dashboard hero is the "terrain" layout** (`TerrainHero` in App.jsx): 30-day total-balance trail as layered SVG contour bands + readout ("Where you stand"), burn-rate runway, In/Out/Kept triad, and stitched-leather wallet squares (3 per row, wrapping — tap = reconcile, cash keeps its ⟳ recount). Series/burn math lives in `financeUtils.js` (`balanceTrail`, `runwayInfo`); the `terrainData` memo in App.jsx builds the signed deltas and MUST mirror `wBal`'s accumulation rules — change them together. Hero numerals use `--font-m` (Martian Mono, loaded in the same @import as the other fonts); all hero colors are theme vars so dark mode works. Don't reintroduce a "Total Balance" card — e2e `01-local-mode` asserts the hero's "Where you stand" readout.
 - **Single-source decision helpers live in `financeUtils.js` — don't re-inline them.** A recurring bug class here was the same decision copied into several call sites then drifting apart (e.g. recurring category looked up in expense `cats` in one place but `RC`/`recCats` in another; the UPI-Lite ₹5000 ceiling enforced on calibration/income but not transfers; the settle modal defaulting a *receive* to UPI-Lite which the save then rejects). These now have one tested home: `resolveRecCategory` (every recurring-category render), `exceedsUpiLiteBalance`/`UPI_LITE_MAX_BALANCE` (every path that credits UPI Lite), `defaultSettleWalletId` (settle/record-payment default wallet). Call them; don't paste a fresh copy. Guarded by `guards.test.js`.
 - **Don't trust this file's claims about a symbol existing** — grep first. Prior versions of this doc described features (demo mode, meditation/workout cards, habit streaks, push notifications) that were never shipped or were later removed. The code is authoritative.

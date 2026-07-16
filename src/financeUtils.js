@@ -309,3 +309,58 @@ export const goalProgress = (goal, todayKey = localDateKey()) => {
   }
   return { target, saved, remaining, pct, done, monthsLeft, perMonth, overdue, targetDate };
 };
+
+// ── Terrain hero math (dashboard) ────────────────────────────────────────────
+// balanceTrail: end-of-day TOTAL balance for the last `days` days, ending at
+// `currentBalance` today. Walks BACKWARD from today subtracting each day's net
+// so the series always reconciles exactly with the live balance. `events` are
+// signed deltas to the total ({date: 'YYYY-MM-DD', amount}) — the caller builds
+// them mirroring the wBal accumulation rules (unknown-wallet rows excluded,
+// transfers between two known wallets cancel out). Events before the window
+// need no handling (they're already inside the oldest balance); future-dated
+// events are ignored (their day is never visited).
+export const balanceTrail = (currentBalance, events, { days = 30, todayKey = localDateKey() } = {}) => {
+  const net = {};
+  for (const e of events || []) {
+    if (!e || !e.date) continue;
+    const key = String(e.date).slice(0, 10);
+    net[key] = roundMoney((net[key] || 0) + (Number(e.amount) || 0));
+  }
+  const [y, m, d] = String(todayKey).split("-").map(Number);
+  const out = [];
+  let bal = roundMoney(Number(currentBalance) || 0);
+  for (let i = 0; i <= days; i++) {
+    const key = localDateKey(new Date(y, m - 1, d - i, 12));
+    out.unshift({ date: key, bal });
+    bal = roundMoney(bal - (net[key] || 0));
+  }
+  return out;
+};
+
+// runwayInfo: "days of ground ahead" from the current burn rate. `spendEvents`
+// are positive outflows ({date, amount}); rate = mean over the last `win` days
+// (today inclusive), usual = mean over the `baseline` days before that window.
+// daysLeft/daysAtUsual floor to whole days; null means "no burn measured".
+export const runwayInfo = (balance, spendEvents, { todayKey = localDateKey(), win = 7, baseline = 21 } = {}) => {
+  const bal = Math.max(0, Number(balance) || 0);
+  const [y, m, d] = String(todayKey).split("-").map(Number);
+  const keyAt = (off) => localDateKey(new Date(y, m - 1, d + off, 12));
+  const winStart = keyAt(-(win - 1));
+  const baseStart = keyAt(-(win - 1) - baseline);
+  let winSum = 0, baseSum = 0;
+  for (const e of spendEvents || []) {
+    if (!e || !e.date) continue;
+    const a = Number(e.amount) || 0;
+    if (a <= 0) continue;
+    const key = String(e.date).slice(0, 10);
+    if (key > todayKey) continue;
+    if (key >= winStart) winSum += a;
+    else if (key >= baseStart) baseSum += a;
+  }
+  const rate = roundMoney(winSum / win);
+  const usual = roundMoney(baseSum / baseline);
+  const daysLeft = rate > 0 ? Math.floor(bal / rate) : null;
+  const daysAtUsual = usual > 0 ? Math.floor(bal / usual) : null;
+  const dryBy = daysLeft !== null ? keyAt(daysLeft) : null;
+  return { rate, usual, daysLeft, daysAtUsual, dryBy };
+};
