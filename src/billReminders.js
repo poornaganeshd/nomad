@@ -35,8 +35,8 @@ function addDays(dateStr, n) {
   return `${yy}-${mm}-${dd}`;
 }
 
-// Exported: insights.js reuses this exact "paid/skipped this cycle?" decision
-// so the dashboard insight can never disagree with the reminder toasts.
+// Exported so any future consumer shares this exact "paid/skipped this
+// cycle?" decision instead of re-deriving it (guarded by billReminders tests).
 export function isNotHandled(r, dueStr) {
   if (r.frequency === "monthly") return !(r.lastPaidDate?.slice(0, 7) === dueStr.slice(0, 7) || r.lastSkippedDate?.slice(0, 7) === dueStr.slice(0, 7));
   if (r.frequency === "yearly") return !(r.lastPaidDate?.slice(0, 4) === dueStr.slice(0, 4) || r.lastSkippedDate?.slice(0, 4) === dueStr.slice(0, 4));

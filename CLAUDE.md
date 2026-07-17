@@ -29,7 +29,7 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 
 ## Baselines (verify before/after edits; don't regress)
 
-- **Tests:** 642 pass / 0 fail, 33 files (`npm test`).
+- **Tests:** 634 pass / 0 fail, 32 files (`npm test`).
 - **Lint:** 0 errors / 12 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
 - **Build:** succeeds. Main chunk ~800 kB (gzip ~210 kB) + lazy chunks (Routine, CatDonut/recharts, IOUWallet, NomadLite, CalendarView, CredentialSetup, pdfjs); the >500 kB warning on the main chunk is expected.
@@ -59,7 +59,6 @@ Vitest + jsdom (configured in `vite.config.js` under `test`). Coverage via `@vit
 | `src/dbCols.js` | `src/__tests__/dbCols.test.js` |
 | `src/txParsers.js` | `src/__tests__/txParsers.test.js` |
 | `src/nomadLiteSplit.js` | `src/__tests__/nomadLiteSplit.test.js` |
-| `src/insights.js` | `src/__tests__/insights.test.js` |
 | `src/bankReconcile.js`, `src/chatFormat.js`, `src/streak.js`, `src/ntfy.js`, `src/webpush.js`, batch import | same-named tests in `src/__tests__/` |
 | `wBal` logic in `App.jsx` (mirrors `roundMoney`) | `src/__tests__/balances.test.js` |
 | `parseAmount`/`isUpiLite` helpers in `App.jsx` | `src/__tests__/helpers.test.js` |
@@ -87,8 +86,7 @@ First run shows `CredentialSetup.jsx`. Creds (Supabase URL + anon key, optional 
 - **AI features live INLINE in `App.jsx`** (there is no `AIHub.jsx` — an earlier version of this doc invented one). Voice add, the statement chat (reconcile against bank/UPI exports), the AI narrative card, and category suggestions all call `POST /api/ai-analyze` with a `mode` param; PII is redacted via `redactTransactions()`/`redact()` before sending.
 - **`IOUWallet.jsx`** — 1:1 IOU card wallet (Add tab → "IOU · Splits" segment). Neumorphic design with its own local atoms (MINT/CORAL/etc). Quick-add "morph" popup animates `transform` only (GPU) — don't reintroduce top/left/width/height animation. Person rename/merge: pencil in person view → `onRenamePerson(from, to)` (implemented in App.jsx: renames all matching splits + `sbUpsert`); renaming onto an existing person's name merges them. New-IOU form shows existing-people suggestions.
 - **`CatDonut.jsx`** — the category-spend donut, extracted so recharts lives in a lazy chunk.
-- **`insights.js`** — `buildDailyInsight()`: the one proactive line on the dashboard (overdue bill → due today/this week with wallet coverage → week pace vs own 3-week baseline → month summary → null). Pure local math, no AI. Reuses `isRecurringDueToday`/`recurringDaysOverdue` + billReminders' exported `isNotHandled` so it can't disagree with reminder toasts. Tests: `insights.test.js`.
-- **`CalendarView.jsx`** — month-grid calendar rendered inside the history tab. Shows per-day expense/income totals with a heat-map background (green → yellow → red). Supports controlled selection (`selectedDay` + `onDayClick` props) or internal state; `compact` prop hides the day-detail panel. Props: `expenses`, `incomes`, `transfers`, `categories`, `wallets`, `onTxClick`, `compact`, `selectedDay`, `onDayClick`.
+- **`CalendarView.jsx`** — month-grid calendar rendered inside the history tab. Shows per-day expense/income totals with a heat-map background (green → yellow → red). Supports controlled selection (`selectedDay` + `onDayClick` props) or internal state; `compact` prop hides the day-detail panel. Props: `expenses`, `incomes`, `refunds` (received IOU repayments — netted off the SPENT header so it matches the hero's Out), `transfers`, `categories`, `wallets`, `onTxClick`, `compact`, `selectedDay`, `onDayClick`, `viewMonth` + `onMonthChange` (two-way sync with the history month chips).
 - **`NomadLite.jsx`** + **`nomadLiteSplit.js`** — "NOMAD Lite": a presets shell of standalone quick-calculators launched from the **clock icon in the Events list header** (Events `view === "lite"`). First preset "Current Split" = electricity/utility bill splitter (base load + appliance %-groups + auto/manual extra, donut, cards/table, copy/WhatsApp/print). **localStorage-only** (`nomad-lite-v1`), never synced to Supabase. Theme is global (inherits app CSS vars — no local toggle). Pure split math + helpers live in `nomadLiteSplit.js` so `NomadLite.jsx` stays components-only (`react-refresh/only-export-components` is an error outside App/Routine). Add future presets to the `PRESETS` array.
 - **`CredentialSetup.jsx`**, **`ReceiptPicker.jsx`** (image + PDF).
 - **Code-splitting:** `Routine`, `NomadLite`, `IOUWallet`, `CalendarView`, `CredentialSetup`, `CatDonut` are `lazy()`-loaded via the `lazyView` helper at the top of `App.jsx` (pre-wrapped in Suspense so call sites stay unchanged; failed chunk fetch renders a reconnect hint). All chunks are idle-prefetched after first paint — **required for offline**, since the SW can only serve what has been fetched once.
@@ -103,8 +101,7 @@ First run shows `CredentialSetup.jsx`. Creds (Supabase URL + anon key, optional 
 | `dbCols.js` | **single source of truth for Supabase column lists** (`COLS.<table>`) |
 | `offlineSync.js` | write-ahead queue; replay on reconnect; dedup/backoff/dead-letter/conflict |
 | `syncMerge.js` | merge remote vs local rows on load |
-| `billReminders.js` | due/upcoming recurring-bill toasts; exports `isNotHandled` (paid/skipped-this-cycle check) reused by `insights.js` |
-| `insights.js` | `buildDailyInsight()` — dashboard's daily proactive line (pure local math) |
+| `billReminders.js` | due/upcoming recurring-bill toasts; exports `isNotHandled` (paid/skipped-this-cycle check) |
 | `receiptUpload.js` | compress + upload receipts (3 modes, below) |
 | `currencyConverter.js` | INR FX rates, 24h-cached in localStorage |
 | `financeUtils.js` | pure money/date helpers (`roundMoney`, `localDateKey`, recurring due-date, `distributeAmount`, `historySortCompare`, `suggestAddDefaults`). **No side effects.** |
