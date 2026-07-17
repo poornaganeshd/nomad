@@ -19,7 +19,7 @@ import { redactTransactions, redact } from "./redactor";
 import {
   roundMoney, localDateKey, getRecurringDueDate, isRecurringDueToday,
   recurringDaysOverdue, distributeAmount, expenseShareMap, historySortCompare,
-  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, isSuspiciousExcess, goalProgress,
+  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, isSuspiciousExcess, goalProgress, balanceTrail, runwayInfo,
 } from "./financeUtils";
 import { parseAmount, parseVoiceTx, parseBankCsv, parseUpiStatement, htmlStatementToText } from "./txParsers";
 import { extractPdfText, looksLikeText } from "./pdfText";
@@ -582,6 +582,86 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
   );
 }
 
+
+// Catmull-Rom → cubic bezier path through the trail points (terrain hero).
+const terrainPathD = (pts) => {
+  if (!pts.length) return "M0,196";
+  let d = `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
+    d += ` C${(p1.x + (p2.x - p0.x) / 6).toFixed(1)},${(p1.y + (p2.y - p0.y) / 6).toFixed(1)} ${(p2.x - (p3.x - p1.x) / 6).toFixed(1)},${(p2.y - (p3.y - p1.y) / 6).toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`;
+  }
+  return d;
+};
+
+// Terrain hero: 30-day total-balance trail drawn as layered contour bands, with
+// the "where you stand" readout, burn-rate runway, and In/Out/Kept triad.
+// Blueprint-styled but themed entirely through NOMAD's CSS vars so light and
+// dark mode both work; numerals use --font-m (Martian Mono).
+function TerrainHero({ trail, balance, income, expense, runway: r }) {
+  const n = trail.length;
+  const bals = trail.map(p => p.bal);
+  const lo = Math.min(...bals), hi = Math.max(...bals);
+  const flat = hi - lo < 1;
+  const pts = trail.map((p, i) => ({ x: (i / Math.max(1, n - 1)) * 410, y: flat ? 196 : 140 + ((hi - p.bal) / (hi - lo)) * 100 }));
+  const lastY = pts[n - 1].y;
+  const line = `${terrainPathD(pts)} L430,${lastY.toFixed(1)}`;
+  const area = `${line} L430,300 L0,300 Z`;
+  const d30 = roundMoney(balance - trail[0].bal);
+  const isNeg = balance < 0, abs = Math.abs(balance);
+  const intPart = Math.floor(abs).toLocaleString("en-IN");
+  const decPart = (abs - Math.floor(abs)).toFixed(2).slice(1);
+  const perDay = v => "₹" + Math.round(v).toLocaleString("en-IN");
+  const saved = roundMoney((income || 0) - (expense || 0));
+  const keptPct = income > 0 && saved >= 0 ? Math.round(saved / income * 100) : null;
+  const lbl = { fontFamily: "var(--font-m)", fontSize: 8.5, letterSpacing: "0.2em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 5 };
+  const val = { fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontSize: 13, fontWeight: 500, letterSpacing: "-0.04em" };
+  const strongS = { color: "var(--text)", fontFamily: "var(--font-m)", fontWeight: 500, fontSize: 11.5 };
+  let groundDays, tag, trackPct, trackColor;
+  if (balance <= 0) { groundDays = "0 days"; tag = "DRY"; trackPct = 0; trackColor = "var(--danger)"; }
+  else if (r.daysLeft === null) { groundDays = null; tag = "NO BURN THIS WEEK"; trackPct = 100; trackColor = "var(--pos)"; }
+  else if (r.daysLeft > 90) { groundDays = "90+ days"; tag = "STEADY"; trackPct = 100; trackColor = "var(--pos)"; }
+  else { groundDays = `${r.daysLeft} day${r.daysLeft === 1 ? "" : "s"}`; tag = r.dryBy ? "DRY BY " + new Date(r.dryBy + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short" }).toUpperCase() : ""; trackPct = Math.max(2, Math.min(100, Math.round(r.daysLeft / 30 * 100))); trackColor = "var(--neg)"; }
+  let note;
+  if (r.rate > 0 && r.usual > 0 && r.rate > r.usual * 1.05) note = <>You're moving at <strong style={strongS}>{perDay(r.rate)}/day</strong> this week against a usual <strong style={strongS}>{perDay(r.usual)}/day</strong>.{balance > 0 && r.daysAtUsual !== null && r.daysAtUsual > (r.daysLeft ?? 0) ? <> Ease back to the usual pace and the ground stretches to <strong style={strongS}>{r.daysAtUsual > 90 ? "90+" : r.daysAtUsual} days</strong>.</> : null}</>;
+  else if (r.rate > 0 && r.usual > 0 && r.rate < r.usual * 0.95) note = <>You're moving at <strong style={strongS}>{perDay(r.rate)}/day</strong> this week, under your usual <strong style={strongS}>{perDay(r.usual)}/day</strong> — the ground is stretching.</>;
+  else if (r.rate > 0 && r.usual > 0) note = <>Right on your usual pace — <strong style={strongS}>{perDay(r.usual)}/day</strong>.</>;
+  else if (r.rate > 0) note = <>You're moving at <strong style={strongS}>{perDay(r.rate)}/day</strong> this week. Not enough history yet for a usual pace.</>;
+  else note = <>No spending in the last 7 days — the ground holds.</>;
+  return <div style={{ marginBottom: 4, textAlign: "left" }}>
+    <div style={{ position: "relative", width: "100%", height: 260 }}>
+      <svg viewBox="0 0 430 300" preserveAspectRatio="none" style={{ display: "block", width: "100%", height: "100%" }} aria-label={`Balance over the last 30 days, ending at ${fmt(balance)}`}>
+        <path className="nm-band nm-b3" d={area} fill="var(--neg)" fillOpacity="0.10" />
+        <g transform="translate(0,20)"><path className="nm-band nm-b2" d={area} fill="var(--neg)" fillOpacity="0.16" /></g>
+        <g transform="translate(0,42)"><path className="nm-band nm-b1" d={area} fill="var(--neg)" fillOpacity="0.24" /></g>
+        <path d={line} fill="none" stroke="var(--neg)" strokeOpacity="0.25" strokeWidth="1" />
+        <g transform="translate(0,20)"><path d={line} fill="none" stroke="var(--neg)" strokeOpacity="0.25" strokeWidth="1" /></g>
+        <path className="nm-trail" d={line} fill="none" stroke="var(--text)" strokeWidth="2" strokeLinecap="round" />
+        <line className="nm-pin" x1="0" y1={lastY} x2="410" y2={lastY} stroke="var(--neg)" strokeWidth="1" strokeDasharray="2 5" />
+        <g className="nm-pin"><circle cx="410" cy={lastY} r="9" fill="var(--neg)" fillOpacity="0.2" /><circle cx="410" cy={lastY} r="4.5" fill="var(--neg)" stroke="var(--bg)" strokeWidth="2" /></g>
+      </svg>
+      <div className="nm-read" style={{ position: "absolute", left: 0, top: 12, right: 0, pointerEvents: "none" }}>
+        <div style={{ fontFamily: "var(--font-m)", fontSize: 9, letterSpacing: "0.26em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 }}>Where you stand</div>
+        <div style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontWeight: 500, fontSize: 38, letterSpacing: "-0.06em", lineHeight: 1, display: "flex", alignItems: "baseline", color: "var(--text)" }}><span style={{ fontSize: 20, color: "var(--neg)", marginRight: 3, letterSpacing: 0 }}>{isNeg ? "−₹" : "₹"}</span>{intPart}<span style={{ fontSize: 17, color: "var(--muted)" }}>{decPart}</span></div>
+        <div style={{ marginTop: 8, fontFamily: "var(--font-m)", fontSize: 10.5, letterSpacing: "0.02em", color: d30 > 0.5 ? "var(--pos)" : d30 < -0.5 ? "var(--neg)" : "var(--muted)" }}>{d30 > 0.5 ? `▲ ${fmt(Math.round(d30))} higher than 30 days ago` : d30 < -0.5 ? `▼ ${fmt(Math.round(-d30))} lower than 30 days ago` : "— level with 30 days ago"}</div>
+      </div>
+    </div>
+    <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 8, fontFamily: "var(--font-m)", fontSize: 8.5, letterSpacing: "0.14em", textTransform: "uppercase", color: "var(--muted)", opacity: 0.75 }}><span>30 days back</span><span>today</span></div>
+    <div style={{ margin: "18px 0 0", borderTop: "1.5px solid var(--text)", borderBottom: "1px solid var(--border)", padding: "14px 0 15px" }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 9 }}>
+        <div style={{ fontFamily: "var(--font-m)", fontWeight: 500, fontSize: 15, letterSpacing: "-0.03em", color: "var(--text)" }}>{groundDays ? <><b style={{ color: "var(--neg)", fontWeight: 600 }}>{groundDays}</b> of ground ahead</> : <>Steady ground ahead</>}</div>
+        <div style={{ fontFamily: "var(--font-m)", fontSize: 9, letterSpacing: "0.18em", textTransform: "uppercase", color: "var(--muted)" }}>{tag}</div>
+      </div>
+      <div style={{ height: 5, width: "100%", background: "var(--border)", overflow: "hidden" }}><div style={{ display: "block", height: "100%", width: `${trackPct}%`, background: trackColor }} /></div>
+      <div style={{ marginTop: 10, fontSize: 12.5, lineHeight: 1.5, color: "var(--ts)", fontFamily: "var(--font-b)" }}>{note}</div>
+    </div>
+    <div style={{ display: "flex", margin: "18px 0 0" }}>
+      <div style={{ flex: 1 }}><div style={lbl}>In</div><div style={{ ...val, color: "var(--pos)" }}>{fmt(income)}</div></div>
+      <div style={{ flex: 1, paddingLeft: 14 }}><div style={lbl}>Out</div><div style={{ ...val, color: "var(--neg)" }}>{fmt(expense)}</div></div>
+      <div style={{ flex: 1, paddingLeft: 14 }}><div style={lbl}>{saved < 0 ? "Overspent" : keptPct !== null ? `Kept · ${keptPct}%` : "Kept"}</div><div style={{ ...val, color: saved < 0 ? "var(--danger)" : "var(--text)" }}>{fmt(Math.abs(saved))}</div></div>
+    </div>
+  </div>;
+}
 
 function SettleM({ split: sp, remaining: rm, onConfirm: oc, onClose: cl, wallets: wl = WALLETS }) {
   useLockBodyScroll();
@@ -2294,6 +2374,21 @@ export default function Nomad() {
   const wBal = useMemo(() => { const b = {}; wallets.forEach(w => { b[w.id] = roundMoney(wsb[w.id] || 0); }); inc.forEach(i => { const w = i.walletId || "bank"; if (b[w] !== undefined) b[w] = roundMoney(b[w] + i.amount) }); ex.forEach(e => { const w = e.walletId || "upi_lite"; if (b[w] !== undefined) b[w] = roundMoney(b[w] - e.amount) }); tr.forEach(t => { if (b[t.fromWallet] !== undefined) b[t.fromWallet] = roundMoney(b[t.fromWallet] - t.amount); if (b[t.toWallet] !== undefined) b[t.toWallet] = roundMoney(b[t.toWallet] + t.amount) }); stl.forEach(s => { if (b[s.walletId] !== undefined) { if (s.direction === "owed") b[s.walletId] = roundMoney(b[s.walletId] + s.amount); else b[s.walletId] = roundMoney(b[s.walletId] - s.amount) } }); return b }, [ex, inc, tr, stl, wsb, wallets]);
   const dayInsight = useMemo(() => buildDailyInsight({ expenses: ex, recurring: rec, walletBalances: wBal, wallets }), [ex, rec, wBal, wallets]);
   const mBal = roundMoney(Object.values(wBal).reduce((s, v) => s + v, 0));
+  // Terrain hero inputs — signed total-balance deltas + outflows, mirroring
+  // wBal's accumulation rules exactly (rows on unknown wallets don't move the
+  // total, transfers between two known wallets cancel, settlements use raw
+  // s.amount like wBal does). If wBal changes, change this too.
+  const terrainData = useMemo(() => {
+    const ids = new Set(wallets.map(w => w.id));
+    const deltas = [], spends = [];
+    inc.forEach(i => { if (ids.has(i.walletId || "bank")) deltas.push({ date: i.date, amount: Number(i.amount) || 0 }); });
+    ex.forEach(e => { if (ids.has(e.walletId || "upi_lite")) { const a = Number(e.amount) || 0; deltas.push({ date: e.date, amount: -a }); spends.push({ date: e.date, amount: a }); } });
+    tr.forEach(t => { const f = ids.has(t.fromWallet), g = ids.has(t.toWallet); if (f && !g) deltas.push({ date: t.date, amount: -(Number(t.amount) || 0) }); else if (!f && g) deltas.push({ date: t.date, amount: Number(t.amount) || 0 }); });
+    stl.forEach(s => { if (!ids.has(s.walletId)) return; const a = Number(s.amount) || 0; if (s.direction === "owed") deltas.push({ date: s.date, amount: a }); else { deltas.push({ date: s.date, amount: -a }); spends.push({ date: s.date, amount: a }); } });
+    return { deltas, spends };
+  }, [ex, inc, tr, stl, wallets]);
+  const balTrail = useMemo(() => balanceTrail(mBal, terrainData.deltas, { days: 30 }), [mBal, terrainData]);
+  const runway = useMemo(() => runwayInfo(mBal, terrainData.spends), [mBal, terrainData]);
   // Per-wallet verification state. NOMAD can't read your bank, so "verified"
   // means "you recently confirmed the real balance here and nothing has piled
   // up since". A wallet goes stale on the first new txn OR after time
@@ -3382,8 +3477,8 @@ export default function Nomad() {
   const theme = dm ? { "--bg": "#000000", "--card": "#0F0F0F", "--border": "#1F1F1F", "--text": "#E5E7EB", "--ts": "#9CA3AF", "--muted": "#6B7280", "--nav-bg": "rgba(0,0,0,0.95)", "--neu-bg": "#161616", "--neu-lt": "#242424", "--neu-dk": "#000000", "--pos": "#6BAA75", "--neg": "#E07A5F", "--danger": "#D4726A", "--acc": "#7B8CDE", "--acc2": "#A78BFA", "--warn": "#FBBF24", "--gold": "#C9A96E" } : { "--bg": "#F2F0EB", "--card": "#FFF", "--border": "rgba(0,0,0,0.06)", "--text": "#1A1A2E", "--ts": "#4A4A5A", "--muted": "#8A8A9A", "--nav-bg": "rgba(242,240,235,0.92)", "--neu-bg": "#F2F0EB", "--neu-lt": "#FFFFFF", "--neu-dk": "#D4CFC6", "--pos": "#6BAA75", "--neg": "#E07A5F", "--danger": "#D4726A", "--acc": "#7B8CDE", "--acc2": "#A78BFA", "--warn": "#FBBF24", "--gold": "#C9A96E" };
 
   return <div className="nmClip" style={{ ...theme, fontFamily: "var(--font-b)", background: "var(--bg)", color: "var(--text)", minHeight: "100vh", width: "100%", maxWidth: 430, margin: "0 auto", padding: "0 0 110px", boxSizing: "border-box" }}><style>{`
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Nunito:wght@400;500;600;700;800&family=Playfair+Display:wght@400;500&display=swap');
-:root{--font-h:'Plus Jakarta Sans',sans-serif;--font-b:'Nunito',sans-serif}
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Nunito:wght@400;500;600;700;800&family=Playfair+Display:wght@400;500&family=Martian+Mono:wght@400;500;600&display=swap');
+:root{--font-h:'Plus Jakarta Sans',sans-serif;--font-b:'Nunito',sans-serif;--font-m:'Martian Mono',monospace}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 html,body{overflow-x:hidden;overflow-x:clip;max-width:100%}
 .nmClip{overflow-x:hidden;overflow-x:clip}
@@ -3404,6 +3499,16 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
 @keyframes daySelGlow{0%{box-shadow:0 0 0 1px rgba(224,122,95,0.0)}30%{box-shadow:0 0 16px 3px rgba(224,122,95,0.42),0 0 0 2px rgba(224,122,95,0.85)}100%{box-shadow:0 0 6px 0 rgba(224,122,95,0.12),0 0 0 1.5px rgba(224,122,95,0.4)}}
 .day-selected{border-radius:14px;background:linear-gradient(90deg,rgba(224,122,95,0.10),rgba(107,170,117,0.06));box-shadow:0 0 6px 0 rgba(224,122,95,0.12),0 0 0 1.5px rgba(224,122,95,0.4);animation:daySelGlow 1.15s cubic-bezier(0.34,1.56,0.64,1)}
 .pe{animation:fi 0.3s ease-out}.pse{animation:fis 0.25s ease-out}
+@keyframes nmDraw{to{stroke-dashoffset:0}}
+@keyframes nmRise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes nmPop{from{opacity:0;transform:scale(0.4)}to{opacity:1;transform:scale(1)}}
+@keyframes nmFadeIn{to{opacity:1}}
+.nm-trail{stroke-dasharray:1400;stroke-dashoffset:1400;animation:nmDraw 1.5s cubic-bezier(0.4,0,0.2,1) 0.15s forwards}
+.nm-band{opacity:0;animation:nmRise 0.9s ease-out forwards}
+.nm-b1{animation-delay:0.5s}.nm-b2{animation-delay:0.62s}.nm-b3{animation-delay:0.74s}
+.nm-pin{opacity:0;animation:nmPop 0.5s cubic-bezier(0.34,1.56,0.64,1) 1.5s forwards}
+.nm-read{opacity:0;animation:nmFadeIn 0.6s ease-out 1.1s forwards}
+@media (prefers-reduced-motion:reduce){.nm-trail{animation:none;stroke-dashoffset:0}.nm-band,.nm-pin,.nm-read{animation:none;opacity:1}}
 .card-hover{transition:box-shadow 0.2s ease,transform 0.2s ease}
 .card-hover:hover{box-shadow:0 4px 24px rgba(0,0,0,0.08);transform:translateY(-1px)}
 `}</style>
@@ -3437,6 +3542,9 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
       {(tab === "dashboard" || tab === "history") && <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "12px 0 16px", scrollbarWidth: "none" }}><button onClick={() => { sFm("all"); sHCalDay(null); }} style={{ padding: "7px 16px", borderRadius: 20, fontSize: 12, fontFamily: "var(--font-h)", border: `1.5px solid ${fm === "all" ? "var(--neg)" : "var(--border)"}`, background: fm === "all" ? "var(--neg)" : "var(--card)", color: fm === "all" ? "#fff" : "var(--muted)", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 500 }}>All</button>{allM.map(m => <button key={m} onClick={() => { sFm(m); sHCalDay(null); }} style={{ padding: "7px 16px", borderRadius: 20, fontSize: 12, fontFamily: "var(--font-h)", border: `1.5px solid ${fm === m ? "var(--pos)" : "var(--border)"}`, background: fm === m ? "var(--pos)" : "var(--card)", color: fm === m ? "#fff" : "var(--muted)", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 500 }}>{ml(m)}</button>)}</div>}
 
       {tab === "dashboard" && <div className="pe">
+        <TerrainHero trail={balTrail} balance={mBal} income={tI} expense={tE} runway={runway} />
+        <div style={{ fontFamily: "var(--font-m)", fontSize: 9, letterSpacing: "0.26em", textTransform: "uppercase", color: "var(--muted)", margin: "24px 0 12px", textAlign: "left" }}>What you carry</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginBottom: 16 }}>{(() => { const tot = wallets.reduce((s, x) => s + Math.max(0, wBal[x.id] || 0), 0); return wallets.map(w => { const b = roundMoney(wBal[w.id] || 0); const share = tot > 0 && b > 0 ? Math.min(100, Math.round(b / tot * 100)) : 0; const v = walletVerify[w.id] || { state: "new" }; const cfg = { ok: { t: "✓ Verified", warn: false }, stale: { t: "Check", warn: true }, drift: { t: "Drift", warn: true }, new: { t: "Verify", warn: false } }[v.state]; const vTitle = v.state === "drift" ? `Last check was off by ${fmt(Math.abs(v.last.gap))} — tap to reconcile & find the missing entry` : v.state === "stale" ? `${v.newTx ? v.newTx + " new txn" + (v.newTx === 1 ? "" : "s") : v.days + "d"} ${v.last ? "since last verified" : "logged — never verified"} — tap to reconcile` : v.state === "ok" ? `Verified ${v.last.date}` : "Never verified — tap to set your real balance"; return <div key={w.id} onClick={() => { hapticLight(); sCalW(w); }} title={vTitle} className="card-hover" style={{ position: "relative", aspectRatio: "1 / 1", borderRadius: 13, padding: "12px 11px 11px", display: "flex", flexDirection: "column", cursor: "pointer", overflow: "hidden", textAlign: "left", backgroundColor: w.color, backgroundImage: "repeating-linear-gradient(45deg, rgba(255,255,255,0.055) 0 1px, transparent 1px 3px), repeating-linear-gradient(-45deg, rgba(0,0,0,0.055) 0 1px, transparent 1px 3px)", boxShadow: "0 6px 14px -7px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.3)" }}><div style={{ position: "absolute", inset: 5, border: "1px dashed rgba(255,255,255,0.36)", borderRadius: 9, pointerEvents: "none", zIndex: 2 }} /><div style={{ position: "absolute", left: 0, right: 0, top: 0, height: 10, background: "rgba(255,255,255,0.11)", borderBottom: "1px solid rgba(0,0,0,0.14)", pointerEvents: "none" }} /><div style={{ position: "relative", zIndex: 1, paddingTop: 4, display: "flex", flexDirection: "column", height: "100%", minWidth: 0 }}><div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flex: "0 0 auto" }}><span style={{ width: 22, height: 16, borderRadius: 3, background: "linear-gradient(150deg, rgba(255,255,255,0.78), rgba(255,255,255,0.38))", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }}><DI2 id={w.id} accent={w.color} size={10} /></span>{w.id === "cash" && <button onClick={e => { e.stopPropagation(); sRecountW(w); }} title="Count cash" style={{ background: "none", border: "none", cursor: "pointer", color: "rgba(255,255,255,0.8)", fontSize: 12, padding: "0 2px", lineHeight: 1 }}>⟳</button>}</div><div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "flex-end", minWidth: 0 }}><div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 9.5, letterSpacing: "0.12em", textTransform: "uppercase", color: "rgba(255,255,255,0.78)", marginBottom: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.name}</div><div style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontSize: 12.5, fontWeight: 500, letterSpacing: "-0.06em", color: "#fff", textShadow: "0 1px 0 rgba(0,0,0,0.18)", marginBottom: 9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(b < 0 ? "−" : "") + fmt(Math.abs(b))}</div></div><div style={{ height: 4, borderRadius: 2, flex: "0 0 auto", background: "rgba(0,0,0,0.32)", boxShadow: "0 1px 0 rgba(255,255,255,0.16)", overflow: "hidden" }}><div style={{ display: "block", height: "100%", width: `${Math.max(share, b > 0 ? 1 : 0)}%`, background: "rgba(255,255,255,0.9)", borderRadius: 2 }} /></div><div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 7, fontFamily: "var(--font-m)", fontSize: 7, letterSpacing: "0.1em", textTransform: "uppercase", flex: "0 0 auto" }}><span style={{ color: cfg.warn ? "#FFE8B8" : "rgba(255,255,255,0.7)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cfg.t}</span><b style={{ fontWeight: 500, color: "rgba(255,255,255,0.92)", flexShrink: 0, marginLeft: 4 }}>{share}%</b></div></div></div>; }); })()}</div>
         {dayInsight && <div style={{ ...cc, padding: "12px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 10, borderLeft: `3px solid ${dayInsight.tone === "warn" ? "var(--danger)" : dayInsight.tone === "good" ? "var(--pos)" : "var(--acc)"}` }}><Sparkle size={16} weight="fill" color={dayInsight.tone === "warn" ? "var(--danger)" : dayInsight.tone === "good" ? "var(--pos)" : "var(--acc)"} style={{ flexShrink: 0 }} /><span style={{ fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--text)", lineHeight: 1.5 }}>{dayInsight.text}</span></div>}
         {(() => {
           const tod = new Date(), todS = localDateKey(tod), snoozed = (() => { try { return JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); } catch { return {}; } })(), due = rec.filter(r => isRecurringDueToday(r, todS) && !(snoozed[r.id] && snoozed[r.id] > todS));
@@ -3449,9 +3557,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         })()}
         {streakInfo.atRisk && streakInfo.current >= 3 && !streakNudgeGone && new Date().getHours() >= 19 && <div style={{ ...cc, borderLeft: "3px solid var(--warn)", padding: "12px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 10 }}><Fire size={18} weight="fill" color="var(--warn)" /><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>{streakInfo.current}-day streak at risk</div><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>Log today's transactions — or confirm a no-spend day.{streakInfo.freezesHeld > 0 ? ` (${streakInfo.freezesHeld} freeze${streakInfo.freezesHeld === 1 ? "" : "s"} in reserve)` : ""}</div></div><button onClick={markNoSpendToday} style={{ padding: "7px 10px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" }}>No spend ✓</button><button onClick={() => { sStreakNudgeGone(true); try { localStorage.setItem("nomad-streak-nudge", localDateKey()); } catch { /* quota */ } }} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 14, opacity: 0.5, flexShrink: 0, padding: "0 2px" }}>✕</button></div>}
         {loaded && ex.length === 0 && inc.length === 0 && <div style={{ ...cc, padding: "18px 20px", marginBottom: 14, borderLeft: "3px solid var(--acc)" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}><HandWaving size={16} weight="fill" />Welcome to NOMAD</div><div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6, marginBottom: 12 }}>Track expenses, income, and recurring bills.<br />Tap <strong>Add</strong> below to log your first transaction.</div><div style={{ display: "flex", gap: 8 }}><button onClick={() => sTab("add")} style={{ flex: 1, padding: "9px", border: "none", borderRadius: 9, background: "var(--neg)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>+ Add Expense</button><button onClick={() => sTab("settings")} style={{ padding: "9px 14px", border: "1.5px solid var(--border)", borderRadius: 9, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Settings</button></div></div>}
-        {(() => { const saved = roundMoney(tI - tE); const savedPct = tI > 0 ? Math.round((saved / tI) * 100) : null; return <div style={{ ...cc, padding: "26px 22px 20px", marginBottom: 16, textAlign: "center" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 11, color: "var(--muted)", letterSpacing: "1.5px", textTransform: "uppercase", fontWeight: 500 }}>Total Balance</div><div style={{ fontSize: 36, fontWeight: 700, fontFamily: "var(--font-h)", color: mBal >= 0 ? "var(--pos)" : "var(--neg)", marginTop: 6, lineHeight: 1.2 }}>{fmt(mBal)}</div><div style={{ borderTop: "1px dashed var(--border)", marginTop: 18, paddingTop: 16 }}><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 4 }}><div><div style={{ fontFamily: "var(--font-h)", fontSize: 9, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600 }}>IN</div><div style={{ fontFamily: "var(--font-h)", fontSize: 13, color: "var(--pos)", marginTop: 3, fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(tI)}</div></div><div style={{ borderLeft: "1px solid var(--border)", borderRight: "1px solid var(--border)", padding: "0 4px" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 9, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600 }}>OUT</div><div style={{ fontFamily: "var(--font-h)", fontSize: 13, color: "var(--neg)", marginTop: 3, fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(tE)}</div></div><div><div style={{ fontFamily: "var(--font-h)", fontSize: 9, color: "var(--muted)", letterSpacing: "0.5px", fontWeight: 600 }}>{saved >= 0 ? "SAVED" : "OVERSPEND"}</div><div style={{ fontFamily: "var(--font-h)", fontSize: 13, color: saved >= 0 ? "var(--acc)" : "var(--danger)", marginTop: 3, fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(Math.abs(saved))}</div>{savedPct !== null && saved >= 0 && <div style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--font-h)", marginTop: 1, fontWeight: 600 }}>{savedPct}% of in</div>}</div></div></div></div>; })()}
 
-        <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(wallets.length, 3)}, minmax(0, 1fr))`, gap: 8, marginBottom: 14 }}>{wallets.map(w => { const b = roundMoney(wBal[w.id] || 0); return <div key={w.id} onClick={() => { hapticLight(); sCalW(w); }} className="card-hover" style={{ ...cc, minWidth: 0, padding: "12px 10px", cursor: "pointer", borderLeft: `3px solid ${w.color}`, borderRadius: 14 }}><div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 8 }}><DI2 id={w.id} accent={w.neon || w.color} size={14} /><span style={{ fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, flex: 1 }}>{w.name}</span>{w.id === "cash" && <button onClick={e => { e.stopPropagation(); sRecountW(w); }} title="Count cash" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12, padding: "1px 3px", lineHeight: 1, opacity: 0.5, flexShrink: 0 }}>⟳</button>}</div><div style={{ fontSize: 16, fontWeight: 700, fontFamily: "var(--font-h)", color: b >= 0 ? w.color : "var(--neg)" }}>{fmt(b)}</div>{(() => { const v = walletVerify[w.id] || { state: "new" }; const cfg = { ok: { c: "var(--pos)", icon: <IconCheck size={9} stroke={3} />, t: "Verified" }, stale: { c: "var(--warn)", icon: <IconClock size={9} />, t: "Check" }, drift: { c: "var(--danger)", icon: <Warning size={9} weight="fill" />, t: "Drift" }, new: { c: "var(--muted)", icon: <Scales size={9} />, t: "Verify" } }[v.state]; return <div title={v.state === "drift" ? `Last check was off by ${fmt(Math.abs(v.last.gap))} — tap to reconcile & find the missing entry` : v.state === "stale" ? `${v.newTx ? v.newTx + " new txn" + (v.newTx === 1 ? "" : "s") : v.days + "d"} ${v.last ? "since last verified" : "logged — never verified"} — tap to reconcile` : v.state === "ok" ? `Verified ${v.last.date}` : "Never verified — tap to set your real balance"} style={{ marginTop: 5, display: "inline-flex", alignItems: "center", gap: 3, fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 700, color: cfg.c, background: v.state === "new" ? "var(--bg)" : cfg.c + "1A", borderRadius: 5, padding: "2px 5px", lineHeight: 1, maxWidth: "100%" }}>{cfg.icon}<span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cfg.t}</span></div>; })()}</div> })}</div>
 
         <LionM balance={mBal} dancing={ld} aiMsg={lionMsg} aiLoading={lionMsgLoading} onTap={() => sChatOpen(true)} />
         {(() => { const sl = scoreLabel(finScore.score); return <div style={{ ...cc, padding: "10px 16px", marginBottom: 12 }}><div onClick={() => sScoreOpen(o => !o)} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}><div style={{ width: 44, height: 44, borderRadius: "50%", border: `2.5px solid ${sl.color}`, background: sl.color + "18", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><span style={{ fontFamily: "var(--font-h)", fontSize: 15, fontWeight: 800, color: sl.color }}>{finScore.score}</span></div><div style={{ flex: 1 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, color: "var(--text)" }}>Health Score — {sl.label}</div><div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>Savings · Bills · Spread · Logging</div></div><span style={{ fontSize: 10, color: "var(--muted)", transition: "transform 0.2s", display: "inline-block", transform: scoreOpen ? "rotate(0deg)" : "rotate(-90deg)" }}>▾</span></div>{scoreOpen && <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>{[{ label: "Savings", score: finScore.breakdown.savings, max: 35, hint: "income vs spending" }, { label: "Bills", score: finScore.breakdown.bills, max: 25, hint: "recurring bills" }, { label: "Spread", score: finScore.breakdown.spread, max: 20, hint: "category diversity" }, { label: "Logging", score: finScore.breakdown.logging, max: 20, hint: "days tracked" }].map(({ label, score: sc, max, hint }) => { const pct = Math.round(sc / max * 100); const bc = pct >= 80 ? "var(--pos)" : pct >= 50 ? "var(--warn)" : "var(--neg)"; return <div key={label}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}><span style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--text)" }}>{label}</span><span style={{ fontSize: 10, color: "var(--muted)" }}>{sc}/{max} · {hint}</span></div><div style={{ height: 4, borderRadius: 2, background: "var(--border)" }}><div style={{ height: "100%", width: `${pct}%`, background: bc, borderRadius: 2 }} /></div></div>; })}</div>}</div>; })()}

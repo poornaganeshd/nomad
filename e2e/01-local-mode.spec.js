@@ -3,8 +3,8 @@ import { gotoLocal } from "./helpers.js";
 
 test("local-only mode boots straight into the finance app", async ({ page }) => {
   await gotoLocal(page);
-  // Dashboard total-balance card + bottom-nav Add button confirm the app rendered
-  await expect(page.getByText("Total Balance")).toBeVisible();
+  // Terrain-hero readout + bottom-nav Add button confirm the app rendered
+  await expect(page.getByText("Where you stand")).toBeVisible();
   await expect(page.getByRole("button", { name: "Add", exact: true })).toBeVisible();
 });
 
