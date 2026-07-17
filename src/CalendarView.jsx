@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { localDateKey } from "./financeUtils";
 
 const fmt = n => "₹" + (Number(n) || 0).toLocaleString("en-IN");
@@ -6,6 +6,7 @@ const fmt = n => "₹" + (Number(n) || 0).toLocaleString("en-IN");
 export default function CalendarView({
   expenses = [],
   incomes = [],
+  refunds = [],           // IOU repayments received ({date, amount}) — netted off the SPENT header
   transfers = [],
   categories = [],
   wallets = [],
@@ -13,6 +14,8 @@ export default function CalendarView({
   compact = false,        // hide internal day-detail panel (use when parent renders its own)
   selectedDay = null,     // controlled selection — when provided, parent owns selection
   onDayClick,             // called with day key (or null to clear)
+  viewMonth = null,       // controlled visible month ("YYYY-MM") — parent chips drive the calendar
+  onMonthChange,          // called with "YYYY-MM" when the user navigates months here
 }) {
   const today = new Date();
   const initialMonth = selectedDay ? new Date(`${selectedDay}T00:00:00`) : today;
@@ -32,16 +35,27 @@ export default function CalendarView({
     const day = isCur ? today.getDate() : 1;
     sInternalSel(`${yy}-${String(mm + 1).padStart(2, "0")}-${String(Math.min(day, last)).padStart(2, "0")}`);
   };
+  // Chip → calendar: when the parent selects a month, jump the grid to it.
+  useEffect(() => {
+    if (!viewMonth) return;
+    const [y, m] = viewMonth.split("-").map(Number);
+    if (!y || !m) return;
+    sY(y); sM(m - 1);
+  }, [viewMonth]);
+
+  const mKey = (yy, mm) => `${yy}-${String(mm + 1).padStart(2, "0")}`;
   const goB = () => {
     const ny = vM === 0 ? vY - 1 : vY;
     const nm = vM === 0 ? 11 : vM - 1;
     sY(ny); sM(nm); clampSelToMonth(ny, nm);
+    onMonthChange?.(mKey(ny, nm));
   };
   const goF = () => {
     if (vY === today.getFullYear() && vM === today.getMonth()) return;
     const ny = vM === 11 ? vY + 1 : vY;
     const nm = vM === 11 ? 0 : vM + 1;
     sY(ny); sM(nm); clampSelToMonth(ny, nm);
+    onMonthChange?.(mKey(ny, nm));
   };
   const iC = vY === today.getFullYear() && vM === today.getMonth();
   const fd = new Date(vY, vM, 1).getDay();
@@ -71,8 +85,11 @@ export default function CalendarView({
       inc += v.inc;
       if (v.exp > 0 || v.inc > 0) days++;
     });
-    return { exp, inc, days };
-  }, [dayMap]);
+    // SPENT is net of IOU repayments received this month, so the header always
+    // agrees with the dashboard hero's Out (same expenses − refunds math).
+    const refund = refunds.reduce((s, r) => (typeof r.date === "string" && r.date.startsWith(pfx)) ? s + (Number(r.amount) || 0) : s, 0);
+    return { exp: Math.max(0, exp - refund), inc, days };
+  }, [dayMap, refunds, pfx]);
 
   const maxDay = Math.max(...Object.values(dayMap).map(v => v.exp), 1);
 
@@ -187,7 +204,7 @@ export default function CalendarView({
             <div style={{ fontFamily: "var(--font-h)", fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{mn}</div>
             {!iC && (
               <button
-                onClick={() => { sY(today.getFullYear()); sM(today.getMonth()); sSel(localDateKey()); }}
+                onClick={() => { sY(today.getFullYear()); sM(today.getMonth()); sSel(localDateKey()); onMonthChange?.(mKey(today.getFullYear(), today.getMonth())); }}
                 style={{ background: "none", border: "none", fontSize: 10, color: "var(--neg)", cursor: "pointer", fontFamily: "var(--font-h)", fontWeight: 600, marginTop: 2 }}
               >Jump to today</button>
             )}
