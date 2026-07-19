@@ -2,6 +2,11 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
 import { initOfflineSync } from './offlineSync'
+import { attachGlobalHaptics } from './haptics'
+
+// One delegated listener gives every interactive tap its haptic tick — no
+// per-button wiring (see haptics.js).
+attachGlobalHaptics()
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {

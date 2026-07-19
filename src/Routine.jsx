@@ -4,6 +4,7 @@ import { getCredentials as _getCreds } from './credentials';
 import { analyzeFood, foodResultToText, foodResultToMacroString } from './foodVision';
 import { IconFlameFilled, IconDropletFilled, IconCalendarMonth, IconCircleCheckFilled, IconMoodHappyFilled, IconMoodNeutralFilled, IconMoodSadFilled, IconMoodAngryFilled, IconBedFilled, IconMoonFilled, IconCameraFilled, IconCalendarWeek, IconPhotoPlus } from '@tabler/icons-react';
 import { Camera, Leaf, Robot } from "@phosphor-icons/react";
+import { hapticSelection } from './haptics';
 
 /* ============================================================
    FORM — Daily food & skincare ritual tracker  v6
@@ -1815,14 +1816,15 @@ const prefersReducedMotion = () => {
     try { return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
     catch { return false; }
 };
-const haptic = (ms = 30) => {
+const haptic = () => {
     try {
         if (prefersReducedMotion()) return;
         const off = localStorage.getItem('form_haptic_off');
         if (off === '1') return;
-        // Floor to 30ms: sub-20ms pulses are imperceptible on most Android
-        // motors, so the old 8ms default read as "no buzz at all".
-        navigator.vibrate && navigator.vibrate(Math.max(30, ms));
+        // Routed through the shared module (not navigator.vibrate directly) so
+        // the app-wide toggle and same-gesture dedupe apply — a direct vibrate
+        // here would double-buzz against the global delegated tick.
+        hapticSelection();
     } catch { }
 };
 

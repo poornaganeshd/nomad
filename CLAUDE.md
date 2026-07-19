@@ -29,7 +29,7 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 
 ## Baselines (verify before/after edits; don't regress)
 
-- **Tests:** 634 pass / 0 fail, 32 files (`npm test`).
+- **Tests:** 648 pass / 0 fail, 33 files (`npm test`).
 - **Lint:** 0 errors / 12 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
 - **Build:** succeeds. Main chunk ~800 kB (gzip ~210 kB) + lazy chunks (Routine, CatDonut/recharts, IOUWallet, NomadLite, CalendarView, CredentialSetup, pdfjs); the >500 kB warning on the main chunk is expected.
@@ -59,6 +59,7 @@ Vitest + jsdom (configured in `vite.config.js` under `test`). Coverage via `@vit
 | `src/dbCols.js` | `src/__tests__/dbCols.test.js` |
 | `src/txParsers.js` | `src/__tests__/txParsers.test.js` |
 | `src/nomadLiteSplit.js` | `src/__tests__/nomadLiteSplit.test.js` |
+| `src/haptics.js` (delegated tap tick + dedupe) | `src/__tests__/haptics.test.js` |
 | `src/bankReconcile.js`, `src/chatFormat.js`, `src/streak.js`, `src/ntfy.js`, `src/webpush.js`, batch import | same-named tests in `src/__tests__/` |
 | `wBal` logic in `App.jsx` (mirrors `roundMoney`) | `src/__tests__/balances.test.js` |
 | `parseAmount`/`isUpiLite` helpers in `App.jsx` | `src/__tests__/helpers.test.js` |
@@ -160,6 +161,7 @@ Cron in `vercel.json` (only `send-reports`). Env: `VITE_SUPABASE_URL`/`SUPABASE_
 - **Tags were removed** — don't re-add (redundant with Events). SQL `tags` columns are dead but harmless.
 - **Routine date math** uses a noon anchor (`new Date(y, m, d, 12)`) to dodge DST off-by-one. Keep it when touching streak/calendar code.
 - **`txParsers.js` is the only source for amount/voice/CSV parsing.** `parseAmount` handles EU comma-decimal, US thousands, and Indian lakh formats. `parseBankCsv` handles HDFC/ICICI/SBI and generic CSV layouts with auto-detected column headers (no row-count cap). Don't re-implement these inline in `App.jsx`.
+- **Haptics are delegated globally — never wire them per-button.** `attachGlobalHaptics()` (haptics.js, installed once in `main.jsx`) ticks on every interactive tap via one capture-phase click listener (buttons, links, `role=button`, and any `cursor: pointer` element). Adding `hapticSelection()` inside a new onClick is redundant (same-gesture dedupe swallows it), and per-button wiring is exactly the bug this replaced — surfaces that forgot the call felt like "haptics randomly broken". Outcome haptics (`hapticSuccess`/`hapticError` via toasts, `hapticMedium` for deletes) stay explicit and always fire. Routine.jsx's local `haptic()` must keep routing through the shared module, never `navigator.vibrate` directly. Guarded by `haptics.test.js`.
 - **The omnibus `ai-analyze.ts` is the preferred pattern for new AI features** — add a mode there rather than a new file, to stay under the Vercel Hobby function limit.
 - **Semantic color tokens** (`--pos`, `--neg`, `--danger`, `--acc`, `--acc2`, `--warn`, `--gold`) live in the theme maps in `App.jsx`; use them for any new UI color instead of raw hex. Raw hex remains ONLY where var() can't go: 8-digit hex+alpha literals, values fed to `alpha()` or `${x}NN` string concat (`tc`, `acc/grn/ind/gld`), `<input type="color">` state, category/wallet seed data, and the theme maps themselves.
 - **`api/ai-analyze.ts` has a sanitize step** — after AI returns JSON, each mode's `sanitize()` function normalises enum values and resets out-of-list IDs to `null`. Always add sanitization when accepting AI output for a new mode; don't let raw AI strings reach the client.
