@@ -96,3 +96,29 @@ test("receipt-items: edit name + category, then import adds one expense per line
   expect(popcorn).toBeTruthy();
   expect(popcorn.categoryId).toBe("food");     // "Food" hint fuzzy-matched "Food & Drinks"
 });
+
+test("receipt-items: split-with-friends creates one combined IOU for the batch", async ({ page }) => {
+  await boot(page);
+
+  // Arm the split BEFORE importing items — this used to be silently ignored by
+  // the "Add N items" path (expenses landed, friend's IOU never created).
+  await page.getByRole("button", { name: /Split with friends/ }).click();
+  const friendInput = page.getByPlaceholder(/Friend's name|Add someone new/);
+  await friendInput.fill("Rakesh");
+  await friendInput.press("Enter");
+  await expect(page.getByRole("button", { name: /Rakesh/ })).toBeVisible();
+
+  await attachAndExtract(page);
+  await page.getByRole("button", { name: /Add 2 items/ }).click();
+  await expect(page.getByText(/Added 2 of 2 line items · 1 IOU created/)).toBeVisible();
+
+  // Both line items landed as expenses AND the friend owes half the ₹200
+  // batch total — one combined IOU, not one per line item.
+  await expect.poll(async () => (await readBackup(page)).splits?.length ?? 0).toBe(1);
+  const { splits, expenses } = await readBackup(page);
+  expect(expenses).toHaveLength(2);
+  expect(splits[0].name).toBe("Rakesh");
+  expect(splits[0].amount).toBe(100);
+  expect(splits[0].direction).toBe("owed");
+  expect(splits[0].settled).toBe(false);
+});

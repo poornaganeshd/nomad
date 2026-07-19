@@ -593,19 +593,21 @@ const terrainPathD = (pts) => {
   return d;
 };
 
-// Terrain hero: 30-day total-balance trail drawn as layered contour bands, with
-// the "where you stand" readout, burn-rate runway, and In/Out/Kept triad.
-// Blueprint-styled but themed entirely through NOMAD's CSS vars so light and
-// dark mode both work; numerals use --font-m (Martian Mono).
+// Terrain hero: 30-day total-balance trail drawn as layered contour bands
+// hanging from the top edge (inverted ridgeline — higher balance reaches
+// deeper), with the "where you stand" readout centered in the open ground
+// beneath it, burn-rate runway, and In/Out/Kept triad. Blueprint-styled but
+// themed entirely through NOMAD's CSS vars so light and dark mode both work;
+// numerals use --font-m (Martian Mono).
 function TerrainHero({ trail, balance, income, expense, runway: r }) {
   const n = trail.length;
   const bals = trail.map(p => p.bal);
   const lo = Math.min(...bals), hi = Math.max(...bals);
   const flat = hi - lo < 1;
-  const pts = trail.map((p, i) => ({ x: (i / Math.max(1, n - 1)) * 410, y: flat ? 196 : 140 + ((hi - p.bal) / (hi - lo)) * 100 }));
+  const pts = trail.map((p, i) => ({ x: (i / Math.max(1, n - 1)) * 410, y: flat ? 96 : 40 + ((p.bal - lo) / (hi - lo)) * 100 }));
   const lastY = pts[n - 1].y;
   const line = `${terrainPathD(pts)} L430,${lastY.toFixed(1)}`;
-  const area = `${line} L430,300 L0,300 Z`;
+  const area = `${line} L430,0 L0,0 Z`;
   const d30 = roundMoney(balance - trail[0].bal);
   const isNeg = balance < 0, abs = Math.abs(balance);
   const intPart = Math.floor(abs).toLocaleString("en-IN");
@@ -628,24 +630,24 @@ function TerrainHero({ trail, balance, income, expense, runway: r }) {
   else if (r.rate > 0) note = <>You're moving at <strong style={strongS}>{perDay(r.rate)}/day</strong> this week. Not enough history yet for a usual pace.</>;
   else note = <>No spending in the last 7 days — the ground holds.</>;
   return <div style={{ marginBottom: 4, textAlign: "left" }}>
+    <div style={{ display: "flex", justifyContent: "space-between", paddingBottom: 6, fontFamily: "var(--font-m)", fontSize: 8.5, letterSpacing: "0.14em", textTransform: "uppercase", color: "var(--muted)", opacity: 0.75 }}><span>30 days back</span><span>today</span></div>
     <div style={{ position: "relative", width: "100%", height: 260 }}>
       <svg viewBox="0 0 430 300" preserveAspectRatio="none" style={{ display: "block", width: "100%", height: "100%" }} aria-label={`Balance over the last 30 days, ending at ${fmt(balance)}`}>
         <path className="nm-band nm-b3" d={area} fill="var(--neg)" fillOpacity="0.10" />
-        <g transform="translate(0,20)"><path className="nm-band nm-b2" d={area} fill="var(--neg)" fillOpacity="0.16" /></g>
-        <g transform="translate(0,42)"><path className="nm-band nm-b1" d={area} fill="var(--neg)" fillOpacity="0.24" /></g>
+        <g transform="translate(0,-20)"><path className="nm-band nm-b2" d={area} fill="var(--neg)" fillOpacity="0.16" /></g>
+        <g transform="translate(0,-42)"><path className="nm-band nm-b1" d={area} fill="var(--neg)" fillOpacity="0.24" /></g>
         <path d={line} fill="none" stroke="var(--neg)" strokeOpacity="0.25" strokeWidth="1" />
-        <g transform="translate(0,20)"><path d={line} fill="none" stroke="var(--neg)" strokeOpacity="0.25" strokeWidth="1" /></g>
+        <g transform="translate(0,-20)"><path d={line} fill="none" stroke="var(--neg)" strokeOpacity="0.25" strokeWidth="1" /></g>
         <path className="nm-trail" d={line} fill="none" stroke="var(--text)" strokeWidth="2" strokeLinecap="round" />
         <line className="nm-pin" x1="0" y1={lastY} x2="410" y2={lastY} stroke="var(--neg)" strokeWidth="1" strokeDasharray="2 5" />
         <g className="nm-pin"><circle cx="410" cy={lastY} r="9" fill="var(--neg)" fillOpacity="0.2" /><circle cx="410" cy={lastY} r="4.5" fill="var(--neg)" stroke="var(--bg)" strokeWidth="2" /></g>
       </svg>
-      <div className="nm-read" style={{ position: "absolute", left: 0, top: 12, right: 0, pointerEvents: "none" }}>
+      <div className="nm-read" style={{ position: "absolute", left: 0, right: 0, bottom: 22, textAlign: "center", pointerEvents: "none" }}>
         <div style={{ fontFamily: "var(--font-m)", fontSize: 9, letterSpacing: "0.26em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 }}>Where you stand</div>
-        <div style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontWeight: 500, fontSize: 38, letterSpacing: "-0.06em", lineHeight: 1, display: "flex", alignItems: "baseline", color: "var(--text)" }}><span style={{ fontSize: 20, color: "var(--neg)", marginRight: 3, letterSpacing: 0 }}>{isNeg ? "−₹" : "₹"}</span>{intPart}<span style={{ fontSize: 17, color: "var(--muted)" }}>{decPart}</span></div>
+        <div style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontWeight: 500, fontSize: 38, letterSpacing: "-0.06em", lineHeight: 1, display: "flex", alignItems: "baseline", justifyContent: "center", color: "var(--text)" }}><span style={{ fontSize: 20, color: "var(--neg)", marginRight: 3, letterSpacing: 0 }}>{isNeg ? "−₹" : "₹"}</span>{intPart}<span style={{ fontSize: 17, color: "var(--muted)" }}>{decPart}</span></div>
         <div style={{ marginTop: 8, fontFamily: "var(--font-m)", fontSize: 10.5, letterSpacing: "0.02em", color: d30 > 0.5 ? "var(--pos)" : d30 < -0.5 ? "var(--neg)" : "var(--muted)" }}>{d30 > 0.5 ? `▲ ${fmt(Math.round(d30))} higher than 30 days ago` : d30 < -0.5 ? `▼ ${fmt(Math.round(-d30))} lower than 30 days ago` : "— level with 30 days ago"}</div>
       </div>
     </div>
-    <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 8, fontFamily: "var(--font-m)", fontSize: 8.5, letterSpacing: "0.14em", textTransform: "uppercase", color: "var(--muted)", opacity: 0.75 }}><span>30 days back</span><span>today</span></div>
     <div style={{ margin: "10px 0 0", borderTop: "1.5px solid var(--text)", borderBottom: "1px solid var(--border)", padding: "10px 0 10px" }}>
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 9 }}>
         <div style={{ fontFamily: "var(--font-m)", fontWeight: 500, fontSize: 15, letterSpacing: "-0.03em", color: "var(--text)" }}>{groundDays ? <><b style={{ color: "var(--neg)", fontWeight: 600 }}>{groundDays}</b> of ground ahead</> : <>Steady ground ahead</>}</div>
@@ -839,6 +841,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
     // against the single statement debit (you paid once, not N times).
     const validCount = itemsPreview.items.filter(it => roundMoney(Number(it.amount) || 0) > 0).length;
     const gid = validCount > 1 ? uid() : null;
+    let addedTotal = 0;
     itemsPreview.items.forEach(it => {
       const amount = roundMoney(Number(it.amount) || 0);
       if (amount <= 0) return;
@@ -848,9 +851,20 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       const itemNote = noteParts.join(" · ").slice(0, 120);
       const cid = it.categoryId || matchCatHint(it.category) || catId;
       const ok = oE({ id: uid(), amount, categoryId: cid, walletId: wid, date, note: itemNote, ...(gid ? { groupId: gid } : {}) }, { balanceDelta }) !== false;
-      if (ok) { added++; balanceDelta = roundMoney(balanceDelta - amount); }
+      if (ok) { added++; addedTotal = roundMoney(addedTotal + amount); balanceDelta = roundMoney(balanceDelta - amount); }
     });
-    showT(`Added ${added} of ${itemsPreview.items.length} line items`, "success");
+    // Split-with-friends applies to item batches too: one combined IOU per
+    // friend for the whole purchase (equal shares of what actually posted; odd
+    // paise land on you) — mirrors the Add Expense save path, not one-per-item.
+    let splitMsg = "";
+    if (added > 0 && splitOn && splitSel.length > 0) {
+      const shares = distributeAmount(addedTotal, splitSel.length + 1);
+      const splitNote = (note.trim() || itemsPreview.merchant || "Split purchase").slice(0, 120);
+      onAddSplits(splitSel.map((nm, i) => ({ id: uid(), name: nm, amount: shares[i + 1], direction: "owed", settled: false, eventId: null, groupId: null, note: splitNote, categoryId: catId, date, createdAt: new Date().toISOString() })));
+      splitMsg = ` · ${splitSel.length} IOU${splitSel.length === 1 ? "" : "s"} created`;
+      sSplitOn(false); sSplitSel([]); sSplitNew("");
+    }
+    showT(`Added ${added} of ${itemsPreview.items.length} line items${splitMsg}`, "success");
     sItemsPreview(null);
     receiptPickerRef.current?.clear();
   };
@@ -3507,7 +3521,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
 .day-selected{border-radius:14px;background:linear-gradient(90deg,rgba(224,122,95,0.10),rgba(107,170,117,0.06));box-shadow:0 0 6px 0 rgba(224,122,95,0.12),0 0 0 1.5px rgba(224,122,95,0.4);animation:daySelGlow 1.15s cubic-bezier(0.34,1.56,0.64,1)}
 .pe{animation:fi 0.3s ease-out}.pse{animation:fis 0.25s ease-out}
 @keyframes nmDraw{to{stroke-dashoffset:0}}
-@keyframes nmRise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes nmRise{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
 @keyframes nmPop{from{opacity:0;transform:scale(0.4)}to{opacity:1;transform:scale(1)}}
 @keyframes nmFadeIn{to{opacity:1}}
 .nm-trail{stroke-dasharray:1400;stroke-dashoffset:1400;animation:nmDraw 1.5s cubic-bezier(0.4,0,0.2,1) 0.15s forwards}
@@ -3552,7 +3566,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
       {tab === "dashboard" && <div className="pe">
         <TerrainHero trail={balTrail} balance={mBal} income={tI} expense={tE} runway={runway} />
         <div style={{ fontFamily: "var(--font-m)", fontSize: 9, letterSpacing: "0.26em", textTransform: "uppercase", color: "var(--muted)", margin: "12px 0 8px", textAlign: "left" }}>What you carry</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginBottom: 12 }}>{(() => { const tot = wallets.reduce((s, x) => s + Math.max(0, wBal[x.id] || 0), 0); return wallets.map(w => { const b = roundMoney(wBal[w.id] || 0); const share = tot > 0 && b > 0 ? Math.min(100, Math.round(b / tot * 100)) : 0; const v = walletVerify[w.id] || { state: "new" }; const cfg = { ok: { t: "✓ Verified", warn: false }, stale: { t: "Check", warn: true }, drift: { t: "Drift", warn: true }, new: { t: "Verify", warn: false } }[v.state]; const vTitle = v.state === "drift" ? `Last check was off by ${fmt(Math.abs(v.last.gap))} — tap to reconcile & find the missing entry` : v.state === "stale" ? `${v.newTx ? v.newTx + " new txn" + (v.newTx === 1 ? "" : "s") : v.days + "d"} ${v.last ? "since last verified" : "logged — never verified"} — tap to reconcile` : v.state === "ok" ? `Verified ${v.last.date}` : "Never verified — tap to set your real balance"; return <div key={w.id} onClick={() => { hapticLight(); sCalW(w); }} title={vTitle} className="card-hover" style={{ position: "relative", borderRadius: 13, padding: "12px 11px 11px", display: "flex", flexDirection: "column", cursor: "pointer", overflow: "hidden", textAlign: "left", background: dm ? "rgba(255,255,255,0.055)" : "rgba(255,255,255,0.5)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: `1px solid ${dm ? "rgba(255,255,255,0.09)" : "rgba(255,255,255,0.75)"}`, borderLeft: `3px solid ${w.color}`, boxShadow: dm ? "0 8px 20px -14px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.06)" : "0 8px 20px -14px rgba(26,26,46,0.25), inset 0 1px 0 rgba(255,255,255,0.8)" }}><div style={{ position: "relative", zIndex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}><div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flex: "0 0 auto" }}><span style={{ width: 22, height: 16, borderRadius: 4, background: `${w.color}26`, border: `1px solid ${w.color}40`, display: "flex", alignItems: "center", justifyContent: "center" }}><DI2 id={w.id} accent={w.color} size={10} /></span>{w.id === "cash" && <button onClick={e => { e.stopPropagation(); sRecountW(w); }} title="Count cash" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12, padding: "0 2px", lineHeight: 1 }}>⟳</button>}</div><div style={{ marginTop: 16, minWidth: 0 }}><div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 9.5, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.name}</div><div style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontSize: 12.5, fontWeight: 500, letterSpacing: "-0.06em", color: "var(--text)", marginBottom: 9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(b < 0 ? "−" : "") + fmt(Math.abs(b))}</div></div><div style={{ height: 4, borderRadius: 2, flex: "0 0 auto", background: "var(--border)", overflow: "hidden" }}><div style={{ display: "block", height: "100%", width: `${Math.max(share, b > 0 ? 1 : 0)}%`, background: w.color, borderRadius: 2 }} /></div><div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 7, fontFamily: "var(--font-m)", fontSize: 8, letterSpacing: "0.06em", textTransform: "uppercase", flex: "0 0 auto" }}><span style={{ color: cfg.warn ? "var(--warn)" : "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: cfg.warn ? 600 : 500 }}>{cfg.t}</span><b style={{ fontWeight: 500, color: "var(--ts)", flexShrink: 0, marginLeft: 4 }}>{share}%</b></div></div></div>; }); })()}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginBottom: 12 }}>{(() => { const tot = wallets.reduce((s, x) => s + Math.max(0, wBal[x.id] || 0), 0); return wallets.map(w => { const b = roundMoney(wBal[w.id] || 0); const share = tot > 0 && b > 0 ? Math.min(100, Math.round(b / tot * 100)) : 0; const v = walletVerify[w.id] || { state: "new" }; const cfg = { ok: { t: "✓ Verified", warn: false }, stale: { t: "Check", warn: true }, drift: { t: "Drift", warn: true }, new: { t: "Verify", warn: false } }[v.state]; const vTitle = v.state === "drift" ? `Last check was off by ${fmt(Math.abs(v.last.gap))} — tap to reconcile & find the missing entry` : v.state === "stale" ? `${v.newTx ? v.newTx + " new txn" + (v.newTx === 1 ? "" : "s") : v.days + "d"} ${v.last ? "since last verified" : "logged — never verified"} — tap to reconcile` : v.state === "ok" ? `Verified ${v.last.date}` : "Never verified — tap to set your real balance"; return <div key={w.id} onClick={() => { hapticLight(); sCalW(w); }} title={vTitle} className="card-hover" style={{ position: "relative", borderRadius: 16, padding: "13px 8px 11px", display: "flex", flexDirection: "column", alignItems: "center", cursor: "pointer", overflow: "hidden", textAlign: "center", background: dm ? "rgba(255,255,255,0.055)" : "rgba(255,255,255,0.5)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: `1px solid ${dm ? "rgba(255,255,255,0.09)" : "rgba(255,255,255,0.75)"}`, boxShadow: dm ? "0 8px 20px -14px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.06)" : "0 8px 20px -14px rgba(26,26,46,0.25), inset 0 1px 0 rgba(255,255,255,0.8)" }}>{w.id === "cash" && <button onClick={e => { e.stopPropagation(); sRecountW(w); }} title="Count cash" style={{ position: "absolute", top: 6, right: 7, background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12, padding: 2, lineHeight: 1, zIndex: 2 }}>⟳</button>}<div style={{ position: "relative", width: 46, height: 46, marginBottom: 8 }}><svg width="46" height="46" viewBox="0 0 46 46" style={{ display: "block", transform: "rotate(-90deg)" }} aria-hidden="true"><circle cx="23" cy="23" r="19.5" fill="none" stroke="var(--border)" strokeWidth="3" />{(share > 0 || b > 0) && <circle cx="23" cy="23" r="19.5" fill="none" stroke={w.color} strokeWidth="3" strokeLinecap="round" strokeDasharray={`${(Math.max(share, 2) / 100) * 122.5} 122.5`} />}</svg><div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}><DI2 id={w.id} accent={w.color} size={15} /></div></div><div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 3, maxWidth: "100%", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.name}</div><div style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontSize: 13, fontWeight: 500, letterSpacing: "-0.05em", color: "var(--text)", marginBottom: 6, maxWidth: "100%", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(b < 0 ? "−" : "") + fmt(Math.abs(b))}</div><div style={{ fontFamily: "var(--font-m)", fontSize: 7.5, letterSpacing: "0.08em", textTransform: "uppercase", color: cfg.warn ? "var(--warn)" : "var(--muted)", fontWeight: cfg.warn ? 600 : 500, maxWidth: "100%", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cfg.t} · {share}%</div></div>; }); })()}</div>
         {(() => {
           const tod = new Date(), todS = localDateKey(tod), snoozed = (() => { try { return JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); } catch { return {}; } })(), due = rec.filter(r => isRecurringDueToday(r, todS) && !(snoozed[r.id] && snoozed[r.id] > todS));
           // Pay a due bill from the chosen wallet (the per-cycle override). The
