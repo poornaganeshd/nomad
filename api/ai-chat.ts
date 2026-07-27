@@ -40,6 +40,23 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { callText, AiProviderError, configuredProviderCount } from "./_ai-provider.js";
 
+// Grounded mode: the client already ran a deterministic query over its full
+// ledger and computed every figure. The model's only job is to phrase it. This
+// is what stopped "how much on eggs" from returning the whole food category
+// with a total that matched none of the listed rows.
+const GROUNDED_SYSTEM_PROMPT = `You are NOMAD's personal finance analyst for an Indian user tracking money in INR (₹).
+
+The message contains a QUERY RESULT computed directly from the user's ledger by the app. It is AUTHORITATIVE and COMPLETE for what was asked.
+
+Absolute rules:
+- Use the given TOTAL, COUNT, AVERAGE, SMALLEST, LARGEST and SPAN verbatim. NEVER recompute, re-add, adjust or round them differently.
+- List ONLY rows from MATCHED ROWS. Never add, invent, merge or substitute a transaction.
+- If the count is 0, say plainly that nothing matched, name the window that was searched, and stop. Do not offer substitute rows.
+- Lead with a one-sentence answer that states the total and the window. Then, if there are rows worth showing, list them — ONE per line in EXACTLY this pipe format: "YYYY-MM-DD | amount | category | note" (four fields, "|" separated, no wallet, no bullet). The app renders these as a table, so never wrap, re-order or merge the fields. Max 15 rows, then the "…and N more totalling ₹X" line if the result says so.
+- If a BREAKDOWN is given and the question asked for one, present it instead of (or before) the row list.
+- Keep prose to 1-3 short sentences. Do not narrate your filtering. Use **bold** for key numbers, ₹ with Indian digit grouping (₹1,24,500).
+- One short, specific follow-up observation or tip tied to these numbers is welcome. No generic platitudes.`;
+
 const SYSTEM_PROMPT = `You are NOMAD's personal finance analyst for an Indian user tracking money in INR (₹).
 Every message includes the user's ACTUAL transaction rows (all-time, newest first) plus summaries. You are expected to compute answers from those rows — filter by date range, wallet, category, amount threshold, or keyword; sum, count, average and compare. Never say you lack data when matching rows exist; if a question falls outside the covered date range, say exactly what range you do have.
 
@@ -74,6 +91,14 @@ interface ChatContext {
   iou?:            { owedToMe?: number; iOwe?: number };
   recurringCount?: number;
   streak?:         number;
+  /**
+   * Pre-computed query result from src/chatQuery.js (see GROUNDED_SYSTEM_PROMPT).
+   * When present the model phrases these figures instead of filtering rows
+   * itself, and the raw expense/income dumps are omitted from the prompt.
+   */
+  queryFacts?:     string;
+  /** One-line restatement of what the query fetched, for the model's opener. */
+  queryRestate?:   string;
   // legacy fields — the lion mascot one-liner still posts this shape
   totalIncome?:    number;
   totalExpense?:   number;
@@ -90,10 +115,30 @@ const rupee = (n: number) => `₹${Math.round(n)}`;
 // columns/rows and corrupt the model's parsing.
 const cell = (v: unknown) => String(v ?? "").replace(/[|\r\n]+/g, " ").trim();
 
+/** True when the client computed the answer and only wants it phrased. */
+function isGrounded(ctx: ChatContext): boolean {
+  return typeof ctx.queryFacts === "string" && ctx.queryFacts.trim().length > 0;
+}
+
 function buildPrompt(question: string, ctx: ChatContext): string {
   const today = ctx.today || new Date().toISOString().slice(0, 10);
   const month = ctx.month || today.slice(0, 7);
   const sections: string[] = [`TODAY: ${today} (current month ${month})`];
+
+  // Grounded path: the query result replaces the raw ledger dump entirely.
+  // Keeping both would invite the model to "check" the totals against a
+  // truncated row list and talk itself out of the correct number.
+  if (isGrounded(ctx)) {
+    if (ctx.queryRestate) sections.push(`The user is asking about: ${ctx.queryRestate}`);
+    sections.push(String(ctx.queryFacts));
+    const wallets = ctx.walletBalances || [];
+    if (wallets.length) sections.push(`WALLET BALANCES (context only):\n${wallets.map(w => `  ${w.name}: ${rupee(w.balance)}`).join("\n")}`);
+    if (ctx.monthIncome != null || ctx.monthExpense != null) {
+      const mi = ctx.monthIncome || 0, me = ctx.monthExpense || 0;
+      sections.push(`THIS MONTH (context only, ${month}): income ${rupee(mi)}, expenses ${rupee(me)}`);
+    }
+    return `${sections.join("\n\n")}\n\nUser question: ${question.trim()}`;
+  }
 
   const wallets = ctx.walletBalances || [];
   if (wallets.length) sections.push(`WALLET BALANCES:\n${wallets.map(w => `  ${w.name}: ${rupee(w.balance)}`).join("\n")}`);
@@ -172,7 +217,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // covers the largest allowed answer with headroom. The 500-row prompt
     // also needs more than the default 15s generation budget — but stay at
     // 20s/attempt so a 3-provider waterfall still fits Vercel's 60s cap.
-    const raw = await callText(prompt, SYSTEM_PROMPT, { maxTokens: 1600, timeoutMs: 20_000 });
+    const raw = await callText(prompt, isGrounded(context) ? GROUNDED_SYSTEM_PROMPT : SYSTEM_PROMPT, { maxTokens: 1600, timeoutMs: 20_000 });
     return res.status(200).json({ answer: raw.trim() });
 
   } catch (err) {

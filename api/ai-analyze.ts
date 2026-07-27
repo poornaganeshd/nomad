@@ -24,6 +24,10 @@
  *   statement-parse    Raw bank/UPI statement TEXT (extracted on-device from a
  *                      PDF/CSV) → structured transaction rows. Provider-neutral
  *                      replacement for Gemini-only vision OCR.
+ *   chat-query         Ask-NOMAD question → a structured QUERY SPEC (filters +
+ *                      date window). The CLIENT runs the spec over its own full
+ *                      ledger (src/chatQuery.js) and computes every number, so
+ *                      the model never does the arithmetic.
  *
  * All callers should redact PII with src/redactor.js before sending.
  */
@@ -47,7 +51,8 @@ type Mode =
   | "smart-reminders"
   | "goal-coach"
   | "reconcile"
-  | "statement-parse";
+  | "statement-parse"
+  | "chat-query";
 
 interface Wallet   { id: string; name: string; }
 interface Category { id: string; name: string; }
@@ -431,6 +436,57 @@ Split this note into line items.`;
     validate: (p) => Boolean(p && typeof p === "object" && Array.isArray((p as Record<string, unknown>).items)),
   },
 
+  "chat-query": {
+    systemPrompt: `You translate a personal-finance question into a QUERY SPEC. You do NOT answer the question and you NEVER do arithmetic — an app runs your spec over the user's complete ledger and computes the numbers itself.
+Return ONLY valid JSON:
+{
+  "needsData": true,
+  "type": "expense",
+  "keywords": ["egg"],
+  "keywordMode": "any",
+  "categories": [],
+  "wallets": [],
+  "sources": [],
+  "minAmount": null,
+  "maxAmount": null,
+  "range": { "preset": "all", "days": null, "month": null, "from": null, "to": null },
+  "groupBy": "none",
+  "sort": "date_desc",
+  "restate": "everything you spent on eggs, all time"
+}
+
+Rules:
+- needsData: false ONLY for questions that need no transaction lookup (general advice, "how do I budget", "what is an SIP", greetings). Anything asking what/how much/when/where the user spent, earned, or paid is true.
+- type: "expense" | "income" | "both".
+- keywords: the SPECIFIC thing being asked about — an item, merchant or person as it would appear in a transaction note ("eggs" → ["egg"], "how much on Swiggy" → ["swiggy"]). Use the singular root; the app handles plurals. Leave EMPTY when the question is about a whole category, a wallet, or a period rather than a particular thing ("how much did I spend last month" → []).
+- keywordMode: "any" (default) or "all" when the question demands every term.
+- categories / wallets / sources: ONLY names copied EXACTLY from the lists provided below. Never invent one. Use them when the question names a category ("food"), a wallet ("from cash"), or an income source. If a keyword already covers it, leave these empty.
+- minAmount / maxAmount: numbers for "over ₹500", "under ₹100", "between X and Y". Otherwise null.
+- range.preset ∈ all | today | yesterday | this_week | this_month | last_month | this_year | last_year | last_n_days | month | custom.
+  "so far" / "ever" / "total" / no time words → "all". "last 3 months" → last_n_days with days 90. A named month ("in June") → "month" with month "YYYY-MM" (pick the most recent past occurrence relative to TODAY). Explicit dates → "custom" with from/to.
+- groupBy ∈ none | category | wallet | source | month | day — set it when the question asks for a breakdown or comparison ("by category", "which wallet", "month by month").
+- sort ∈ date_desc | date_asc | amount_desc | amount_asc. Use amount_desc for "biggest"/"most expensive".
+- restate: one short phrase describing what the spec fetches, in the user's own terms.
+- Be PRECISE about keywords: they are matched as whole words against transaction notes. A question about eggs must not become a query for the entire food category.`,
+    buildUser: (b) => {
+      const question   = String(b.question || "").slice(0, 500);
+      const today      = String(b.today || "");
+      const categories = ((b.categories as Category[]) || []).map(c => c.name).filter(Boolean);
+      const wallets    = ((b.wallets    as Wallet[])    || []).map(w => w.name).filter(Boolean);
+      const sources    = ((b.sources    as { name?: string }[]) || []).map(s => s.name).filter(Boolean);
+      return `TODAY: ${today}
+
+Category names: ${categories.join(", ") || "(none)"}
+Wallet names: ${wallets.join(", ") || "(none)"}
+Income source names: ${sources.join(", ") || "(none)"}
+
+Question: "${question}"
+
+Return the query spec as JSON.`;
+    },
+    validate: (p) => Boolean(p && typeof p === "object"),
+  },
+
   "smart-reminders": {
     systemPrompt: `You generate predictive reminders based on a user's logging history.
 Return ONLY valid JSON:
@@ -588,6 +644,53 @@ function sanitize(mode: Mode, parsed: Record<string, unknown>, body: Record<stri
       type:       validTypes.has(String(parsed.type)) ? parsed.type : "expense",
       walletId:   walletIds.has(String(parsed.walletId))   ? parsed.walletId   : null,
       categoryId: catIds.has(String(parsed.categoryId))     ? parsed.categoryId : null,
+    };
+  }
+  if (mode === "chat-query") {
+    // Names that aren't in the user's ledger are DROPPED, not passed through: a
+    // hallucinated "Groceries" category filter would return zero rows and read
+    // to the user as "you never spent on that". The client sanitizes again
+    // (src/chatQuery.js) — this is the server half of the same contract.
+    const lower = (v: unknown) => String(v ?? "").trim().toLowerCase();
+    const pickKnown = (list: unknown, allowed: string[]) => {
+      const set = new Set(allowed.map(lower));
+      return (Array.isArray(list) ? list : [])
+        .map(x => String(x ?? "").trim())
+        .filter(x => x && set.has(lower(x)))
+        .slice(0, 10);
+    };
+    const posNum = (v: unknown) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const categories = ((body.categories as Category[]) || []).map(c => c.name).filter(Boolean);
+    const wallets    = ((body.wallets    as Wallet[])    || []).map(w => w.name).filter(Boolean);
+    const sources    = ((body.sources    as { name?: string }[]) || []).map(s => String(s?.name || "")).filter(Boolean);
+    const presets = ["all", "today", "yesterday", "this_week", "this_month", "last_month", "this_year", "last_year", "last_n_days", "month", "custom"];
+    const rawRange = (parsed.range && typeof parsed.range === "object" ? parsed.range : {}) as Record<string, unknown>;
+    return {
+      needsData: parsed.needsData !== false,
+      type: ["expense", "income", "both"].includes(String(parsed.type)) ? String(parsed.type) : "expense",
+      keywords: (Array.isArray(parsed.keywords) ? parsed.keywords : [])
+        .map((k: unknown) => String(k ?? "").trim())
+        .filter((k: string) => k.length > 1)
+        .slice(0, 8),
+      keywordMode: parsed.keywordMode === "all" ? "all" : "any",
+      categories: pickKnown(parsed.categories, categories),
+      wallets:    pickKnown(parsed.wallets, wallets),
+      sources:    pickKnown(parsed.sources, sources),
+      minAmount: posNum(parsed.minAmount),
+      maxAmount: posNum(parsed.maxAmount),
+      range: {
+        preset: presets.includes(String(rawRange.preset)) ? String(rawRange.preset) : "all",
+        days:   posNum(rawRange.days),
+        month:  /^\d{4}-\d{2}$/.test(String(rawRange.month)) ? String(rawRange.month) : null,
+        from:   /^\d{4}-\d{2}-\d{2}$/.test(String(rawRange.from)) ? String(rawRange.from) : null,
+        to:     /^\d{4}-\d{2}-\d{2}$/.test(String(rawRange.to)) ? String(rawRange.to) : null,
+      },
+      groupBy: ["category", "wallet", "source", "month", "day"].includes(String(parsed.groupBy)) ? String(parsed.groupBy) : "none",
+      sort: ["date_desc", "date_asc", "amount_desc", "amount_asc"].includes(String(parsed.sort)) ? String(parsed.sort) : "date_desc",
+      restate: String(parsed.restate ?? "").slice(0, 200),
     };
   }
   if (mode === "anomaly") {

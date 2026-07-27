@@ -67,10 +67,56 @@ function getProviders(): Provider[] {
 }
 
 /**
+ * Repair JSON that was cut off mid-output because the model hit its token cap.
+ *
+ * A truncated response (long grocery receipt, 60-row statement) ends somewhere
+ * inside an array/object, so JSON.parse throws and the whole scan is lost even
+ * though every element before the cut is perfectly good. This walks the text
+ * tracking string/escape state, remembers the last position where a value was
+ * cleanly terminated (a closing bracket, or a comma between elements), then
+ * drops the partial tail and closes the still-open containers.
+ *
+ * Returns null when the text is NOT a truncation (brackets already balanced —
+ * that's a genuinely malformed response, and silently "repairing" it would
+ * hide the real problem).
+ */
+export function repairTruncatedJSON(src: string): string | null {
+  const stack: string[] = [];
+  let inStr = false, esc = false;
+  let cut = -1;          // slice end of the last cleanly-terminated value
+  let closers = "";      // what still needs closing at that point
+  const snapshot = () => [...stack].reverse().join("");
+
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === "{" || c === "[") stack.push(c === "{" ? "}" : "]");
+    else if (c === "}" || c === "]") {
+      if (stack.pop() !== c) return null;   // mismatched — not a clean truncation
+      // Closing the outermost container means the value ended normally.
+      if (stack.length > 0) { cut = i + 1; closers = snapshot(); }
+    } else if (c === "," && stack.length > 0) {
+      cut = i; closers = snapshot();        // element boundary — drop the comma
+    }
+  }
+
+  if (stack.length === 0) return null;      // balanced: not a truncation problem
+  if (cut < 0) return null;                 // nothing complete to salvage
+  return src.slice(0, cut) + closers;
+}
+
+/**
  * Strip markdown code fences and extract the first JSON object/array from text.
  * Handles:
  *   - Leading/trailing ``` fences
  *   - JSON embedded mid-text (extracts first {...} or [...] block)
+ *   - Output truncated by the token cap (salvaged via repairTruncatedJSON)
  * Throws on invalid JSON.
  */
 export function extractJSON<T>(text: string): T {
@@ -86,7 +132,15 @@ export function extractJSON<T>(text: string): T {
     if (match) cleaned = match[1];
   }
 
-  return JSON.parse(cleaned) as T;
+  try {
+    return JSON.parse(cleaned) as T;
+  } catch (err) {
+    // Third try: the response ran out of tokens mid-array. Salvage the
+    // complete elements rather than throwing away the whole scan.
+    const repaired = repairTruncatedJSON(cleaned);
+    if (repaired === null) throw err;
+    return JSON.parse(repaired) as T;
+  }
 }
 
 /** Build an OpenAI-compatible request body for a text-only prompt. */

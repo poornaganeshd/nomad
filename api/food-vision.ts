@@ -121,6 +121,15 @@ Rules:
 
 const RECEIPT_ITEMS_USER_PROMPT = "Extract each line item with quantity, amount, and a short category hint.";
 
+// Token budget per request type. Modes that return an ARRAY need far more than
+// the 1024 default — a truncated array is unparseable JSON, which is exactly
+// what "AI returned non-JSON response" meant on long grocery receipts.
+const LIST_MODE_MAX_TOKENS: Record<string, number> = {
+  "receipt-items": 4096,
+  "statement":     4096,
+  "ledger":        3072,
+};
+
 const LEDGER_SYSTEM_PROMPT = `You are an OCR assistant that extracts transactions from a photo of a handwritten or printed personal ledger / expense book.
 Return ONLY valid JSON with no markdown fences:
 {
@@ -359,11 +368,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
                                "food-vision";
 
   try {
-    // A monthly statement is far longer than a receipt — 1024 tokens truncates
-    // the JSON mid-array. 4096 covers 60 rows comfortably.
+    // Any list-shaped result blows past the 1024 default and gets cut off
+    // mid-array (a supermarket receipt with 30 lines, a 60-row statement, a
+    // page of ledger entries) — which surfaced as "AI returned non-JSON
+    // response" because the truncated JSON can't parse. Give every list mode
+    // room; single-value modes (receipt header, food nutrition) stay at the
+    // default. extractJSON also salvages a truncated array as a backstop.
     const { content: raw, provider } = await callVisionWithProvider(
       imageBase64, mimeType, userPrompt, systemPrompt,
-      type === "statement" ? { maxTokens: 4096 } : {},
+      LIST_MODE_MAX_TOKENS[type] ? { maxTokens: LIST_MODE_MAX_TOKENS[type] } : {},
     );
 
     let parsed: unknown;

@@ -101,11 +101,11 @@ describe('checkBillReminders — recurring bills', () => {
 // checkBillReminders — settlement splits
 // ---------------------------------------------------------------------------
 describe('checkBillReminders — settlements', () => {
-  it('reminds about unsettled "owe" splits', () => {
+  it('reminds about unsettled "owe" splits, keyed per person', () => {
     const s = { id: 's1', direction: 'owe', settled: false, amount: 500, name: 'Lunch with Raj' };
     const result = checkBillReminders([], [s], '2024-04-15', noDue, notDueToday);
     expect(result).toHaveLength(1);
-    expect(result[0]).toMatchObject({ id: 'stl-s1', type: 'warn' });
+    expect(result[0]).toMatchObject({ id: 'owe-lunch with raj', type: 'warn' });
     expect(result[0].msg).toContain('₹500');
     expect(result[0].msg).toContain('Lunch with Raj');
   });
@@ -122,10 +122,65 @@ describe('checkBillReminders — settlements', () => {
     expect(result).toHaveLength(0);
   });
 
+  it('skips written-off (skipped) and soft-deleted splits', () => {
+    const splits = [
+      { id: 'k1', direction: 'owe', settled: true, skipped: true, amount: 90, name: 'Written off' },
+      { id: 'k2', direction: 'owe', settled: false, amount: 40, name: 'Deleted', deleted_at: '2024-04-14T00:00:00Z' },
+    ];
+    expect(checkBillReminders([], splits, '2024-04-15', noDue, notDueToday)).toHaveLength(0);
+  });
+
   it('combines recurring and settlement reminders', () => {
     const r = makeRec({ id: 'r10' });
     const s = { id: 's10', direction: 'owe', settled: false, amount: 100, name: 'Test' };
     const result = checkBillReminders([r], [s], '2024-04-15', noDue, isDueToday);
     expect(result).toHaveLength(2);
+  });
+
+  // The bug behind the stacked "You owe ₹15 / ₹10 / ₹92.5 — Rakesh" chips: one
+  // toast per split, each quoting the ORIGINAL amount.
+  it('aggregates several IOUs with the same person into one reminder', () => {
+    const splits = [
+      { id: 'a', direction: 'owe', settled: false, amount: 15, name: 'Rakesh' },
+      { id: 'b', direction: 'owe', settled: false, amount: 10, name: 'rakesh' },
+      { id: 'c', direction: 'owe', settled: false, amount: 92.5, name: 'Rakesh' },
+    ];
+    const result = checkBillReminders([], splits, '2024-04-15', noDue, notDueToday);
+    expect(result).toHaveLength(1);
+    expect(result[0].msg).toBe('You owe ₹117.5 — Rakesh (3 IOUs)');
+  });
+
+  it('reminds on the REMAINING balance after partial settlements', () => {
+    const splits = [{ id: 'a', direction: 'owe', settled: false, amount: 300, name: 'Rakesh' }];
+    const settlements = [{ splitId: 'a', amount: 240 }];
+    const result = checkBillReminders([], splits, '2024-04-15', noDue, notDueToday, settlements);
+    expect(result[0].msg).toBe('You owe ₹60 — Rakesh');
+  });
+
+  it('ignores overpay excess when computing the remainder', () => {
+    const splits = [{ id: 'a', direction: 'owe', settled: false, amount: 100, name: 'Raj' }];
+    const settlements = [{ splitId: 'a', amount: 40, excess: 10 }];
+    const result = checkBillReminders([], splits, '2024-04-15', noDue, notDueToday, settlements);
+    expect(result[0].msg).toBe('You owe ₹70 — Raj');
+  });
+
+  it('drops a person whose IOUs are fully covered by settlements', () => {
+    const splits = [{ id: 'a', direction: 'owe', settled: false, amount: 300, name: 'Rakesh' }];
+    const settlements = [{ splitId: 'a', amount: 300 }];
+    expect(checkBillReminders([], splits, '2024-04-15', noDue, notDueToday, settlements)).toHaveLength(0);
+  });
+
+  it('sorts people by outstanding balance, biggest first', () => {
+    const splits = [
+      { id: 'a', direction: 'owe', settled: false, amount: 20, name: 'Small' },
+      { id: 'b', direction: 'owe', settled: false, amount: 900, name: 'Big' },
+    ];
+    const result = checkBillReminders([], splits, '2024-04-15', noDue, notDueToday);
+    expect(result.map(r => r.msg)).toEqual(['You owe ₹900 — Big', 'You owe ₹20 — Small']);
+  });
+
+  it('ignores an unnamed IOU rather than emitting a blank reminder', () => {
+    const splits = [{ id: 'a', direction: 'owe', settled: false, amount: 50, name: '  ' }];
+    expect(checkBillReminders([], splits, '2024-04-15', noDue, notDueToday)).toHaveLength(0);
   });
 });

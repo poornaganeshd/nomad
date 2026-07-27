@@ -56,6 +56,68 @@ describe('extractJSON', () => {
     const result = extractJSON<{ a: { b: number } }>('{"a":{"b":99}}');
     expect(result.a.b).toBe(99);
   });
+
+  // A long grocery receipt runs past the token cap and the response stops
+  // mid-array. Everything before the cut is good data — salvage it instead of
+  // throwing the whole scan away with "AI returned non-JSON response".
+  it('salvages an array truncated mid-element', async () => {
+    const { extractJSON } = await import('../_ai-provider.js');
+    const raw = '{"merchant":"Sanjana Super Market","total":257.75,"currency":"INR","items":[{"name":"Rice 5kg","qty":1,"amount":310,"category":"Groceries"},{"name":"Toma';
+    const result = extractJSON<{ merchant: string; items: { name: string }[] }>(raw);
+    expect(result.merchant).toBe('Sanjana Super Market');
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].name).toBe('Rice 5kg');
+  });
+
+  it('salvages an object truncated after a scalar field', async () => {
+    const { extractJSON } = await import('../_ai-provider.js');
+    const result = extractJSON<{ a: number; b: number }>('{"a":1,"b":2,"c":');
+    expect(result).toEqual({ a: 1, b: 2 });
+  });
+
+  it('salvages a top-level array truncated mid-element', async () => {
+    const { extractJSON } = await import('../_ai-provider.js');
+    const result = extractJSON<{ n: number }[]>('[{"n":1},{"n":2},{"n"');
+    expect(result).toEqual([{ n: 1 }, { n: 2 }]);
+  });
+
+  it('still throws on malformed (not truncated) JSON', async () => {
+    const { extractJSON } = await import('../_ai-provider.js');
+    expect(() => extractJSON('{"a":1,,}')).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// repairTruncatedJSON — only rescues genuine truncation
+// ---------------------------------------------------------------------------
+describe('repairTruncatedJSON', () => {
+  it('returns null for already-balanced JSON', async () => {
+    const { repairTruncatedJSON } = await import('../_ai-provider.js');
+    expect(repairTruncatedJSON('{"a":1}')).toBeNull();
+  });
+
+  it('returns null when nothing complete precedes the cut', async () => {
+    const { repairTruncatedJSON } = await import('../_ai-provider.js');
+    expect(repairTruncatedJSON('{"items":[{"name":"Cok')).toBeNull();
+  });
+
+  it('returns null on mismatched brackets', async () => {
+    const { repairTruncatedJSON } = await import('../_ai-provider.js');
+    expect(repairTruncatedJSON('{"a":[1,2}')).toBeNull();
+  });
+
+  it('ignores brackets and commas inside strings', async () => {
+    const { repairTruncatedJSON } = await import('../_ai-provider.js');
+    const repaired = repairTruncatedJSON('{"rows":[{"note":"Tea, [2 cups]"},{"note":"Bu');
+    expect(repaired).not.toBeNull();
+    expect(JSON.parse(repaired as string)).toEqual({ rows: [{ note: 'Tea, [2 cups]' }] });
+  });
+
+  it('ignores an escaped quote inside a string', async () => {
+    const { repairTruncatedJSON } = await import('../_ai-provider.js');
+    const repaired = repairTruncatedJSON('{"rows":[{"note":"5\\" pipe"},{"note":"x');
+    expect(JSON.parse(repaired as string)).toEqual({ rows: [{ note: '5" pipe' }] });
+  });
 });
 
 // ---------------------------------------------------------------------------

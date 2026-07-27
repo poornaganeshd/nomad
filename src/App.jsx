@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo, useRef, useCallback, memo, Fragment, lazy, Suspense } from "react";
-import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning, Wallet, Target, Lightning, Envelope, Fire, Sparkle, Lightbulb, ClipboardText, Timer, HandWaving, BellSlash, Robot, Receipt, FilePdf, Trash, Moon, Sun, Scales, Gear, PushPin, Hash, Microphone, CheckCircle, ArrowsLeftRight, CaretLeft, Users, ArrowRight, ArrowUpRight, ArrowDownLeft, ShareNetwork, Compass, Paperclip, PaperPlaneTilt, CopySimple } from "@phosphor-icons/react";
+import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning, Wallet, Target, Lightning, Envelope, Sparkle, Lightbulb, ClipboardText, Timer, HandWaving, Robot, Receipt, FilePdf, Trash, Moon, Sun, Scales, Gear, PushPin, Hash, Microphone, CheckCircle, ArrowsLeftRight, CaretLeft, Users, ArrowRight, ArrowUpRight, ArrowDownLeft, ShareNetwork, Compass, Paperclip, PaperPlaneTilt, CopySimple, Bell, BellSimple, BellRinging, Snowflake, FireSimple, CalendarCheck, HandCoins, CloudWarning, ChartLineUp } from "@phosphor-icons/react";
 import { IconCheck, IconHistory, IconChevronRight, IconChevronLeft, IconSend, IconAlertTriangle, IconX, IconClock, IconArrowDown, IconArrowUp, IconPlus, IconPlayerSkipForward, IconPencil } from "@tabler/icons-react";
 import { flushSyncQueue, getPendingSyncCount, getPendingSyncSummary, getDeadLetterCount, clearDeadLetter, sendSupabaseRequest, subscribePendingSync, subscribeSyncDrops, isPendingDelete, isPendingUpsert, hasPendingDedupeKey } from "./offlineSync";
 import { checkBillReminders } from "./billReminders";
+import { NOTIFY_KINDS, getNotifications, pushNotifications, markAllRead, dismissNotification, clearNotifications, unreadCount, relTime } from "./notifications";
 import { getNtfyConfig, saveNtfyConfig, isNtfyConfigured, publishNtfy } from "./ntfy";
 import { isPushSupported, getCurrentSubscription, subscribeDevice, unsubscribeDevice, sendTestPush } from "./webpush";
 import { computeStreak, loadStreakStore, saveStreakStore } from "./streak";
@@ -23,6 +24,7 @@ import {
 import { parseAmount, parseVoiceTx, parseBankCsv, parseUpiStatement, htmlStatementToText } from "./txParsers";
 import { extractPdfText, looksLikeText } from "./pdfText";
 import { renderChatHtml } from "./chatFormat";
+import { buildQueryRows, runQuery, formatQueryFacts, sanitizeQuerySpec, isEmptySpec } from "./chatQuery";
 import { buildLedger, reconcile, statementClosingBalance, loadImportedRefs, saveImportedRefs } from "./bankReconcile";
 import { useLockBodyScroll } from "./scrollLock";
 
@@ -805,7 +807,10 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
         if (res.d.currency) merged.currency = res.d.currency;
         merged.items.push(...res.d.items);
       });
-      if (merged.items.length === 0) { showT(failures.length ? `OCR failed: ${failures[0]}` : "No line items found", failures.length ? "error" : "info"); return; }
+      // The API's error strings are already full sentences ("AI returned
+      // non-JSON response. Try again or enter manually.") — prefixing them with
+      // "OCR failed:" produced a double-headed toast too long to read on a phone.
+      if (merged.items.length === 0) { showT(failures.length ? failures[0] : "No line items found", failures.length ? "error" : "info"); return; }
       // Pre-resolve each item to a real categoryId so the preview can render an
       // editable select bound to a stable id (rather than the free-text AI hint).
       merged.items = merged.items.map(it => ({ ...it, categoryId: matchCatHint(it.category) }));
@@ -1890,7 +1895,7 @@ export default function Nomad() {
   useEffect(() => subscribeSyncDrops((info) => {
     if (info.kind === "storage") { showT("Storage full — clear some data or export and reset", "error"); return; }
     if (info.kind === "conflict") { showT("Sync conflict — a newer version exists; local change discarded", "error"); return; }
-    if (info.kind === "dead-letter") { sDeadLetterCount(getDeadLetterCount()); sDlBanner(true); showT("Change failed after 3 retries — moved to failed queue (see Sync Status)", "error"); return; }
+    if (info.kind === "dead-letter") { sDeadLetterCount(getDeadLetterCount()); sDlBanner(true); showT("Change failed after 3 retries — moved to failed queue (see Sync Status)", "error"); sNotifs(pushNotifications([{ id: `sync-dead-${localDateKey()}`, kind: "sync", title: "A change failed to sync", body: "Retried 3 times, then moved to the failed queue. Settings → Sync Status to retry or discard." }])); return; }
     if (info.kind === "rejected") {
       if (info.status === 404) { showT("Supabase table missing — run nomad_setup.sql in your SQL editor", "error"); return; }
       // PostgREST schema-cache errors mean the DB is missing a column the
@@ -1940,8 +1945,17 @@ export default function Nomad() {
   useEffect(() => {
     if (!loaded) return;
     const todayStr = localDateKey();
-    const reminders = checkBillReminders(rec, sp, todayStr, getRecurringDueDate, isRecurringDueToday);
+    const reminders = checkBillReminders(rec, sp, todayStr, getRecurringDueDate, isRecurringDueToday, stl);
     if (reminders.length === 0) return;
+    // Durable copy FIRST — the toast is a 4-second glance, the notification
+    // centre is where you go back to read what you missed. Ids are day-scoped
+    // so today's nudge can't stack on remount but tomorrow's still lands.
+    sNotifs(pushNotifications(reminders.map(r => ({
+      id: `${r.id}-${todayStr}`,
+      kind: r.id.startsWith("owe-") ? "iou" : "bill",
+      title: r.msg,
+      body: r.id.startsWith("owe-") ? "Open IOU · Splits to settle up" : "Recurring bill reminder",
+    }))));
     reminders.forEach((r, i) => {
       setTimeout(() => {
         const id = Date.now() + Math.random();
@@ -1970,7 +1984,7 @@ export default function Nomad() {
         reg.showNotification(digestTitle, { body: digestBody, icon: "/icon-192.png", badge: "/icon-192.png", tag: "nomad-reminders" }).catch(() => { });
       }).catch(() => { });
     }
-  }, [loaded, rec, sp]);
+  }, [loaded, rec, sp, stl]);
 
   useEffect(() => {
     const handleOnline = () => { sOnline(true); flushSyncQueue().catch(() => { }); };
@@ -2197,6 +2211,13 @@ export default function Nomad() {
   // no-spend list + last-celebrated milestone persist (nomad-streak-v1).
   const [streakStore, sStreakStore] = useState(loadStreakStore);
   const [streakOpen, sStreakOpen] = useState(false);
+  // Notification centre (src/notifications.js). Reminders live here durably;
+  // action confirmations stay toast-only. `notifs` is a mirror of the
+  // localStorage list — every mutating helper returns the fresh list, so the
+  // two can't drift.
+  const [notifs, sNotifs] = useState(getNotifications);
+  const [notifOpen, sNotifOpen] = useState(false);
+  const notifUnread = unreadCount(notifs);
   const [streakNudgeGone, sStreakNudgeGone] = useState(() => { try { return localStorage.getItem("nomad-streak-nudge") === localDateKey(); } catch { return false; } });
   const streakInfo = useMemo(() => computeStreak({
     txDates: [...ex, ...inc, ...tr, ...stl].map(t => t.date),
@@ -2561,7 +2582,7 @@ export default function Nomad() {
     sEx(p => [rec, ...p]);
     sbUpsert("expenses", [toSB(rec, COLS.expenses)]);
     dance();
-    if (budgets[data.categoryId] > 0) { const cm = localDateKey().slice(0, 7); const prev = ex.filter(e => e.categoryId === data.categoryId && mk(e.date) === cm && !isTrackedExp(e)).reduce((s, e) => s + e.amount, 0); const tot = prev + amt; const lim = budgets[data.categoryId]; const cn = cats.find(c => c.id === data.categoryId)?.name || data.categoryId; if (tot >= lim) showT(`${cn} budget exceeded! ${fmt(tot)} / ${fmt(lim)}`, "error"); else if (tot >= lim * 0.8) showT(`${cn} at ${Math.round(tot / lim * 100)}% of budget (${fmt(lim)})`, "info"); }
+    if (budgets[data.categoryId] > 0) { const cm = localDateKey().slice(0, 7); const prev = ex.filter(e => e.categoryId === data.categoryId && mk(e.date) === cm && !isTrackedExp(e)).reduce((s, e) => s + e.amount, 0); const tot = prev + amt; const lim = budgets[data.categoryId]; const cn = cats.find(c => c.id === data.categoryId)?.name || data.categoryId; if (tot >= lim) { showT(`${cn} budget exceeded! ${fmt(tot)} / ${fmt(lim)}`, "error"); sNotifs(pushNotifications([{ id: `budget-${data.categoryId}-${cm}`, kind: "budget", title: `${cn} budget exceeded`, body: `${fmt(tot)} spent of a ${fmt(lim)} limit this month.` }])); } else if (tot >= lim * 0.8) showT(`${cn} at ${Math.round(tot / lim * 100)}% of budget (${fmt(lim)})`, "info"); }
     showT(online ? "Expense added" : "Expense saved offline", "success");
     return true;
   };
@@ -2623,7 +2644,14 @@ export default function Nomad() {
   // (it's a useMemo — no re-render happens between synchronous calls in a click
   // handler), letting two payouts jointly overdraw a wallet — and would stack
   // one toast per source.
-  const settleNet = (name, wid, payAmt, sources = null) => {
+  // opts.forgiveRemainder — "full and final" for a NET settle: pay what
+  // actually changed hands, then write off whatever is still outstanding with
+  // this person (in scope) so they are genuinely cleared. Without it a partial
+  // net left a stranded remainder that could only be closed by skipping each
+  // leftover IOU one at a time. Same semantics as the per-IOU settle's
+  // forgiveRemainder: leftovers become settled+skipped, so they land in the
+  // write-off ledger and stay reversible via each IOU's Restore.
+  const settleNet = (name, wid, payAmt, sources = null, opts = {}) => {
     const remOf = s => roundMoney(s.amount - stl.filter(x => x.splitId === s.id).reduce((t, x) => t + settlementNetAmount(x), 0));
     const nameLc = String(name || "").trim().toLowerCase();
     const evSet = sources ? new Set(sources.eventIds || []) : null;
@@ -2655,7 +2683,7 @@ export default function Nomad() {
         if (b < cap) { showT(`Not enough — need ${fmt(cap)}, ${wallets.find(w => w.id === wid)?.name || "wallet"} has ${fmt(b)}`, "error"); return false; }
         if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + cap) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (₹${u.day} used)`, "error"); return false; } if (roundMoney(u.month + cap) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
       }
-      const recs = []; const doneIds = [];
+      const recs = []; const doneIds = []; const paidById = {};
       // General IOUs pay down before event IOUs so a partial amount clears the
       // person's direct debts first (matches the wallet's stated allocation).
       const ordered = items.filter(i => i.s.direction === dir).sort((a, b) => (a.s.eventId ? 1 : 0) - (b.s.eventId ? 1 : 0));
@@ -2663,6 +2691,7 @@ export default function Nomad() {
         if (cap <= 0.005) break;
         const pay = roundMoney(Math.min(x.rem, cap));
         recs.push(mkRec(x, pay));
+        paidById[x.s.id] = pay;
         if (pay >= x.rem - 0.005) doneIds.push(x.s.id);
         cap = roundMoney(cap - pay);
       }
@@ -2670,6 +2699,18 @@ export default function Nomad() {
       sStl(p => [...p, ...recs]);
       sbUpsert("settlements", recs.map(r => toSB(r, COLS.settlements)));
       if (doneIds.length) { sSp(p => p.map(x => doneIds.includes(x.id) ? { ...x, settled: true } : x)); doneIds.forEach(id => sbUpsert("splits", [{ id, settled: true }], `splits:${id}`)); }
+      // Full and final: everything still outstanding in scope — the unpaid tail
+      // of this direction AND any opposite-direction IOUs the net cancelled on
+      // paper but never actually moved — is written off in one go.
+      if (opts.forgiveRemainder) {
+        const offIds = items.filter(x => roundMoney(x.rem - (paidById[x.s.id] || 0)) > 0.005).map(x => x.s.id);
+        if (offIds.length) {
+          sSp(p => p.map(x => offIds.includes(x.id) ? { ...x, settled: true, skipped: true } : x));
+          offIds.forEach(id => sbUpsert("splits", [{ id, settled: true, skipped: true }], `splits:${id}`));
+        }
+        showT(`Paid ${fmt(paid)} to ${name} · ${fmt(roundMoney(Math.abs(net) - paid))} written off`, online ? "success" : "info");
+        return true;
+      }
       showT(`Settled ${fmt(paid)} with ${name} · ${fmt(roundMoney(Math.abs(net) - paid))} left`, online ? "success" : "info");
       return true;
     }
@@ -2707,7 +2748,9 @@ export default function Nomad() {
   // matches an event expense), so the suggestion's amount, the settlement, and the
   // grpSettled reconciliation all line up. Records keep their eventId + groupId so
   // grpSettled picks them up. An optional payAmt settles only part of the net.
-  const settleEventNet = (eventId, name, wid, payAmt) => {
+  // opts.forgiveRemainder mirrors settleNet's — write off the unpaid tail of a
+  // partial event settle instead of stranding it.
+  const settleEventNet = (eventId, name, wid, payAmt, opts = {}) => {
     const remOf = s => roundMoney(s.amount - stl.filter(x => x.splitId === s.id).reduce((t, x) => t + settlementNetAmount(x), 0));
     const nameLc = String(name || "").toLowerCase();
     const expIds = new Set(ex.filter(e => e.eventId === eventId && !e.deleted_at).map(e => e.id));
@@ -2730,11 +2773,12 @@ export default function Nomad() {
         if (b < cap) { showT(`Not enough — need ${fmt(cap)}, ${wallets.find(w => w.id === wid)?.name || "wallet"} has ${fmt(b)}`, "error"); return false; }
         if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + cap) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (₹${u.day} used)`, "error"); return false; } if (roundMoney(u.month + cap) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
       }
-      const recs = []; const doneIds = [];
+      const recs = []; const doneIds = []; const paidById = {};
       for (const x of items.filter(i => i.s.direction === dir)) {
         if (cap <= 0.005) break;
         const pay = roundMoney(Math.min(x.rem, cap));
         recs.push(mkRec(x, pay));
+        paidById[x.s.id] = pay;
         if (pay >= x.rem - 0.005) doneIds.push(x.s.id);
         cap = roundMoney(cap - pay);
       }
@@ -2742,6 +2786,15 @@ export default function Nomad() {
       sStl(p => [...p, ...recs]);
       sbUpsert("settlements", recs.map(r => toSB(r, COLS.settlements)));
       if (doneIds.length) { sSp(p => p.map(x => doneIds.includes(x.id) ? { ...x, settled: true } : x)); doneIds.forEach(id => sbUpsert("splits", [{ id, settled: true }], `splits:${id}`)); }
+      if (opts.forgiveRemainder) {
+        const offIds = items.filter(x => roundMoney(x.rem - (paidById[x.s.id] || 0)) > 0.005).map(x => x.s.id);
+        if (offIds.length) {
+          sSp(p => p.map(x => offIds.includes(x.id) ? { ...x, settled: true, skipped: true } : x));
+          offIds.forEach(id => sbUpsert("splits", [{ id, settled: true, skipped: true }], `splits:${id}`));
+        }
+        showT(`Paid ${fmt(paid)} to ${name} · ${fmt(roundMoney(Math.abs(net) - paid))} written off`, online ? "success" : "info");
+        return true;
+      }
       showT(`Settled ${fmt(paid)} with ${name} · ${fmt(roundMoney(Math.abs(net) - paid))} left`, online ? "success" : "info");
       return true;
     }
@@ -3511,7 +3564,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
 @keyframes fi{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 @keyframes fis{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}
 @keyframes ld{from{transform:translateY(-6px) rotate(-5deg)}to{transform:translateY(-4px) rotate(5deg)}}
-@keyframes ti{from{opacity:0;transform:translateY(-16px)}to{opacity:1;transform:translateY(0)}}
+@keyframes ti{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
 @keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.6}}
 @keyframes nmSpin{to{transform:rotate(360deg)}}
@@ -3551,8 +3604,14 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         <div style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: SHOW_ROUTINE ? 10 : 0 }}>
           <div style={{ fontFamily: "'Plus Jakarta Sans',sans-serif", fontSize: 20, fontWeight: 700, color: dm ? "#E5E7EB" : "#1A1A2E", letterSpacing: "0.04em", lineHeight: 1 }}>NOMAD</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {(streakInfo.current > 0 || streakInfo.todayLogged) && <button onClick={() => { hapticSelection(); sStreakOpen(true); }} title={streakInfo.atRisk ? "Streak at risk — log today" : "Logging streak"} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 100, border: `1px solid ${streakInfo.atRisk ? (dm ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)") : "var(--warn)"}`, background: streakInfo.atRisk ? (dm ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.55)") : "#FBBF2418", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)", cursor: "pointer" }}><Fire size={13} weight="fill" color={streakInfo.atRisk ? (dm ? "#6B7280" : "#9A9488") : "var(--warn)"} /><span style={{ fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 800, color: streakInfo.atRisk ? (dm ? "#6B7280" : "#9A9488") : "var(--warn)", lineHeight: 1 }}>{streakInfo.current}</span>{streakInfo.freezesHeld > 0 && <span style={{ fontSize: 10, lineHeight: 1 }}>{"🧊".repeat(streakInfo.freezesHeld)}</span>}</button>}
+            {(streakInfo.current > 0 || streakInfo.todayLogged) && <button onClick={() => { hapticSelection(); sStreakOpen(true); }} title={streakInfo.atRisk ? "Streak at risk — log today" : "Logging streak"} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 100, border: `1px solid ${streakInfo.atRisk ? (dm ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)") : "var(--warn)"}`, background: streakInfo.atRisk ? (dm ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.55)") : "#FBBF2418", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)", cursor: "pointer" }}><FireSimple size={13} weight="fill" color={streakInfo.atRisk ? (dm ? "#6B7280" : "#9A9488") : "var(--warn)"} /><span style={{ fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 800, color: streakInfo.atRisk ? (dm ? "#6B7280" : "#9A9488") : "var(--warn)", lineHeight: 1 }}>{streakInfo.current}</span>{streakInfo.freezesHeld > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 1, lineHeight: 1 }}>{Array.from({ length: streakInfo.freezesHeld }, (_, i) => <Snowflake key={i} size={11} weight="fill" color="var(--acc)" />)}</span>}</button>}
             <span style={{ fontFamily: "var(--font-h)", fontSize: 11, color: dm ? "#9CA3AF" : "var(--muted)", fontWeight: 600, letterSpacing: "1.5px", padding: "5px 11px", borderRadius: 100, background: dm ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.55)", border: `1px solid ${dm ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`, backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)", lineHeight: 1 }}>{new Date().toLocaleDateString("en-US", { weekday: "short" }).toUpperCase()} · {new Date().getDate()} {new Date().toLocaleDateString("en-US", { month: "short" }).toUpperCase()}</span>
+            {/* Notification centre. Unread count rides the bell as a dot so the
+                chip row stays the same width whether or not anything is waiting. */}
+            <button onClick={() => { hapticSelection(); sNotifOpen(true); }} aria-label={notifUnread > 0 ? `Notifications, ${notifUnread} unread` : "Notifications"} style={{ position: "relative", width: 32, height: 32, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: 100, border: `1px solid ${notifUnread > 0 ? "var(--neg)" : dm ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)"}`, background: notifUnread > 0 ? "#E07A5F18" : dm ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.55)", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)", cursor: "pointer", padding: 0, flexShrink: 0 }}>
+              {notifUnread > 0 ? <BellRinging size={16} weight="fill" color="var(--neg)" /> : <Bell size={16} weight="regular" color={dm ? "#9CA3AF" : "var(--muted)"} />}
+              {notifUnread > 0 && <span style={{ position: "absolute", top: 1, right: 1, minWidth: 14, height: 14, padding: "0 3px", borderRadius: 100, background: "var(--danger)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 9, fontWeight: 800, lineHeight: "14px", textAlign: "center", boxShadow: `0 0 0 2px ${dm ? "#0C0C0E" : "#F2F0EB"}` }}>{notifUnread > 9 ? "9+" : notifUnread}</span>}
+            </button>
           </div>
         </div>
         {SHOW_ROUTINE && <div style={{ position: "relative", zIndex: 1, display: "flex", gap: 8 }}>
@@ -3580,7 +3639,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
           const payDue = (r, walletId) => { const ok = addE({ amount: r.amount, categoryId: r.categoryId, walletId, date: todS, note: r.name + " (recurring)", recurring: true }); if (ok === false) return; const updated = { ...r, lastPaidDate: todS, lastSkippedDate: null }; sRec(p => p.map(x => x.id === r.id ? updated : x)); sbUpsert("recurring", [toSB(updated, COLS.recurring)], null, getVersion("recurring", r.id) ? { "If-Unmodified-Since": getVersion("recurring", r.id) } : {}); showT(`${r.name} paid from ${wallets.find(w => w.id === walletId)?.name || "wallet"} — ${fmt(r.amount)}`, "success"); sPayRec(null); sPayRecWal(null); };
           return due.length > 0 && <div style={{ marginBottom: 14 }}>{due.map(r => { const cat = resolveRecCategory(r.categoryId, [RC, recCats], r.categoryName); const wal = wallets.find(w => w.id === r.walletId) || { name: r.walletId }; const picking = payRec === r.id; const selWal = payRecWal || r.walletId; return <div key={r.id} style={{ ...cc, borderLeft: "3px solid var(--neg)", borderRadius: 14, padding: "14px 16px", marginBottom: 8 }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}><Warning size={16} color="var(--neg)" weight="fill" /><div style={{ flex: 1 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{(() => { const od = recurringDaysOverdue(r, todS); return <>{r.name} {od > 0 ? "overdue" : "due today"} — {fmt(r.amount)}{od > 0 ? <span style={{ marginLeft: 6, padding: "2px 6px", borderRadius: 4, background: "var(--danger)", color: "#fff", fontSize: 10, fontWeight: 600 }}>{od}d overdue</span> : null}</>; })()}</div><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{wal.name} → {cat.name}</div></div></div>{picking ? <div><div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: "0.5px", marginBottom: 6 }}>PAID FROM</div><div style={{ display: "flex", gap: 6, marginBottom: 8 }}>{wallets.map(w => { const on = selWal === w.id; return <button key={w.id} onClick={() => sPayRecWal(w.id)} style={{ flex: 1, padding: "8px 4px", borderRadius: 9, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, border: `2px solid ${on ? w.color : "var(--border)"}`, background: on ? w.color + "15" : "var(--card)", cursor: "pointer" }}><DI2 id={w.id} accent={w.neon || w.color} size={15} /><span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: on ? 700 : 500, color: on ? w.color : "var(--muted)" }}>{w.name}</span></button>; })}</div>{isUpiLite(wallets.find(w => w.id === selWal) || {}) && <div style={{ fontSize: 10, color: "#00B4D8", fontFamily: "var(--font-h)", fontWeight: 600, marginBottom: 8 }}>UPI Lite · ₹5000 cap — blocked if short, just pick another.</div>}<div style={{ display: "flex", gap: 6 }}><button onClick={(ev) => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; payDue(r, selWal); ev.currentTarget.disabled = false; }} style={{ flex: 2, padding: "8px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>✓ Confirm paid</button><button onClick={() => { sPayRec(null); sPayRecWal(null); }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Cancel</button></div></div> : <div style={{ display: "flex", gap: 6 }}><button onClick={() => { sPayRec(r.id); sPayRecWal(r.walletId); }} style={{ flex: 1, padding: "8px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>✓ Paid</button><button onClick={(ev) => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; const updated = { ...r, lastSkippedDate: todS }; sRec(p => p.map(x => x.id === r.id ? updated : x)); sbUpsert("recurring", [toSB(updated, COLS.recurring)], null, getVersion("recurring", r.id) ? { "If-Unmodified-Since": getVersion("recurring", r.id) } : {}); showT("Skipped for this cycle", "info") }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Skip</button><button onClick={() => { const snoozeUntil = localDateKey(new Date(Date.now() + 864e5)); const snoozed = JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); snoozed[r.id] = snoozeUntil; localStorage.setItem("nomad-rec-snooze", JSON.stringify(snoozed)); sRec(p => [...p]); showT("Snoozed until tomorrow", "info") }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Snooze</button></div>}</div> })}</div>
         })()}
-        {streakInfo.atRisk && streakInfo.current >= 3 && !streakNudgeGone && new Date().getHours() >= 19 && <div style={{ ...cc, borderLeft: "3px solid var(--warn)", padding: "12px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 10 }}><Fire size={18} weight="fill" color="var(--warn)" /><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>{streakInfo.current}-day streak at risk</div><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>Log today's transactions — or confirm a no-spend day.{streakInfo.freezesHeld > 0 ? ` (${streakInfo.freezesHeld} freeze${streakInfo.freezesHeld === 1 ? "" : "s"} in reserve)` : ""}</div></div><button onClick={markNoSpendToday} style={{ padding: "7px 10px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" }}>No spend ✓</button><button onClick={() => { sStreakNudgeGone(true); try { localStorage.setItem("nomad-streak-nudge", localDateKey()); } catch { /* quota */ } }} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 14, opacity: 0.5, flexShrink: 0, padding: "0 2px" }}>✕</button></div>}
+        {streakInfo.atRisk && streakInfo.current >= 3 && !streakNudgeGone && new Date().getHours() >= 19 && <div style={{ ...cc, borderLeft: "3px solid var(--warn)", padding: "12px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 10 }}><FireSimple size={18} weight="fill" color="var(--warn)" /><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>{streakInfo.current}-day streak at risk</div><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>Log today's transactions — or confirm a no-spend day.{streakInfo.freezesHeld > 0 ? ` (${streakInfo.freezesHeld} freeze${streakInfo.freezesHeld === 1 ? "" : "s"} in reserve)` : ""}</div></div><button onClick={markNoSpendToday} style={{ padding: "7px 10px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" }}>No spend ✓</button><button onClick={() => { sStreakNudgeGone(true); try { localStorage.setItem("nomad-streak-nudge", localDateKey()); } catch { /* quota */ } }} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 14, opacity: 0.5, flexShrink: 0, padding: "0 2px" }}>✕</button></div>}
         {loaded && ex.length === 0 && inc.length === 0 && <div style={{ ...cc, padding: "18px 20px", marginBottom: 14, borderLeft: "3px solid var(--acc)" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}><HandWaving size={16} weight="fill" />Welcome to NOMAD</div><div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6, marginBottom: 12 }}>Track expenses, income, and recurring bills.<br />Tap <strong>Add</strong> below to log your first transaction.</div><div style={{ display: "flex", gap: 8 }}><button onClick={() => sTab("add")} style={{ flex: 1, padding: "9px", border: "none", borderRadius: 9, background: "var(--neg)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>+ Add Expense</button><button onClick={() => sTab("settings")} style={{ padding: "9px 14px", border: "1.5px solid var(--border)", borderRadius: 9, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Settings</button></div></div>}
 
 
@@ -3801,13 +3860,59 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
       const oldestD = expRows[expRows.length - 1]?.d || null, newestD = expRows[0]?.d || null;
       const monLbl = k => { if (!k) return "?"; const d = new Date(`${k}T12:00:00`); return `${d.toLocaleDateString("en-US", { month: "short" })} ’${String(d.getFullYear()).slice(2)}`; };
       const covLabel = totalTx === 0 ? "No data yet" : oldestD ? `${totalTx} txns · ${monLbl(oldestD)} – ${monLbl(newestD)}` : `${totalTx} txns`;
+      // Every row, uncapped — the deterministic query runs over the WHOLE
+      // ledger, not the 500 newest that fit in a prompt. This is the "full
+      // control" half: filtering and totals happen here, on real data.
+      const queryRows = buildQueryRows({
+        expenses: myEx, incomes: inc,
+        categoryName: id => cNameOf(id), walletName: id => wNameOf(id), sourceName: id => sNameOf(id),
+      });
+      // Ask the model for a QUERY SPEC, run it locally, and hand the computed
+      // result back for phrasing. Any failure along the way (no AI, bad spec,
+      // question isn't a lookup) falls through to the original row-dump path,
+      // so the chat degrades instead of breaking.
+      const resolveFacts = async (question) => {
+        try {
+          const r = await fetch("/api/ai-analyze", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              mode: "chat-query", question, today,
+              categories: cats.map(c => ({ id: c.id, name: c.name })),
+              wallets: wallets.map(w => ({ id: w.id, name: w.name })),
+              sources: isrc.map(s => ({ id: s.id, name: s.name })),
+            }),
+          });
+          if (!r.ok) return null;
+          const spec = await r.json();
+          if (spec?.needsData === false) return null;
+          const clean = sanitizeQuerySpec(spec, {
+            categories: cats.map(c => c.name), wallets: wallets.map(w => w.name), sources: isrc.map(s => s.name),
+          });
+          // A spec with no filter at all would "match" the entire ledger and
+          // answer a question the user didn't ask — let the general path handle it.
+          if (isEmptySpec(clean)) return null;
+          const result = runQuery(queryRows, clean, today);
+          // The query ran on the real local notes (it has to — that's what
+          // makes the match exact); only what LEAVES the device is redacted,
+          // same rule as the raw row dump.
+          const safe = { ...result, rows: result.rows.map(row => ({ ...row, note: redact(row.note || "").slice(0, 64) })) };
+          return {
+            queryFacts: formatQueryFacts(safe),
+            queryRestate: String(spec.restate || "").slice(0, 200),
+          };
+        } catch { return null; }
+      };
       const sendChat = async (q) => {
         if (!q.trim() || chatLoading) return;
         sChatMsgs(p => [...p, { role: "user", content: q.trim() }]);
         sChatInput("");
         sChatLoading(true);
         try {
-          const r = await fetch("/api/ai-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q.trim(), context: { today, month: cm, monthIncome, monthExpense, allTimeIncome, allTimeExpense, expenses: expRows, incomes: incRows, coverage: { from: oldestD, to: newestD, total: myEx.length, sent: expRows.length }, topCategories: topCats, walletBalances: wBals, recurringBills, recurringCount: activeRec.length, iou, streak: finStreak } }) });
+          const grounded = await resolveFacts(q.trim());
+          const ctx = grounded
+            ? { today, month: cm, monthIncome, monthExpense, walletBalances: wBals, ...grounded }
+            : { today, month: cm, monthIncome, monthExpense, allTimeIncome, allTimeExpense, expenses: expRows, incomes: incRows, coverage: { from: oldestD, to: newestD, total: myEx.length, sent: expRows.length }, topCategories: topCats, walletBalances: wBals, recurringBills, recurringCount: activeRec.length, iou, streak: finStreak };
+          const r = await fetch("/api/ai-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q.trim(), context: ctx }) });
           const d = await r.json();
           sChatMsgs(p => [...p, { role: "assistant", content: r.ok ? d.answer : (d.error || "Something went wrong.") }]);
         } catch {
@@ -3928,6 +4033,52 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
     {module === "finance" && dlBanner && deadLetterCount > 0 && <div style={{ position: "fixed", bottom: 84, left: 0, right: 0, maxWidth: 430, margin: "0 auto", background: "var(--danger)", color: "#fff", padding: "10px 14px", display: "flex", alignItems: "center", gap: 8, zIndex: 49, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, boxShadow: "0 -2px 10px rgba(212,114,106,0.4)" }}><span style={{ flex: 1 }}>⚠ {deadLetterCount} change{deadLetterCount === 1 ? "" : "s"} failed to sync</span><button onClick={() => { sTab("settings"); sDlBanner(false); }} style={{ background: "rgba(255,255,255,0.25)", border: "none", borderRadius: 8, color: "#fff", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, padding: "4px 10px", cursor: "pointer" }}>Fix ›</button><button onClick={() => sDlBanner(false)} style={{ background: "none", border: "none", color: "#fff", fontSize: 18, cursor: "pointer", padding: "0 2px", lineHeight: 1, opacity: 0.8 }}>✕</button></div>}
 {module === "finance" && <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 430, margin: "0 auto", zIndex: 50, paddingBottom: "env(safe-area-inset-bottom)" }}><div style={{ position: "relative", height: 76 }}><svg width="100%" height="76" viewBox="0 0 430 76" preserveAspectRatio="none" style={{ position: "absolute", inset: 0, display: "block", filter: "drop-shadow(0 -2px 12px rgba(0,0,0,0.07))" }}><path d="M0,18 L430,18 L430,76 L0,76 Z" fill="var(--nav-bg)" stroke="var(--border)" strokeWidth="1" /></svg><div style={{ position: "absolute", inset: "18px 0 0 0", display: "flex" }}>{[{ id: "dashboard", label: "Home" }, { id: "events", label: "Events" }, { id: "__fab", label: "" }, { id: "history", label: "History" }, { id: "settings", label: "Settings" }].map(n => n.id === "__fab" ? <div key="__fab" style={{ flex: 1 }} /> : <button key={n.id} onClick={() => { hapticSelection(); sTab(n.id); }} style={{ flex: 1, padding: "8px 0 0", border: "none", background: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, cursor: "pointer", opacity: tab === n.id ? 1 : 0.45 }}><div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>{tab === n.id && <span key={"rip" + n.id} style={{ position: "absolute", top: "50%", left: "50%", width: 30, height: 30, borderRadius: "50%", background: "var(--neg)", pointerEvents: "none", animation: "ripple 0.6s ease-out forwards" }} />}<NI type={n.id} active={tab === n.id} />{n.id === "settings" && deadLetterCount > 0 && <div style={{ position: "absolute", top: -2, right: -2, width: 8, height: 8, borderRadius: "50%", background: "var(--danger)", border: "2px solid var(--nav-bg)" }} />}</div><span style={{ fontFamily: "var(--font-h)", fontSize: 9, color: tab === n.id ? "var(--neg)" : "var(--muted)", fontWeight: tab === n.id ? 600 : 400 }}>{n.label}</span></button>)}</div><button onClick={() => { hapticLight(); sTab("add"); }} aria-label="Add" style={{ position: "absolute", top: 16, left: "50%", width: 52, height: 52, borderRadius: "50%", border: "3px solid var(--nav-bg)", background: tab === "add" ? "#D4704A" : "var(--neg)", color: "#fff", cursor: "pointer", boxShadow: "0 6px 16px rgba(224,122,95,0.42), 0 2px 6px rgba(224,122,95,0.28)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", transform: `translateX(-50%) scale(${tab === "add" ? 0.94 : 1})`, transition: "transform 0.18s cubic-bezier(0.34,1.56,0.64,1), background 0.18s ease" }}>{tab === "add" && <span key="fabrip" style={{ position: "absolute", top: "50%", left: "50%", width: 58, height: 58, borderRadius: "50%", background: "rgba(255,255,255,0.45)", pointerEvents: "none", animation: "navsplash 0.6s ease-out forwards" }} />}<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round" style={{ position: "relative", zIndex: 1 }}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg></button></div></div>}
 
+    {/* ——— Notification centre ———
+        Holds only what still needs your attention (bills, IOUs, budget
+        breaches, sync failures) — never "Expense added"-style confirmations,
+        which stay pure toasts. Backed by localStorage (src/notifications.js),
+        so it survives reloads and works offline / local-only. Opening it marks
+        everything read; each row can be dismissed on its own. */}
+    {notifOpen && <div onClick={e => { if (e.target === e.currentTarget) { sNotifOpen(false); sNotifs(markAllRead()); } }} style={{ position: "fixed", inset: 0, background: "rgba(44,40,32,0.45)", zIndex: 60, display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+      <div style={{ background: "var(--card)", borderRadius: "24px 24px 0 0", maxWidth: 430, width: "100%", margin: "0 auto", display: "flex", flexDirection: "column", maxHeight: "86%" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "20px 20px 12px", borderBottom: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+            <Bell size={18} weight="fill" color="var(--neg)" />
+            <span style={{ fontFamily: "var(--font-h)", fontSize: 14, fontWeight: 700, color: "var(--text)" }}>Notifications</span>
+            {notifUnread > 0 && <span style={{ fontFamily: "var(--font-h)", fontSize: 10, fontWeight: 800, color: "#fff", background: "var(--danger)", borderRadius: 100, padding: "2px 7px" }}>{notifUnread} new</span>}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+            {notifs.length > 0 && <button onClick={() => sNotifs(clearNotifications())} style={{ fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, color: "var(--muted)", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 9, padding: "5px 10px", cursor: "pointer" }}>Clear all</button>}
+            <button onClick={() => { sNotifOpen(false); sNotifs(markAllRead()); }} aria-label="Close" style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--bg)", border: "none", cursor: "pointer", fontSize: 14, color: "var(--muted)" }}>✕</button>
+          </div>
+        </div>
+        <div style={{ overflowY: "auto", padding: "10px 12px calc(16px + env(safe-area-inset-bottom))" }}>
+          {notifs.length === 0 && <div style={{ textAlign: "center", padding: "44px 24px", color: "var(--muted)" }}>
+            <BellSimple size={38} weight="light" color="var(--border)" />
+            <div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--ts)", marginTop: 10 }}>Nothing needs you right now</div>
+            <div style={{ fontSize: 11.5, lineHeight: 1.6, marginTop: 5 }}>Bills coming due, IOUs you still owe, budgets you&apos;ve blown through and sync failures land here.</div>
+          </div>}
+          {notifs.map(n => {
+            const kind = NOTIFY_KINDS[n.kind] || NOTIFY_KINDS.info;
+            const col = `var(--${kind.tone})`;
+            const Icon = n.kind === "bill" ? CalendarCheck : n.kind === "iou" ? HandCoins : n.kind === "budget" ? Warning : n.kind === "sync" ? CloudWarning : n.kind === "goal" ? Target : n.kind === "streak" ? FireSimple : ChartLineUp;
+            return <div key={n.id} style={{ display: "flex", alignItems: "flex-start", gap: 11, padding: "12px 12px", marginBottom: 8, borderRadius: 14, background: n.read ? "var(--bg)" : "var(--card)", border: `1px solid ${n.read ? "var(--border)" : col}`, boxShadow: n.read ? "none" : "0 2px 10px rgba(0,0,0,0.05)" }}>
+              <span style={{ width: 32, height: 32, flexShrink: 0, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg)", border: `1px solid ${col}40` }}><Icon size={17} weight="fill" color={col} /></span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 7, flexWrap: "wrap" }}>
+                  <span style={{ fontFamily: "var(--font-h)", fontSize: 10, fontWeight: 800, letterSpacing: "0.5px", textTransform: "uppercase", color: col }}>{kind.label}</span>
+                  <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-h)" }}>{relTime(n.ts)}</span>
+                </div>
+                <div style={{ fontFamily: "var(--font-h)", fontSize: 12.5, fontWeight: 700, color: "var(--text)", marginTop: 3, lineHeight: 1.4, wordBreak: "break-word" }}>{n.title}</div>
+                {n.body && <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 2, wordBreak: "break-word" }}>{n.body}</div>}
+              </div>
+              <button onClick={() => sNotifs(dismissNotification(n.id))} aria-label="Dismiss" style={{ width: 24, height: 24, flexShrink: 0, borderRadius: "50%", border: "none", background: "transparent", color: "var(--muted)", fontSize: 13, cursor: "pointer", lineHeight: 1 }}>✕</button>
+            </div>;
+          })}
+        </div>
+      </div>
+    </div>}
+
     {streakOpen && <div onClick={e => { if (e.target === e.currentTarget) sStreakOpen(false); }} style={{ position: "fixed", inset: 0, background: "rgba(44,40,32,0.45)", zIndex: 60, display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
       <div style={{ background: "var(--card)", borderRadius: "24px 24px 0 0", maxWidth: 430, width: "100%", margin: "0 auto", padding: "22px 20px calc(20px + env(safe-area-inset-bottom))", maxHeight: "84%", overflowY: "auto" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
@@ -3935,12 +4086,12 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
           <button onClick={() => sStreakOpen(false)} style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--bg)", border: "none", cursor: "pointer", fontSize: 14, color: "var(--muted)" }}>✕</button>
         </div>
         <div style={{ textAlign: "center", marginBottom: 16 }}>
-          <Fire size={52} weight="fill" color={streakInfo.atRisk ? (dm ? "#4B5563" : "#D1CDC4") : "var(--warn)"} />
+          <FireSimple size={52} weight="fill" color={streakInfo.atRisk ? (dm ? "#4B5563" : "#D1CDC4") : "var(--warn)"} />
           <div style={{ fontFamily: "var(--font-h)", fontSize: 40, fontWeight: 800, color: "var(--text)", lineHeight: 1.1 }}>{streakInfo.current}</div>
           <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600 }}>day streak{streakInfo.atRisk ? " — today still unlogged" : streakInfo.todayLogged ? " — today ✓" : ""}</div>
           <div style={{ display: "flex", justifyContent: "center", gap: 14, marginTop: 10 }}>
             <span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-h)" }}>Longest <strong style={{ color: "var(--text)" }}>{streakInfo.longest}</strong></span>
-            <span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-h)" }}>Freezes <strong style={{ color: "var(--text)" }}>{streakInfo.freezesHeld > 0 ? "🧊".repeat(streakInfo.freezesHeld) : "0"}</strong>/2</span>
+            <span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-h)" }}>Freezes <strong style={{ color: "var(--text)", display: "inline-flex", alignItems: "center", gap: 1, verticalAlign: "-2px" }}>{streakInfo.freezesHeld > 0 ? Array.from({ length: streakInfo.freezesHeld }, (_, i) => <Snowflake key={i} size={12} weight="fill" color="var(--acc)" />) : "0"}</strong>/2</span>
           </div>
         </div>
         {!streakInfo.todayLogged && <button onClick={markNoSpendToday} style={{ width: "100%", padding: "12px", border: "none", borderRadius: 12, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, cursor: "pointer", marginBottom: 16 }}>Nothing spent today — keep the flame ✓</button>}
@@ -3951,7 +4102,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         <div style={{ marginBottom: 14 }}>
           <div style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--ts)", marginBottom: 7 }}>Last 4 weeks</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 5 }}>
-            {streakInfo.calendar.map(c => <div key={c.date} title={`${c.date} — ${c.state}`} style={{ aspectRatio: "1", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, background: c.state === "active" ? "var(--warn)" : c.state === "frozen" ? "var(--acc)" : "var(--bg)", border: c.state === "pending" ? "1.5px dashed var(--warn)" : "1px solid var(--border)", color: c.state === "active" ? "#7A5A00" : "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 700 }}>{c.state === "frozen" ? "🧊" : Number(c.date.slice(8))}</div>)}
+            {streakInfo.calendar.map(c => <div key={c.date} title={`${c.date} — ${c.state}`} style={{ aspectRatio: "1", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, background: c.state === "active" ? "var(--warn)" : c.state === "frozen" ? "var(--acc)" : "var(--bg)", border: c.state === "pending" ? "1.5px dashed var(--warn)" : "1px solid var(--border)", color: c.state === "active" ? "#7A5A00" : "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 700 }}>{c.state === "frozen" ? <Snowflake size={11} weight="fill" color="#fff" /> : Number(c.date.slice(8))}</div>)}
           </div>
         </div>
         <p style={{ fontSize: 10.5, color: "var(--muted)", fontFamily: "var(--font-b)", lineHeight: 1.55, margin: 0 }}>Any log keeps the day — expense, income, transfer, settlement, or a "no spend" confirmation. Every 7 straight days earns a freeze (max 2); a freeze auto-covers a fully missed day. Backfilling a missed day's transactions repairs it retroactively.</p>
@@ -3992,8 +4143,12 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
       </div>
     )}
 
+    {/* Toasts anchor to the BOTTOM, above the tab bar. At the top they landed
+        squarely on the Add page's wallet picker / form fields — so an error
+        about the form hid the very control you needed to fix it (and on the
+        dashboard they buried the streak + date chips). */}
     {toasts.length > 0 && (
-      <div style={{ position: "fixed", top: 24, left: "50%", transform: "translateX(-50%)", zIndex: 300, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, pointerEvents: "none", maxWidth: "min(440px, 92vw)", width: "auto" }}>
+      <div style={{ position: "fixed", bottom: module === "finance" ? "calc(92px + env(safe-area-inset-bottom))" : "calc(24px + env(safe-area-inset-bottom))", left: "50%", transform: "translateX(-50%)", zIndex: 300, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, pointerEvents: "none", maxWidth: "min(440px, 92vw)", width: "auto" }}>
         {toasts.slice(-3).map(t => (
           <div key={t.id} onClick={() => dismissToast(t.id)} style={{ pointerEvents: "auto", cursor: "pointer", background: t.type === "error" ? "var(--danger)" : t.type === "success" ? "var(--pos)" : t.type === "warn" ? "var(--neg)" : "var(--acc)", color: "#fff", borderRadius: 18, padding: "10px 18px", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, boxShadow: "0 4px 16px rgba(0,0,0,0.15)", textAlign: "center", lineHeight: 1.4, wordBreak: "break-word", maxWidth: "min(440px, 92vw)", animation: "ti 0.25s ease-out", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
             <span>{t.msg}</span>

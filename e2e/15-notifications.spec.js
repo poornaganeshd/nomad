@@ -1,0 +1,67 @@
+import { test, expect } from "@playwright/test";
+import { gotoLocal, funded, readBackup } from "./helpers.js";
+
+// Notification centre (bell in the dashboard header → src/notifications.js).
+// The daily IOU/bill reminders used to exist only as 2-second toasts stacked
+// over the dashboard; now they also land in a list you can come back to, kept
+// in localStorage. Action confirmations ("Expense added") must stay toast-only.
+
+const today = () => new Date().toISOString().slice(0, 10);
+const owe = (id, amount, name = "Rakesh") => ({ id, name, amount, direction: "owe", settled: false, date: today() });
+
+const bell = (page) => page.getByRole("button", { name: /^Notifications/ });
+const readStore = (page) => page.evaluate(() => {
+  try { return JSON.parse(localStorage.getItem("nomad-notifications-v1") || "[]"); } catch { return []; }
+});
+
+test("outstanding IOUs land in the notification centre, aggregated per person", async ({ page }) => {
+  await gotoLocal(page, { splits: [owe("a", 15), owe("b", 10), owe("c", 92.5)] });
+
+  // One entry for the person, carrying the combined balance — not three.
+  await expect.poll(async () => (await readStore(page)).length, { timeout: 10000 }).toBe(1);
+  const [entry] = await readStore(page);
+  expect(entry.kind).toBe("iou");
+  expect(entry.title).toContain("117.5");
+  expect(entry.title).toContain("Rakesh");
+
+  await bell(page).click();
+  await expect(page.getByText("Notifications", { exact: true })).toBeVisible();
+  await expect(page.getByText(/You owe .*117\.5.*Rakesh/).first()).toBeVisible();
+});
+
+test("the bell shows an unread badge and opening clears it", async ({ page }) => {
+  await gotoLocal(page, { splits: [owe("a", 300)] });
+  await expect.poll(async () => (await readStore(page)).length, { timeout: 10000 }).toBe(1);
+
+  await expect(bell(page)).toHaveAccessibleName(/1 unread/);
+  await bell(page).click();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(bell(page)).toHaveAccessibleName("Notifications");
+  await expect.poll(async () => (await readStore(page))[0]?.read).toBe(true);
+});
+
+test("notifications persist across a reload and Clear all empties the list", async ({ page }) => {
+  await gotoLocal(page, { splits: [owe("a", 300)] });
+  await expect.poll(async () => (await readStore(page)).length, { timeout: 10000 }).toBe(1);
+
+  await page.reload();
+  await expect(bell(page)).toBeVisible();
+  expect(await readStore(page)).toHaveLength(1);
+
+  await bell(page).click();
+  await page.getByRole("button", { name: "Clear all", exact: true }).click();
+  await expect(page.getByText(/Nothing needs you right now/)).toBeVisible();
+  expect(await readStore(page)).toHaveLength(0);
+});
+
+test("action confirmations stay toasts and never reach the notification centre", async ({ page }) => {
+  // Fund the wallet — addE() rejects an expense above the wallet balance.
+  await gotoLocal(page, funded());
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.locator("input[placeholder='0']").first().fill("125");
+  await page.getByRole("button", { name: "Add Expense" }).click();
+  await expect.poll(async () => (await readBackup(page)).expenses?.length ?? 0).toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "Home", exact: true }).click();
+  expect(await readStore(page)).toHaveLength(0);
+});

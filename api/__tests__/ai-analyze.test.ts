@@ -326,3 +326,105 @@ describe('reconcile consensus', () => {
     expect(r.statusCode).toBe(502);
   });
 });
+
+// ---------------------------------------------------------------------------
+// chat-query — the model returns a SPEC, never an answer. Anything it invents
+// (categories, wallets, enums) must be scrubbed before the client executes it.
+// ---------------------------------------------------------------------------
+describe('ai-analyze chat-query mode', () => {
+  type SetNext = { __setNext: (s: string) => void };
+  const baseBody = {
+    mode: 'chat-query',
+    question: 'So far how much I spend on eggs?',
+    today: '2026-07-21',
+    categories: [{ id: 'food', name: 'Food & Drinks' }, { id: 'tr', name: 'Transport' }],
+    wallets: [{ id: 'bank', name: 'Bank' }, { id: 'cash', name: 'Cash' }],
+    sources: [{ id: 'sal', name: 'Salary' }],
+  };
+
+  it('passes a well-formed spec through', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetNext;
+    mod.__setNext(JSON.stringify({
+      needsData: true, type: 'expense', keywords: ['egg'], keywordMode: 'any',
+      categories: [], wallets: [], sources: [], minAmount: null, maxAmount: null,
+      range: { preset: 'all' }, groupBy: 'none', sort: 'date_desc', restate: 'all spending on eggs',
+    }));
+    const r = await invoke(baseBody);
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toMatchObject({
+      needsData: true, type: 'expense', keywords: ['egg'],
+      range: { preset: 'all' }, groupBy: 'none', restate: 'all spending on eggs',
+    });
+  });
+
+  it('drops categories, wallets and sources the ledger does not have', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetNext;
+    mod.__setNext(JSON.stringify({
+      needsData: true, categories: ['Groceries', 'Food & Drinks'],
+      wallets: ['PayPal'], sources: ['Bonus', 'Salary'], range: { preset: 'all' },
+    }));
+    const r = await invoke(baseBody);
+    const b = r.body as Record<string, unknown>;
+    expect(b.categories).toEqual(['Food & Drinks']);
+    expect(b.wallets).toEqual([]);
+    expect(b.sources).toEqual(['Salary']);
+  });
+
+  it('normalises unknown enums to safe defaults', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetNext;
+    mod.__setNext(JSON.stringify({
+      type: 'guess', keywordMode: 'sometimes', groupBy: 'colour', sort: 'random',
+      range: { preset: 'next_decade' },
+    }));
+    const r = await invoke(baseBody);
+    expect(r.body).toMatchObject({
+      type: 'expense', keywordMode: 'any', groupBy: 'none', sort: 'date_desc',
+      range: { preset: 'all' },
+    });
+  });
+
+  it('rejects non-positive and non-numeric amount bounds', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetNext;
+    mod.__setNext(JSON.stringify({ minAmount: -20, maxAmount: 'lots', range: { preset: 'all' } }));
+    const r = await invoke(baseBody);
+    expect(r.body).toMatchObject({ minAmount: null, maxAmount: null });
+  });
+
+  it('keeps valid amount bounds and date presets', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetNext;
+    mod.__setNext(JSON.stringify({ minAmount: 500, range: { preset: 'last_n_days', days: 90 } }));
+    const r = await invoke(baseBody);
+    expect(r.body).toMatchObject({ minAmount: 500, range: { preset: 'last_n_days', days: 90 } });
+  });
+
+  it('discards malformed month / from / to values', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetNext;
+    mod.__setNext(JSON.stringify({ range: { preset: 'custom', month: 'June', from: '21-07-2026', to: '2026-07-21' } }));
+    const r = await invoke(baseBody);
+    expect(r.body).toMatchObject({ range: { preset: 'custom', month: null, from: null, to: '2026-07-21' } });
+  });
+
+  it('drops one-character keywords that would match every row', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetNext;
+    mod.__setNext(JSON.stringify({ keywords: ['a', 'egg', '', 5], range: { preset: 'all' } }));
+    expect((await invoke(baseBody)).body).toMatchObject({ keywords: ['egg'] });
+  });
+
+  it('preserves needsData:false so advice questions skip the query path', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetNext;
+    mod.__setNext(JSON.stringify({ needsData: false, restate: '' }));
+    expect((r => (r.body as { needsData: boolean }).needsData)(await invoke(baseBody))).toBe(false);
+  });
+
+  it('defaults needsData to true when the model omits it', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetNext;
+    mod.__setNext(JSON.stringify({ keywords: ['egg'], range: { preset: 'all' } }));
+    expect((await invoke(baseBody)).body).toMatchObject({ needsData: true });
+  });
+
+  it('502s when the model returns non-JSON', async () => {
+    const mod = await import('../_ai-provider.js') as unknown as SetNext;
+    mod.__setNext('I think you spent about 1000 rupees on eggs');
+    expect((await invoke(baseBody)).statusCode).toBe(502);
+  });
+});
