@@ -59,7 +59,7 @@ const fmtSigned = (v, fmt) => (v > 0 ? "+" : "−") + fmt(Math.abs(v)).slice(1);
 // vertical gap between the flat person cards
 const GAP = 18;
 
-export default function IOUWallet({ splits = [], settlements = [], categories = [], wallets = [], events = [], fmt = n => "₹" + n, uid = () => Math.random().toString(36).slice(2), isUpiLite = () => false, SettleModal = null, onAdd = () => {}, onSettle = () => {}, onSettleNet = () => {}, onSettleEventNet = () => {}, onSkip = () => {}, onUnskip = () => {}, onDelete = () => {}, onRenamePerson = () => {}, onError = () => {} }) {
+export default function IOUWallet({ splits = [], settlements = [], categories = [], wallets = [], events = [], fmt = n => "₹" + n, uid = () => Math.random().toString(36).slice(2), isUpiLite = () => false, SettleModal = null, onAdd = () => {}, onSettle = () => {}, onSettleNet = () => {}, onSettleEventNet = () => {}, onSkip = () => {}, onUnskip = () => {}, onDelete = () => {}, onRenamePerson = () => {}, onError = () => {}, focusPerson = null, onFocusHandled = () => {} }) {
   const [view, sView] = useState("home");        // home | person
   const [cur, sCur] = useState(null);            // current person name
   const [settleTgt, sSettleTgt] = useState(null);// single split → SettleModal
@@ -143,6 +143,20 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
   };
   const openPerson = name => { sCur(name); sView("person"); sAdding(false); sSeg(personMap[name]?.splits.some(s => !s.eventId) ? "personal" : "events"); sMorph(null); sRenName(null); };
   const addFormProps = { categories, uid, onAdd, onError, onDone: () => sAdding(false) };
+
+  // Deep-link from a notification ("You owe ₹117.5 — Rakesh" → this person).
+  // `focusPerson` arrives lowercased from the reminder id, so resolve it
+  // against the canonical display names. Cleared via onFocusHandled so a later
+  // manual back-navigation isn't yanked to the same person again.
+  useEffect(() => {
+    if (!focusPerson) return;
+    const target = Object.keys(personMap).find(n => n.toLowerCase() === String(focusPerson).toLowerCase());
+    if (target) openPerson(target);
+    onFocusHandled();
+    // openPerson/personMap are recreated each render; keying on the request is
+    // what makes this fire once per deep-link.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusPerson]);
 
   // Whole-person "settle everything": ONE atomic call into App's settleNet with
   // an explicit sources scope (general + the nettable events). The handler nets

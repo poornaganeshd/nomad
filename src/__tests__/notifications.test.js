@@ -9,6 +9,7 @@ import {
   markAllRead,
   dismissNotification,
   clearNotifications,
+  reconcileNotifications,
   unreadCount,
   relTime,
 } from '../notifications.js';
@@ -142,5 +143,123 @@ describe('relTime', () => {
 
   it('never goes negative for a clock-skewed future stamp', () => {
     expect(relTime('2026-07-27T13:00:00.000Z', now)).toBe('just now');
+  });
+});
+
+describe('reconcileNotifications — an entry is a claim, not a log line', () => {
+  it('drops a derived entry once its cause is gone', () => {
+    pushNotifications([
+      { id: 'owe-rakesh-2026-07-27', kind: 'iou', title: 'You owe ₹117.5 — Rakesh' },
+      { id: 'rec-rent-2026-07-27', kind: 'bill', title: 'Rent is due' },
+    ]);
+    // Rakesh settled; rent still outstanding.
+    const list = reconcileNotifications(new Set(['rec-rent-2026-07-27']));
+    expect(list.map(n => n.id)).toEqual(['rec-rent-2026-07-27']);
+  });
+
+  it('keeps derived entries that are still live', () => {
+    pushNotification({ id: 'owe-raj-2026-07-27', kind: 'iou', title: 'You owe ₹60 — Raj' });
+    expect(reconcileNotifications(['owe-raj-2026-07-27'])).toHaveLength(1);
+  });
+
+  it('accepts an array as well as a Set', () => {
+    pushNotification({ id: 'a', kind: 'bill', title: 'A' });
+    expect(reconcileNotifications([])).toHaveLength(0);
+  });
+
+  it('never auto-removes non-derived kinds', () => {
+    pushNotifications([
+      { id: 'g1', kind: 'goal', title: 'Goal reached' },
+      { id: 's1', kind: 'streak', title: '30-day trail' },
+      { id: 'i1', kind: 'info', title: 'Heads up' },
+      { id: 'b1', kind: 'bill', title: 'Rent is due' },
+    ]);
+    const list = reconcileNotifications(new Set());
+    expect(list.map(n => n.id).sort()).toEqual(['g1', 'i1', 's1']);
+  });
+
+  it('clears every derived entry when nothing is outstanding', () => {
+    pushNotifications([
+      { id: 'a', kind: 'iou', title: 'A' },
+      { id: 'b', kind: 'bill', title: 'B' },
+      { id: 'c', kind: 'budget', title: 'C' },
+      { id: 'd', kind: 'sync', title: 'D' },
+    ]);
+    expect(reconcileNotifications(new Set())).toHaveLength(0);
+  });
+
+  it('sweeps yesterday\'s day-scoped copy so the list cannot grow per-day', () => {
+    pushNotifications([
+      { id: 'owe-rakesh-2026-07-26', kind: 'iou', title: 'You owe ₹117.5 — Rakesh' },
+      { id: 'owe-rakesh-2026-07-27', kind: 'iou', title: 'You owe ₹117.5 — Rakesh' },
+    ]);
+    const list = reconcileNotifications(new Set(['owe-rakesh-2026-07-27']));
+    expect(list.map(n => n.id)).toEqual(['owe-rakesh-2026-07-27']);
+  });
+
+  it('preserves read state and metadata of surviving entries', () => {
+    pushNotification({ id: 'keep', kind: 'iou', title: 'Keep', meta: { go: 'iou', person: 'raj' } });
+    markRead('keep');
+    const [n] = reconcileNotifications(['keep']);
+    expect(n.read).toBe(true);
+    expect(n.meta).toEqual({ go: 'iou', person: 'raj' });
+  });
+
+  it('does not write when nothing changed', () => {
+    pushNotification({ id: 'a', kind: 'bill', title: 'A' });
+    const spy = vi.spyOn(Storage.prototype, 'setItem');
+    reconcileNotifications(['a']);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op on an empty store', () => {
+    expect(reconcileNotifications(new Set(['anything']))).toEqual([]);
+  });
+});
+
+describe('reconcileNotifications — refreshing a claim that changed', () => {
+  it('rewrites the title when the amount moved but the debt remains', () => {
+    pushNotification({ id: 'owe-rakesh-2026-07-27', kind: 'iou', title: 'You owe ₹300 — Rakesh' });
+    const list = reconcileNotifications([
+      { id: 'owe-rakesh-2026-07-27', title: 'You owe ₹60 — Rakesh', body: 'Tap to open and settle up' },
+    ]);
+    expect(list[0].title).toBe('You owe ₹60 — Rakesh');
+    expect(list[0].body).toBe('Tap to open and settle up');
+  });
+
+  it('keeps read state across a refresh — you just made that payment', () => {
+    pushNotification({ id: 'x', kind: 'iou', title: 'You owe ₹300 — Rakesh' });
+    markRead('x');
+    const [n] = reconcileNotifications([{ id: 'x', title: 'You owe ₹60 — Rakesh' }]);
+    expect(n.title).toBe('You owe ₹60 — Rakesh');
+    expect(n.read).toBe(true);
+  });
+
+  it('leaves the text alone for a live marker with no title (budget/sync)', () => {
+    pushNotification({ id: 'budget-food-2026-07', kind: 'budget', title: 'Food budget exceeded' });
+    const [n] = reconcileNotifications([{ id: 'budget-food-2026-07' }]);
+    expect(n.title).toBe('Food budget exceeded');
+  });
+
+  it('still accepts a plain Set of ids', () => {
+    pushNotifications([{ id: 'a', kind: 'iou', title: 'A' }, { id: 'b', kind: 'iou', title: 'B' }]);
+    expect(reconcileNotifications(new Set(['a'])).map(n => n.id)).toEqual(['a']);
+  });
+
+  it('does not write when the title is unchanged', () => {
+    pushNotification({ id: 'a', kind: 'bill', title: 'Rent is due' });
+    const spy = vi.spyOn(Storage.prototype, 'setItem');
+    reconcileNotifications([{ id: 'a', title: 'Rent is due' }]);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('prunes and refreshes in the same pass', () => {
+    pushNotifications([
+      { id: 'gone', kind: 'iou', title: 'You owe ₹50 — Settled' },
+      { id: 'moved', kind: 'iou', title: 'You owe ₹300 — Rakesh' },
+    ]);
+    const list = reconcileNotifications([{ id: 'moved', title: 'You owe ₹60 — Rakesh' }]);
+    expect(list.map(n => n.id)).toEqual(['moved']);
+    expect(list[0].title).toBe('You owe ₹60 — Rakesh');
   });
 });

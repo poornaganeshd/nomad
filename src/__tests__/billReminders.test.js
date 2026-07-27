@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { checkBillReminders } from '../billReminders.js';
+import { checkBillReminders, buildReminders } from '../billReminders.js';
 
 // localStorage is provided by jsdom in the test environment.
 // We reset it before each test to prevent state bleed.
@@ -182,5 +182,42 @@ describe('checkBillReminders — settlements', () => {
   it('ignores an unnamed IOU rather than emitting a blank reminder', () => {
     const splits = [{ id: 'a', direction: 'owe', settled: false, amount: 50, name: '  ' }];
     expect(checkBillReminders([], splits, '2024-04-15', noDue, notDueToday)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildReminders — the UNGATED source both consumers share
+// ---------------------------------------------------------------------------
+describe('buildReminders vs checkBillReminders', () => {
+  const oweSplit = { id: 's1', direction: 'owe', settled: false, amount: 500, name: 'Raj' };
+
+  it('buildReminders ignores the once-a-day gate and never marks', () => {
+    expect(buildReminders([], [oweSplit], '2024-04-15', noDue, notDueToday)).toHaveLength(1);
+    // Repeated calls keep returning it — nothing was recorded as "shown".
+    expect(buildReminders([], [oweSplit], '2024-04-15', noDue, notDueToday)).toHaveLength(1);
+    expect(buildReminders([], [oweSplit], '2024-04-15', noDue, notDueToday)).toHaveLength(1);
+  });
+
+  it('checkBillReminders fires once, then stays quiet for the rest of the day', () => {
+    expect(checkBillReminders([], [oweSplit], '2024-04-15', noDue, notDueToday)).toHaveLength(1);
+    expect(checkBillReminders([], [oweSplit], '2024-04-15', noDue, notDueToday)).toHaveLength(0);
+    // …while the ungated view still reports it as outstanding.
+    expect(buildReminders([], [oweSplit], '2024-04-15', noDue, notDueToday)).toHaveLength(1);
+  });
+
+  it('both agree on ids, so a stored notification can be matched against live state', () => {
+    const built = buildReminders([], [oweSplit], '2024-04-15', noDue, notDueToday);
+    const checked = checkBillReminders([], [oweSplit], '2024-04-15', noDue, notDueToday);
+    expect(checked.map(r => r.id)).toEqual(built.map(r => r.id));
+    expect(checked.map(r => r.msg)).toEqual(built.map(r => r.msg));
+  });
+
+  it('a settled IOU disappears from buildReminders immediately', () => {
+    const settlements = [{ splitId: 's1', amount: 500 }];
+    expect(buildReminders([], [oweSplit], '2024-04-15', noDue, notDueToday, settlements)).toHaveLength(0);
+  });
+
+  it('tolerates a null recurring list', () => {
+    expect(() => buildReminders(null, [oweSplit], '2024-04-15', noDue, notDueToday)).not.toThrow();
   });
 });
