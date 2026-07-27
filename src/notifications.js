@@ -108,6 +108,61 @@ export function clearNotifications() {
   return [];
 }
 
+/**
+ * Kinds whose entries are DERIVED from live state, so their continued presence is a
+ * claim about the world that can go stale.
+ */
+export const DERIVED_KINDS = ["bill", "iou", "budget", "sync"];
+
+/**
+ * Bring derived entries back in line with reality: drop the ones whose cause is
+ * gone, and REWRITE the ones that are still true but have changed.
+ *
+ * A notification is a claim — "Rent is due", "You owe ₹117.5 — Rakesh". Pay the
+ * rent and the claim is false. Pay ₹240 of the ₹300 and the claim is stale in
+ * the more insidious way: still outstanding, but for the wrong amount. Pruning
+ * alone fixes the first and leaves the second, which is precisely the bug that
+ * started all of this (a reminder quoting money you'd already paid).
+ *
+ * `live` is what's outstanding right now — pass reminder-shaped objects
+ * (`{ id, title, body }`, from `buildReminders`) to prune AND refresh, or bare
+ * `{ id }` / a Set of ids to mark something live without touching its text.
+ * Read state survives a refresh: you just made that payment, so re-flagging it
+ * unread would nag you about your own action.
+ *
+ * Day-scoped ids (`owe-rakesh-2026-07-27`) mean yesterday's copy is never in
+ * today's live set, so this doubles as the cleanup that stops the list growing
+ * a fresh row per person per day.
+ *
+ * Non-derived kinds (goal, streak, info) are events, not claims — never
+ * auto-removed.
+ */
+export function reconcileNotifications(live, { kinds = DERIVED_KINDS } = {}) {
+  const entries = live instanceof Set ? [...live] : (Array.isArray(live) ? live : []);
+  const byId = new Map();
+  entries.forEach(e => {
+    if (typeof e === "string") byId.set(e, null);
+    else if (e && typeof e.id === "string") byId.set(e.id, e);
+  });
+  const derived = new Set(kinds);
+  const list = read();
+  let changed = false;
+  const kept = [];
+  list.forEach(n => {
+    if (!derived.has(n.kind)) { kept.push(n); return; }
+    if (!byId.has(n.id)) { changed = true; return; }   // cause resolved → drop
+    const fresh = byId.get(n.id);
+    if (fresh && typeof fresh.title === "string" && fresh.title !== n.title) {
+      n.title = fresh.title;
+      if (typeof fresh.body === "string") n.body = fresh.body;
+      changed = true;
+    }
+    kept.push(n);
+  });
+  if (changed) write(kept);
+  return getNotifications();
+}
+
 /** "just now" / "3h ago" / "12 Jul" — compact enough for a list row. */
 export function relTime(ts, now = new Date()) {
   const t = new Date(ts).getTime();

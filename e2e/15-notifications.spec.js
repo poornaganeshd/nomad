@@ -65,3 +65,66 @@ test("action confirmations stay toasts and never reach the notification centre",
   await page.getByRole("button", { name: "Home", exact: true }).click();
   expect(await readStore(page)).toHaveLength(0);
 });
+
+test("settling the person clears their notification automatically", async ({ page }) => {
+  // ₹300 owed to Rakesh, and enough in Bank to actually pay it.
+  await gotoLocal(page, {
+    splits: [owe("a", 300)],
+    incomes: [{ id: "e2e-inc", type: "income", amount: 5000, walletId: "bank", sourceId: "allowance", date: today() }],
+  });
+  await expect.poll(async () => (await readStore(page)).length, { timeout: 10000 }).toBe(1);
+
+  // Settle in full through the net sheet.
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.getByRole("button", { name: "IOU · Splits", exact: true }).click();
+  await page.getByRole("button", { name: /Open Rakesh/ }).click();
+  await page.getByRole("button", { name: /Settle up/ }).first().click();
+  await page.getByRole("button", { name: "Bank", exact: true }).last().click();
+  await page.getByRole("button", { name: /& settle/ }).click();
+
+  // The claim is no longer true, so the entry goes on its own — no dismissing.
+  await expect.poll(async () => (await readStore(page)).length, { timeout: 10000 }).toBe(0);
+});
+
+test("a partial settle rewrites the notification to the remaining balance", async ({ page }) => {
+  await gotoLocal(page, {
+    splits: [owe("a", 300)],
+    incomes: [{ id: "e2e-inc", type: "income", amount: 5000, walletId: "bank", sourceId: "allowance", date: today() }],
+  });
+  await expect.poll(async () => (await readStore(page)).length, { timeout: 10000 }).toBe(1);
+  expect((await readStore(page))[0].title).toContain("300");
+
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.getByRole("button", { name: "IOU · Splits", exact: true }).click();
+  await page.getByRole("button", { name: /Open Rakesh/ }).click();
+  await page.getByRole("button", { name: /Settle up/ }).first().click();
+  await page.getByRole("button", { name: "Bank", exact: true }).last().click();
+  await page.locator('input[type="number"]').last().fill("240");
+  await page.getByRole("button", { name: /^Pay .*240/ }).click();
+
+  // Still outstanding, but for ₹60 — not the original ₹300.
+  await page.getByRole("button", { name: "Home", exact: true }).click();
+  await expect.poll(async () => (await readStore(page))[0]?.title, { timeout: 10000 }).toContain("60");
+});
+
+test("tapping an IOU notification opens that person in the IOU wallet", async ({ page }) => {
+  await gotoLocal(page, { splits: [owe("a", 300)] });
+  await expect.poll(async () => (await readStore(page)).length, { timeout: 10000 }).toBe(1);
+
+  await bell(page).click();
+  await page.getByText(/You owe .*300.*Rakesh/).first().click();
+
+  // Landed on the person's detail view in the IOU wallet.
+  await expect(page.getByRole("button", { name: /Settle up/ }).first()).toBeVisible();
+  await expect(page.getByText("Rakesh").first()).toBeVisible();
+});
+
+test("the Home nav carries an unread dot from other tabs", async ({ page }) => {
+  await gotoLocal(page, { splits: [owe("a", 300)] });
+  await expect.poll(async () => (await readStore(page)).length, { timeout: 10000 }).toBe(1);
+
+  // The bell lives in the dashboard header; from History the nav dot is the cue.
+  await page.getByRole("button", { name: "History", exact: true }).click();
+  const homeNav = page.getByRole("button", { name: "Home", exact: true });
+  await expect(homeNav.locator("div[style*='border-radius: 50%']").first()).toBeVisible();
+});

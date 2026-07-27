@@ -59,8 +59,9 @@ function paidAgainst(settlements, splitId) {
 }
 
 /**
- * Reminders for the current local day: recurring bills due/upcoming, plus what
- * you still owe people.
+ * Everything that is outstanding RIGHT NOW: recurring bills due/upcoming, plus
+ * what you still owe people. Pure — no localStorage, no once-a-day gate, no
+ * marking. Call it any time to ask "what still needs attention?".
  *
  * The IOU leg is aggregated PER PERSON and uses the REMAINING balance, not the
  * original IOU amount. Reminding per split re-nagged the full ₹100 of a ₹100
@@ -68,16 +69,18 @@ function paidAgainst(settlements, splitId) {
  * "You owe … — Rakesh" chips for one person). Skipped (written-off), settled
  * and soft-deleted IOUs are excluded outright.
  *
+ * `checkBillReminders` is this list minus whatever already fired today. The
+ * notification centre needs the UNGATED list to know which stored entries are
+ * still live, so both must come from here or they drift apart.
+ *
  * @param settlements settlement rows — needed to subtract partial payments.
  */
-export function checkBillReminders(recurring, splits, todayStr, getRecurringDueDateFn, isRecurringDueTodayFn, settlements = []) {
-  const shown = getTodayShown(todayStr);
+export function buildReminders(recurring, splits, todayStr, getRecurringDueDateFn, isRecurringDueTodayFn, settlements = []) {
   const reminders = [];
   const in3Str = addDays(todayStr, 3);
 
-  recurring.filter(r => r.active).forEach(r => {
+  (recurring || []).filter(r => r.active).forEach(r => {
     const key = "rec-" + r.id;
-    if (shown.has(key)) return;
     if (isRecurringDueTodayFn(r, todayStr)) {
       reminders.push({ id: key, msg: `${r.name} is due`, type: "warn" });
       return;
@@ -104,11 +107,21 @@ export function checkBillReminders(recurring, splits, todayStr, getRecurringDueD
     byPerson.set(k, cur);
   });
   [...byPerson.values()].sort((a, b) => b.total - a.total).forEach(p => {
-    const key = "owe-" + p.name.toLowerCase();
-    if (shown.has(key)) return;
-    reminders.push({ id: key, msg: `You owe ₹${p.total} — ${p.name}${p.count > 1 ? ` (${p.count} IOUs)` : ""}`, type: "warn" });
+    reminders.push({ id: "owe-" + p.name.toLowerCase(), msg: `You owe ₹${p.total} — ${p.name}${p.count > 1 ? ` (${p.count} IOUs)` : ""}`, type: "warn" });
   });
 
-  if (reminders.length > 0) markShown(todayStr, reminders.map(r => r.id));
   return reminders;
+}
+
+/**
+ * The once-a-day toast/push leg: outstanding reminders MINUS the ones already
+ * fired today (tracked per local day in localStorage), marking whatever it
+ * returns as shown. Same arguments as `buildReminders`.
+ */
+export function checkBillReminders(recurring, splits, todayStr, getRecurringDueDateFn, isRecurringDueTodayFn, settlements = []) {
+  const shown = getTodayShown(todayStr);
+  const fresh = buildReminders(recurring, splits, todayStr, getRecurringDueDateFn, isRecurringDueTodayFn, settlements)
+    .filter(r => !shown.has(r.id));
+  if (fresh.length > 0) markShown(todayStr, fresh.map(r => r.id));
+  return fresh;
 }
