@@ -130,6 +130,8 @@ Full state mirrored to localStorage `nomad-v5` (loaded as fallback). Categories/
 ### Notification centre
 Bell in the dashboard header (unread badge) → full-screen sheet listing what still needs attention: bills due/upcoming, outstanding IOUs, budget breaches, sync failures. Backed by **localStorage only** (`nomad-notifications-v1` via `src/notifications.js`) — never synced to Supabase, since every entry is derived from data that already syncs. **The split is the point:** reminders (things that arrive unprompted and need doing) are recorded durably; action confirmations ("Expense added", "IOU added") stay pure toasts and must NOT be pushed here. Ids are day-scoped (`owe-rakesh-2026-07-27`) so a nudge can't stack on remount but can legitimately reappear tomorrow. Opening the sheet marks everything read; rows dismiss individually, "Clear all" empties it. Guarded by `notifications.test.js` + e2e `15-notifications.spec.js`.
 
+Streak iconography is **PawPrint** (the trail the lion mascot leaves — echoes the terrain hero's "ground ahead" language) and **Shield** for the forgiveness credits, which are labelled **"shields"** in the UI. `streak.js` keeps its internal `freezesHeld` / `frozenDays` / `"frozen"` vocabulary — only the user-facing copy changed. Don't go back to flame + snowflake; that pairing was rejected as generic.
+
 Toasts themselves are anchored to the **bottom** (above the tab bar), not the top — at the top they covered the Add page's wallet picker, so an error about the form hid the control you needed to fix it.
 
 ### Push notifications (Web Push + ntfy)
