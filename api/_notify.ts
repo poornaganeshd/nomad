@@ -34,6 +34,13 @@ export interface SplitRow {
   amount: number;
   direction: string;
   settled?: boolean;
+  skipped?: boolean;
+}
+export interface SettlementRow {
+  splitId?: string | null;
+  amount?: number | null;
+  /** Overpay surplus — does not count against the IOU (see settlementNetAmount). */
+  excess?: number | null;
 }
 export interface NotifyPrefs {
   enabled?: boolean;
@@ -152,6 +159,7 @@ export function buildBillDigest(
   recurring: RecurringRow[],
   splits: SplitRow[],
   todayStr: string,
+  settlements: SettlementRow[] = [],
 ): BillDigest | null {
   const in3Str = addDaysStr(todayStr, 3);
   const dueToday: string[] = [];
@@ -173,9 +181,29 @@ export function buildBillDigest(
     }
   });
 
-  const owed = (splits || [])
-    .filter(s => s.direction === "owe" && !s.settled)
-    .map(s => `• You owe ${inr(s.amount)} — ${s.name}`);
+  // Aggregate per person on the REMAINING balance — mirrors
+  // src/billReminders.js. Reminding per split repeated the full original amount
+  // of a partially-paid IOU and stacked one line per row for the same person.
+  const paidAgainst = (splitId: string) => (settlements || []).reduce((t, x) => {
+    if (!x || x.splitId !== splitId) return t;
+    return t + ((Number(x.amount) || 0) - (Number(x.excess) || 0));
+  }, 0);
+  const byPerson = new Map<string, { name: string; total: number; count: number }>();
+  (splits || []).forEach(s => {
+    if (!s || s.direction !== "owe" || s.settled || s.skipped) return;
+    const rem = Math.round(((Number(s.amount) || 0) - paidAgainst(s.id)) * 100) / 100;
+    if (rem <= 0.005) return;
+    const name = String(s.name || "").trim();
+    if (!name) return;
+    const k = name.toLowerCase();
+    const cur = byPerson.get(k) || { name, total: 0, count: 0 };
+    cur.total = Math.round((cur.total + rem) * 100) / 100;
+    cur.count += 1;
+    byPerson.set(k, cur);
+  });
+  const owed = [...byPerson.values()]
+    .sort((a, b) => b.total - a.total)
+    .map(p => `• You owe ${inr(p.total)} — ${p.name}${p.count > 1 ? ` (${p.count} IOUs)` : ""}`);
 
   const count = dueToday.length + upcoming.length + owed.length;
   if (count === 0) return null;

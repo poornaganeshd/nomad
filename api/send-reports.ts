@@ -7,7 +7,7 @@ import {
 } from "./_shared.js";
 import type { UserEntry, Schedule } from "./_shared.js";
 import { buildBillDigest, publishNtfyServer, istTodayStr } from "./_notify.js";
-import type { NotifyPrefs, RecurringRow, SplitRow } from "./_notify.js";
+import type { NotifyPrefs, RecurringRow, SplitRow, SettlementRow } from "./_notify.js";
 import { vapidFromEnv, sendToSubscriptions } from "./_webpush.js";
 import type { PushSubRow } from "./_webpush.js";
 
@@ -144,12 +144,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (prefs?.last_run_date === todayStr) return; // already pushed today
 
     try {
-      const [recurring, splits] = await Promise.all([
+      // Settlements come along so a partially-paid IOU reminds on what's LEFT,
+      // not on its original amount.
+      const [recurring, splits, settlements] = await Promise.all([
         userGet(user.supabase_url, user.anon_key, `/recurring?deleted_at=is.null&select=*`),
         userGet(user.supabase_url, user.anon_key, `/splits?direction=eq.owe&deleted_at=is.null&select=*`),
-      ]) as [RecurringRow[], SplitRow[]];
+        // Columns are camelCase in this schema (quoted identifiers) — see
+        // nomad_setup.sql; a snake_case select would 400.
+        userGet(user.supabase_url, user.anon_key, `/settlements?select=splitId,amount,excess`).catch(() => []),
+      ]) as [RecurringRow[], SplitRow[], SettlementRow[]];
 
-      const digest = buildBillDigest(recurring, splits, todayStr);
+      const digest = buildBillDigest(recurring, splits, todayStr, settlements || []);
       // Stamp the run date FIRST (upsert — the prefs row may not exist when the
       // user only enabled web push), so a same-day re-trigger can't re-push.
       await fetch(`${user.supabase_url}/rest/v1/notification_prefs`, {

@@ -46,7 +46,31 @@ export function isNotHandled(r, dueStr) {
   return anchor !== dueStr;
 }
 
-export function checkBillReminders(recurring, splits, todayStr, getRecurringDueDateFn, isRecurringDueTodayFn) {
+// Settlement rows carry an `excess` (overpay surplus) that must NOT count
+// against the IOU — mirrors settlementNetAmount in financeUtils. Kept local so
+// billReminders stays dependency-free.
+function paidAgainst(settlements, splitId) {
+  return (settlements || []).reduce((t, x) => {
+    if (x?.splitId !== splitId) return t;
+    const amt = Number(x.amount) || 0;
+    const exc = Number(x.excess) || 0;
+    return t + (amt - exc);
+  }, 0);
+}
+
+/**
+ * Reminders for the current local day: recurring bills due/upcoming, plus what
+ * you still owe people.
+ *
+ * The IOU leg is aggregated PER PERSON and uses the REMAINING balance, not the
+ * original IOU amount. Reminding per split re-nagged the full ₹100 of a ₹100
+ * IOU you'd already paid ₹90 of, and stacked one toast per row (three separate
+ * "You owe … — Rakesh" chips for one person). Skipped (written-off), settled
+ * and soft-deleted IOUs are excluded outright.
+ *
+ * @param settlements settlement rows — needed to subtract partial payments.
+ */
+export function checkBillReminders(recurring, splits, todayStr, getRecurringDueDateFn, isRecurringDueTodayFn, settlements = []) {
   const shown = getTodayShown(todayStr);
   const reminders = [];
   const in3Str = addDays(todayStr, 3);
@@ -65,10 +89,24 @@ export function checkBillReminders(recurring, splits, todayStr, getRecurringDueD
     }
   });
 
-  splits.filter(s => s.direction === "owe" && !s.settled).forEach(s => {
-    const key = "stl-" + s.id;
+  // One line per person, carrying their total OUTSTANDING balance.
+  const byPerson = new Map();
+  (splits || []).forEach(s => {
+    if (!s || s.direction !== "owe" || s.settled || s.skipped || s.deleted_at) return;
+    const rem = Math.round(((Number(s.amount) || 0) - paidAgainst(settlements, s.id)) * 100) / 100;
+    if (rem <= 0.005) return;
+    const name = String(s.name || "").trim();
+    if (!name) return;
+    const k = name.toLowerCase();
+    const cur = byPerson.get(k) || { name, total: 0, count: 0 };
+    cur.total = Math.round((cur.total + rem) * 100) / 100;
+    cur.count += 1;
+    byPerson.set(k, cur);
+  });
+  [...byPerson.values()].sort((a, b) => b.total - a.total).forEach(p => {
+    const key = "owe-" + p.name.toLowerCase();
     if (shown.has(key)) return;
-    reminders.push({ id: key, msg: `You owe ₹${s.amount} — ${s.name}`, type: "warn" });
+    reminders.push({ id: key, msg: `You owe ₹${p.total} — ${p.name}${p.count > 1 ? ` (${p.count} IOUs)` : ""}`, type: "warn" });
   });
 
   if (reminders.length > 0) markShown(todayStr, reminders.map(r => r.id));
