@@ -29,7 +29,7 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 
 ## Baselines (verify before/after edits; don't regress)
 
-- **Tests:** 764 pass / 0 fail, 36 files (`npm test`). E2E: 54 pass, 15 files (`npm run test:e2e`).
+- **Tests:** 765 pass / 0 fail, 36 files (`npm test`). E2E: 56 pass, 16 files (`npm run test:e2e`).
 - **Lint:** 0 errors / 12 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
 - **Build:** succeeds. Main chunk ~800 kB (gzip ~210 kB) + lazy chunks (Routine, CatDonut/recharts, IOUWallet, NomadLite, CalendarView, CredentialSetup, pdfjs); the >500 kB warning on the main chunk is expected.
@@ -57,6 +57,7 @@ Vitest + jsdom (configured in `vite.config.js` under `test`). Coverage via `@vit
 | `src/redactor.js` | `src/__tests__/redactor.test.js` |
 | `src/foodVision.js` | `src/__tests__/foodVision.test.js` |
 | `src/dbCols.js` | `src/__tests__/dbCols.test.js` |
+| undo of a deleted settlement (partial vs full) | e2e `16-undo-partial-settlement.spec.js` |
 | `src/txParsers.js` | `src/__tests__/txParsers.test.js` |
 | `src/nomadLiteSplit.js` | `src/__tests__/nomadLiteSplit.test.js` |
 | `src/haptics.js` (delegated tap tick + dedupe) | `src/__tests__/haptics.test.js` |
@@ -168,7 +169,7 @@ Cron in `vercel.json` (only `send-reports`). Env: `VITE_SUPABASE_URL`/`SUPABASE_
 
 ## Key conventions / gotchas
 
-- **`COLS` (`dbCols.js`) is the only source of truth for column lists.** Never inline a column array in a `toSB()` call — add the field to `COLS.<table>` once and every write path picks it up. `dbCols.test.js` guards required fields.
+- **`COLS` (`dbCols.js`) is the only source of truth for column lists.** Never inline a column array in a `toSB()` call — add the field to `COLS.<table>` once and every write path picks it up. `dbCols.test.js` guards required fields. A field written *only* through a partial upsert (`sbUpsert("splits", [{id, settled, skipped}], …)`) still needs to be in `COLS` — the full-row paths (first-connect migration, `heal()`, undo-restore) go through `toSB` and silently drop anything missing, so the row re-inserts with the column's DB default. That's how `skipped` used to lose every write-off.
 - **IDs are client-side:** `uid()` (App.jsx) prefers `crypto.randomUUID()`, base36 fallback. No server IDs.
 - **All amounts stored in INR (₹).** Foreign input converts at entry time; original currency + rate kept in `nomad-currency-meta` keyed by tx id.
 - **`receiptUpload.js` 3 modes:** signed (`cloudName`+`apiKey`+`apiSecret`, SHA-1 via Web Crypto) → unsigned (`cloudName`+`uploadPreset`) → local (no `cloudName` → compressed data URL). `isLocalReceipt(url)` = `url.startsWith("data:")`.
