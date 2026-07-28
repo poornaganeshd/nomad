@@ -136,7 +136,7 @@ Rows are tappable — `meta.go` routes to the IOU wallet (with `focusPerson` dee
 
 Streak iconography is **PawPrint** (the trail the lion mascot leaves — echoes the terrain hero's "ground ahead" language) and **Shield** for the forgiveness credits, which are labelled **"shields"** in the UI. `streak.js` keeps its internal `freezesHeld` / `frozenDays` / `"frozen"` vocabulary — only the user-facing copy changed. Don't go back to flame + snowflake; that pairing was rejected as generic.
 
-Toasts themselves are anchored to the **bottom** (above the tab bar), not the top — at the top they covered the Add page's wallet picker, so an error about the form hid the control you needed to fix it.
+Toasts themselves are anchored to the **top** (`24px + env(safe-area-inset-top)`), sliding down into view. A bottom anchor was tried and reverted — the user found it awkward. The wrapper stays `pointerEvents: "none"` (only the pills are tappable) so a top toast never blocks the form beneath it.
 
 ### Push notifications (Web Push + ntfy)
 Bill/IOU reminders as real phone push, two channels behind one Settings → "Push Notifications" card:

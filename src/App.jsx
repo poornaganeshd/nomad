@@ -3619,7 +3619,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
 @keyframes fi{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 @keyframes fis{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}
 @keyframes ld{from{transform:translateY(-6px) rotate(-5deg)}to{transform:translateY(-4px) rotate(5deg)}}
-@keyframes ti{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+@keyframes ti{from{opacity:0;transform:translateY(-16px)}to{opacity:1;transform:translateY(0)}}
 @keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.6}}
 @keyframes nmSpin{to{transform:rotate(360deg)}}
@@ -4212,14 +4212,11 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
       </div>
     )}
 
-    {/* Toasts anchor to the BOTTOM, above the tab bar — and above the
-        sync-failure banner (bottom: 84) when that is showing, or the two
-        stack on top of each other. At the top they landed
-        squarely on the Add page's wallet picker / form fields — so an error
-        about the form hid the very control you needed to fix it (and on the
-        dashboard they buried the streak + date chips). */}
+    {/* Toasts anchor to the TOP, clear of the notch/status bar. The wrapper is
+        pointerEvents:none (only the pills themselves are tappable) so a toast
+        never blocks the form underneath it. */}
     {toasts.length > 0 && (
-      <div style={{ position: "fixed", bottom: module !== "finance" ? "calc(24px + env(safe-area-inset-bottom))" : (dlBanner && deadLetterCount > 0) ? "calc(132px + env(safe-area-inset-bottom))" : "calc(92px + env(safe-area-inset-bottom))", left: "50%", transform: "translateX(-50%)", zIndex: 300, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, pointerEvents: "none", maxWidth: "min(440px, 92vw)", width: "auto" }}>
+      <div style={{ position: "fixed", top: "calc(24px + env(safe-area-inset-top))", left: "50%", transform: "translateX(-50%)", zIndex: 300, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, pointerEvents: "none", maxWidth: "min(440px, 92vw)", width: "auto" }}>
         {toasts.slice(-3).map(t => (
           <div key={t.id} onClick={() => dismissToast(t.id)} style={{ pointerEvents: "auto", cursor: "pointer", background: t.type === "error" ? "var(--danger)" : t.type === "success" ? "var(--pos)" : t.type === "warn" ? "var(--neg)" : "var(--acc)", color: "#fff", borderRadius: 18, padding: "10px 18px", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, boxShadow: "0 4px 16px rgba(0,0,0,0.15)", textAlign: "center", lineHeight: 1.4, wordBreak: "break-word", maxWidth: "min(440px, 92vw)", animation: "ti 0.25s ease-out", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
             <span>{t.msg}</span>
