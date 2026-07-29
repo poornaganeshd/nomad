@@ -53,6 +53,14 @@ describe("COLS — canonical DB column definitions", () => {
     expect(COLS.splits).toContain("settled");
   });
 
+  it("splits includes skipped — the write-off flag must survive full-row writes", () => {
+    // The settle paths send `skipped` in a partial {id, settled, skipped} upsert,
+    // but first-connect migration / self-heal / undo-restore write the WHOLE row
+    // via toSB(row, COLS.splits). Omitting it there re-inserted written-off IOUs
+    // with skipped = FALSE, so they came back as outstanding.
+    expect(COLS.splits).toContain("skipped");
+  });
+
   it("recurring includes all scheduling fields", () => {
     const required = [
       "frequency", "dayOfMonth", "intervalDays",

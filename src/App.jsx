@@ -159,7 +159,11 @@ const ml = k => { const [y, m] = k.split("-"); return new Date(y, m - 1).toLocal
 // and the `module === "routine"` render path all stay wired. Flip to true to
 // bring the Finance/Routine header pills (and with them the whole sub-app) back.
 const SHOW_ROUTINE = false;
-const dl = d => { const t = localDateKey(), y = localDateKey(new Date(Date.now() - 864e5)); return d === t ? "Today" : d === y ? "Yesterday" : new Date(d).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }) };
+// House rule: a bare "YYYY-MM-DD" parses as UTC midnight, which renders as the
+// PREVIOUS day for anyone west of UTC — every history row off by one. Anchor at
+// local noon like the rest of the app's date math (IOUWallet's relDate, streak,
+// bankReconcile) so the label matches the date actually stored.
+const dl = d => { const t = localDateKey(), y = localDateKey(new Date(Date.now() - 864e5)); if (d === t) return "Today"; if (d === y) return "Yesterday"; const dt = /^\d{4}-\d{2}-\d{2}$/.test(String(d)) ? new Date(d + "T12:00:00") : new Date(d); return dt.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }) };
 // Single source for person avatars so the same name renders the same colour in
 // both the Splits tab and the event-detail Balances card (the two used to drift).
 const avatarColor = name => { const pal = ["var(--neg)","var(--pos)","var(--acc)","#F4A261","#81B29A","var(--acc2)","#F2CC8F","var(--neg)"]; let h=0; for(const c of name) h=(h*31+c.charCodeAt(0))&0xffff; return pal[h%pal.length]; };
@@ -1595,7 +1599,10 @@ function Events({ events: evs, expenses: ex, splits: sp, settlements: stl, categ
       const inn = eStl.filter(s => s.direction === "owed" && (s.splitName || "").toLowerCase() === pl).reduce((t, s) => t + settlementNetAmount(s), 0);
       return [p, out - inn];
     })) : {};
-    const tO = eSp.filter(s => s.direction === "owe" && !s.settled).reduce((t, s) => t + s.amount, 0), tI = eSp.filter(s => s.direction === "owed" && !s.settled).reduce((t, s) => t + s.amount, 0);
+    // REMAINING, not the original amount: a part-paid IOU (₹60 left of ₹300) kept
+    // quoting ₹300 in the event header while every other surface — the IOU wallet,
+    // the reminders, the per-row Settle sheet — had already moved to the balance.
+    const tO = eSp.filter(s => s.direction === "owe" && !s.settled).reduce((t, s) => t + Math.max(0, remainForSplit(s)), 0), tI = eSp.filter(s => s.direction === "owed" && !s.settled).reduce((t, s) => t + Math.max(0, remainForSplit(s)), 0);
     const suggested = (() => { if (!isGroup || allParts.length < 2) return []; const bals = allParts.map(p => ({ name: p, bal: roundMoney((grpPaid[p] || 0) - (grpShareMap[p] ?? grpShare) - (grpSettled[p] || 0)) })); const cr = bals.filter(b => b.bal > 0.01).map(b => ({ ...b })).sort((a, b) => b.bal - a.bal); const db = bals.filter(b => b.bal < -0.01).map(b => ({ ...b })).sort((a, b) => a.bal - b.bal); const out = []; let ci = 0, di = 0; while (ci < cr.length && di < db.length) { const amt = roundMoney(Math.min(cr[ci].bal, -db[di].bal)); out.push({ from: db[di].name, to: cr[ci].name, amt }); cr[ci].bal = roundMoney(cr[ci].bal - amt); db[di].bal = roundMoney(db[di].bal + amt); if (cr[ci].bal < 0.01) ci++; if (db[di].bal > -0.01) di++; } return out; })();
     const staleIds = new Set((staleByEvent[sel.id] || []).map(x => x.id));
     const pendingCnt = eSp.filter(x => !x.settled).length;
@@ -2349,7 +2356,7 @@ export default function Nomad() {
     return map;
   }, [ex, inc, tr, stl, wsb, wallets, calLog, hTimeline]);
 
-  const budgetStatus = useMemo(() => { const cm = localDateKey().slice(0, 7); const splitCatById = new Map(sp.map(x => [x.id, x.categoryId])); const splitCat = (id) => splitCatById.get(id); const mEx = ex.filter(e => mk(e.date) === cm && !isTrackedExp(e)); const mStl = (stl || []).filter(s => s.direction === "owe" && mk(s.date) === cm); return Object.entries(budgets).filter(entry => entry[1] > 0).map(([cid, lim]) => { const exSum = mEx.filter(e => e.categoryId === cid).reduce((s, e) => s + e.amount, 0); const stlSum = mStl.filter(s => (s.categoryId || splitCat(s.splitId)) === cid).reduce((s, x) => s + x.amount, 0); const spent = roundMoney(exSum + stlSum); const cat = cats.find(c => c.id === cid) || { id: cid, name: cid, color: "#999", neon: "#999" }; const pct = Math.min(100, Math.round(spent / lim * 100)); return { cid, cat, spent, lim, pct }; }); }, [budgets, ex, stl, sp, cats]);
+  const budgetStatus = useMemo(() => { const cm = localDateKey().slice(0, 7); const splitCatById = new Map(sp.map(x => [x.id, x.categoryId])); const splitCat = (id) => splitCatById.get(id); const mEx = ex.filter(e => mk(e.date) === cm && !isTrackedExp(e)); const mStl = (stl || []).filter(s => s.direction === "owe" && mk(s.date) === cm); return Object.entries(budgets).filter(entry => entry[1] > 0).map(([cid, lim]) => { const exSum = mEx.filter(e => e.categoryId === cid).reduce((s, e) => s + e.amount, 0); const stlSum = mStl.filter(s => (s.categoryId || splitCat(s.splitId)) === cid).reduce((s, x) => s + settlementNetAmount(x), 0); const spent = roundMoney(exSum + stlSum); const cat = cats.find(c => c.id === cid) || { id: cid, name: cid, color: "#999", neon: "#999" }; const pct = Math.min(100, Math.round(spent / lim * 100)); return { cid, cat, spent, lim, pct }; }); }, [budgets, ex, stl, sp, cats]);
 
   // Keep the notification centre honest: an entry is a CLAIM ("Rent is due",
   // "You owe ₹117.5 — Rakesh") and the moment you pay the bill or settle the
@@ -2883,7 +2890,10 @@ export default function Nomad() {
       if (buf.settlements?.length) { sStl(p => [...p, ...buf.settlements]); sbUpsert("settlements", buf.settlements.map(s => toSB(s, COLS.settlements))); }
     } else if (buf.type === "income") { sInc(p => [buf.exp, ...p]); sbUpsert("incomes", [{ ...toSB(buf.exp, COLS.incomes), deleted_at: null }]); }
     else if (buf.type === "transfer") { sTr(p => [buf.exp, ...p]); sbUpsert("transfers", [{ ...toSB(buf.exp, COLS.transfers), deleted_at: null }]); }
-    else if (buf.type === "settlement") { sStl(p => [...p, buf.exp]); sbUpsert("settlements", [toSB(buf.exp, COLS.settlements)]); if (buf.exp.splitId) { sSp(p => p.map(x => x.id === buf.exp.splitId ? { ...x, settled: true } : x)); sbUpsert("splits", [{ id: buf.exp.splitId, settled: true }], `splits:${buf.exp.splitId}`); } }
+    // Restore the split's flags to what they were BEFORE the delete, not a blanket
+    // settled:true — undoing the deletion of a PARTIAL payment (₹60 of ₹300) used
+    // to close the IOU outright, hiding ₹240 that was never paid.
+    else if (buf.type === "settlement") { sStl(p => [...p, buf.exp]); sbUpsert("settlements", [toSB(buf.exp, COLS.settlements)]); if (buf.exp.splitId && buf.splitFlags) { const f = buf.splitFlags; sSp(p => p.map(x => x.id === buf.exp.splitId ? { ...x, settled: f.settled, skipped: f.skipped } : x)); sbUpsert("splits", [{ id: buf.exp.splitId, settled: f.settled, skipped: f.skipped }], `splits:${buf.exp.splitId}`); } }
     else if (buf.type === "recurring") { sRec(p => [buf.exp, ...p]); sbUpsert("recurring", [{ ...toSB(buf.exp, COLS.recurring), deleted_at: null }]); }
     else if (buf.type === "event") { sEvs(p => [buf.exp, ...p]); sbUpsert("events", [{ ...toSB(buf.exp, COLS.events), deleted_at: null }]); if (buf.splits?.length) { sSp(p => [...p, ...buf.splits]); sbUpsert("splits", buf.splits.map(s => ({ ...toSB(s, COLS.splits), deleted_at: null }))); } if (buf.settlements?.length) { sStl(p => [...p, ...buf.settlements]); sbUpsert("settlements", buf.settlements.map(s => toSB(s, COLS.settlements))); } }
     else if (buf.type === "split") { sSp(p => [...p, buf.exp]); sbUpsert("splits", [{ ...toSB(buf.exp, COLS.splits), deleted_at: null }]); }
@@ -2929,9 +2939,12 @@ export default function Nomad() {
       showUndoToast("Transfer deleted", { type: "transfer", exp });
     } else if (type === "settlement") {
       const stlRec = stl.find(s => s.id === id); if (!stlRec) return;
+      // Snapshot the linked split's flags so Undo can put them back exactly.
+      const linked = stlRec.splitId ? sp.find(x => x.id === stlRec.splitId) : null;
+      const splitFlags = linked ? { settled: !!linked.settled, skipped: !!linked.skipped } : null;
       sStl(p => p.filter(s => s.id !== id)); sbDeleteWhere("settlements", `id=eq.${id}`);
       if (stlRec.splitId) { sSp(p => p.map(x => x.id === stlRec.splitId ? { ...x, settled: false } : x)); sbUpsert("splits", [{ id: stlRec.splitId, settled: false }], `splits:${stlRec.splitId}`); }
-      showUndoToast("Settlement deleted", { type: "settlement", exp: stlRec });
+      showUndoToast("Settlement deleted", { type: "settlement", exp: stlRec, splitFlags });
     } else if (type === "split") {
       const s = sp.find(x => x.id === id); if (!s) return;
       sSp(p => p.filter(x => x.id !== id)); sbDelete("splits", id);
@@ -3619,7 +3632,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
 @keyframes fi{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 @keyframes fis{from{opacity:0;transform:scale(0.95)}to{opacity:1;transform:scale(1)}}
 @keyframes ld{from{transform:translateY(-6px) rotate(-5deg)}to{transform:translateY(-4px) rotate(5deg)}}
-@keyframes ti{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+@keyframes ti{from{opacity:0;transform:translateY(-16px)}to{opacity:1;transform:translateY(0)}}
 @keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.6}}
 @keyframes nmSpin{to{transform:rotate(360deg)}}
@@ -4212,14 +4225,11 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
       </div>
     )}
 
-    {/* Toasts anchor to the BOTTOM, above the tab bar — and above the
-        sync-failure banner (bottom: 84) when that is showing, or the two
-        stack on top of each other. At the top they landed
-        squarely on the Add page's wallet picker / form fields — so an error
-        about the form hid the very control you needed to fix it (and on the
-        dashboard they buried the streak + date chips). */}
+    {/* Toasts anchor to the TOP, clear of the notch/status bar. The wrapper is
+        pointerEvents:none (only the pills themselves are tappable) so a toast
+        never blocks the form underneath it. */}
     {toasts.length > 0 && (
-      <div style={{ position: "fixed", bottom: module !== "finance" ? "calc(24px + env(safe-area-inset-bottom))" : (dlBanner && deadLetterCount > 0) ? "calc(132px + env(safe-area-inset-bottom))" : "calc(92px + env(safe-area-inset-bottom))", left: "50%", transform: "translateX(-50%)", zIndex: 300, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, pointerEvents: "none", maxWidth: "min(440px, 92vw)", width: "auto" }}>
+      <div style={{ position: "fixed", top: "calc(24px + env(safe-area-inset-top))", left: "50%", transform: "translateX(-50%)", zIndex: 300, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, pointerEvents: "none", maxWidth: "min(440px, 92vw)", width: "auto" }}>
         {toasts.slice(-3).map(t => (
           <div key={t.id} onClick={() => dismissToast(t.id)} style={{ pointerEvents: "auto", cursor: "pointer", background: t.type === "error" ? "var(--danger)" : t.type === "success" ? "var(--pos)" : t.type === "warn" ? "var(--neg)" : "var(--acc)", color: "#fff", borderRadius: 18, padding: "10px 18px", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, boxShadow: "0 4px 16px rgba(0,0,0,0.15)", textAlign: "center", lineHeight: 1.4, wordBreak: "break-word", maxWidth: "min(440px, 92vw)", animation: "ti 0.25s ease-out", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
             <span>{t.msg}</span>
