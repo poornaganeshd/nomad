@@ -5,6 +5,7 @@ import { analyzeFood, foodResultToText, foodResultToMacroString } from './foodVi
 import { IconFlameFilled, IconDropletFilled, IconCalendarMonth, IconCircleCheckFilled, IconMoodHappyFilled, IconMoodNeutralFilled, IconMoodSadFilled, IconMoodAngryFilled, IconBedFilled, IconMoonFilled, IconCameraFilled, IconCalendarWeek, IconPhotoPlus } from '@tabler/icons-react';
 import { Camera, Leaf, Robot } from "@phosphor-icons/react";
 import { hapticSelection } from './haptics';
+import { tint } from "./tint";
 
 /* ============================================================
    FORM — Daily food & skincare ritual tracker  v6
@@ -2062,7 +2063,7 @@ const FoodScreen = ({ day, update, config, onComplete, streak, showToast = () =>
                     <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--txm)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Quality</div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
                         {[{ key: 'deep', label: 'Deep', color: '#6BAA75' }, { key: 'okay', label: 'Okay', color: '#7B8CDE' }, { key: 'light', label: 'Light', color: 'var(--amber)' }, { key: 'poor', label: 'Poor', color: '#E07A5F' }].map(({ key, label, color }) => (
-                            <div key={key} onClick={() => { haptic(); update(d => ({ sleepQuality: d.sleepQuality === key ? '' : key })); }} style={{ textAlign: 'center', padding: '7px 4px', borderRadius: 10, background: day.sleepQuality === key ? `${color}22` : 'var(--sf)', border: `1.5px solid ${day.sleepQuality === key ? color : 'var(--bd)'}`, cursor: 'pointer', transition: 'all 0.15s' }}>
+                            <div key={key} onClick={() => { haptic(); update(d => ({ sleepQuality: d.sleepQuality === key ? '' : key })); }} style={{ textAlign: 'center', padding: '7px 4px', borderRadius: 10, background: day.sleepQuality === key ? tint(color, '22') : 'var(--sf)', border: `1.5px solid ${day.sleepQuality === key ? color : 'var(--bd)'}`, cursor: 'pointer', transition: 'all 0.15s' }}>
                                 <div style={{ fontSize: 11, fontWeight: 700, color: day.sleepQuality === key ? color : 'var(--txm)' }}>{label}</div>
                             </div>
                         ))}

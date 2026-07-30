@@ -165,6 +165,53 @@ test("terrain hero: the axis labels sit inside the chart", async ({ page }) => {
   }
 });
 
+test("var-coloured wallets and categories still get a real tint", async ({ page }) => {
+  // Several seeds carry a CSS var rather than hex — WALLETS.cash = var(--warn),
+  // DC.coffee = var(--warn), DC.rent = var(--acc2) — and colours are
+  // user-editable, so this is not an edge case. Hex-only tinting broke them two
+  // ways: parsing helpers returned rgba(0,0,0,a) (translucent BLACK) and the
+  // `color + "24"` suffix produced an invalid value the browser DROPPED, leaving
+  // no tint at all. Everything routes through src/tint.js now.
+  await gotoLocal(page, { expenses: [exp({ amount: 90, categoryId: "coffee", walletId: "cash" })], ...funded() });
+
+  const classify = (v) => v;
+  // 1. Dashboard wallet tiles: Cash must be tinted exactly like the hex wallets.
+  const tiles = await page.locator(".card-hover").first().evaluate(() => {
+    const read = (el) => {
+      const chip = el.querySelector("span[style*='dashed']");
+      const cs = getComputedStyle(chip);
+      return { bg: cs.backgroundColor, outline: cs.outlineColor, style: cs.outlineStyle };
+    };
+    return [...document.querySelectorAll(".card-hover")]
+      .filter((t) => /upi lite|bank|cash/i.test(t.textContent))
+      .map((t) => ({ name: (t.textContent.match(/UPI Lite|Bank|Cash/i) || [""])[0], ...read(t) }));
+  });
+  expect(tiles.length).toBe(3);
+  for (const t of tiles) {
+    // Not dropped: a real background and a real dashed ring.
+    expect(classify(t.bg), `${t.name} icon background`).not.toBe("rgba(0, 0, 0, 0)");
+    expect(t.style, `${t.name} outline style`).toBe("dashed");
+    // Not blackened.
+    const rgb = (t.bg.match(/[\d.]+/g) || []).slice(0, 3).map(Number);
+    expect(rgb.reduce((a, b) => a + b, 0), `${t.name} icon background is not black`).toBeGreaterThan(0);
+  }
+
+  // 2. Add form: the selected category / wallet chip for a var-coloured entity.
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  for (const label of ["Coffee / Snacks", "Rent & Bills"]) {
+    const chip = page.getByRole("button", { name: label, exact: true });
+    await chip.click();
+    const paint = await chip.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return { bg: cs.backgroundColor, border: cs.borderTopColor };
+    });
+    for (const [k, v] of Object.entries(paint)) {
+      const n = (v.match(/[\d.]+/g) || []).slice(0, 3).map(Number);
+      expect(n.reduce((a, b) => a + b, 0), `${label} ${k}`).toBeGreaterThan(0);
+    }
+  }
+});
+
 test("wallet tiles: compact, with the share silhouette still proportional", async ({ page }) => {
   await gotoLocal(page, { expenses: [exp({ amount: 200 })], ...funded() });
 

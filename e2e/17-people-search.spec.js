@@ -138,25 +138,78 @@ test("split picker: chosen people drive the share preview and the saved IOUs", a
   }).toBe(2);
 });
 
+// Two identical expenses make a quick-add pattern. `n` controls how many times
+// each is logged, which drives the chip's frequency ridge.
+const qaExpense = (over, n = 2) => Array.from({ length: n }, (_, i) => ({
+  id: `qa-${over.note}-${i}`, type: "expense", amount: 150, categoryId: "other",
+  walletId: "bank", note: "Pattern", date: today(), balBefore: 9999, ...over,
+  id2: undefined,
+})).map((r, i) => ({ ...r, id: `qa-${r.note}-${i}` }));
+
+const LONG_NOTE = "Nippon multicap (recurring monthly SIP mandate)";
+
 test("quick add: a long note is clipped inside its chip, never off the screen", async ({ page }) => {
-  // Two identical expenses make a quick-add pattern; the note is deliberately
-  // long enough that an unbounded chip would run past the viewport.
-  const mk = (i) => ({
-    id: `qa-${i}`, type: "expense", amount: 150, categoryId: "other", walletId: "bank",
-    note: "Nippon multicap (recurring monthly SIP mandate)", date: today(), balBefore: 9999,
-  });
-  await gotoLocal(page, { expenses: [mk(1), mk(2)], ...funded() });
+  await gotoLocal(page, { expenses: qaExpense({ note: LONG_NOTE }), ...funded() });
   await page.getByRole("button", { name: "Add", exact: true }).click();
 
-  const row = page.getByText("Quick add").locator("xpath=following-sibling::div[1]");
-  await expect(row).toBeVisible();
-  // The row wraps instead of scrolling, so nothing can hide past its right edge.
-  const box = await row.evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
-  expect(box.scroll).toBeLessThanOrEqual(box.client + 1);
-  // ...and the chip itself stays inside the row.
-  const chip = row.getByRole("button").first();
-  const widths = await chip.evaluate((el) => ({ chip: el.getBoundingClientRect().width, row: el.parentElement.clientWidth }));
-  expect(widths.chip).toBeLessThanOrEqual(widths.row);
+  const chip = page.getByRole("button", { name: new RegExp(LONG_NOTE.slice(0, 16)) }).first();
+  await expect(chip).toBeVisible();
+  const m = await chip.evaluate((el) => {
+    const row = el.parentElement;
+    return { chipW: el.getBoundingClientRect().width, rowW: row.clientWidth, rowScroll: row.scrollWidth };
+  });
+  // The row wraps instead of scrolling, so nothing can hide past its right edge,
+  // and the chip itself stays inside the row.
+  expect(m.rowScroll).toBeLessThanOrEqual(m.rowW + 1);
+  expect(m.chipW).toBeLessThanOrEqual(m.rowW);
+});
+
+test("quick add: chips carry their category colour, even when it is a CSS var", async ({ page }) => {
+  // `coffee` seeds its colour as var(--warn) — alpha() used to hex-parse that,
+  // get NaN, fall back to 0 and paint the chip translucent BLACK. Every tinted
+  // surface for coffee / rent (var(--acc2)) was affected, which is why the chips
+  // stopped looking category-coloured.
+  await gotoLocal(page, {
+    expenses: [...qaExpense({ note: "Filter coffee", categoryId: "coffee", amount: 90 }),
+               ...qaExpense({ note: "Curd", categoryId: "food", amount: 10 })],
+    ...funded(),
+  });
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+
+  for (const note of ["Filter coffee", "Curd"]) {
+    const chip = page.getByRole("button", { name: new RegExp(note) }).first();
+    const paint = await chip.evaluate((el) => {
+      const rgb = (v) => (v.match(/[\d.]+/g) || []).slice(0, 3).map(Number);
+      const spine = el.querySelector("span");
+      return {
+        border: rgb(getComputedStyle(el).borderTopColor),
+        spine: rgb(getComputedStyle(spine).backgroundColor),
+        amount: rgb(getComputedStyle(el.querySelector("span[style*='tabular-nums']")).color),
+        hasRidge: !!el.querySelector("svg path"),
+      };
+    });
+    // Nothing may resolve to pure black — that is precisely the NaN fallback.
+    [paint.border, paint.spine, paint.amount].forEach((c) => {
+      expect(c.length).toBe(3);
+      expect(c.reduce((a, b) => a + b, 0)).toBeGreaterThan(0);
+    });
+    // The frequency ridge (same silhouette idiom as the wallet tiles) is drawn.
+    expect(paint.hasRidge).toBe(true);
+  }
+});
+
+test("quick add: tapping a chip fills the form and says so on the chip", async ({ page }) => {
+  await gotoLocal(page, { expenses: qaExpense({ note: "Curd", categoryId: "food", amount: 10 }), ...funded() });
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+
+  const chip = page.getByRole("button", { name: /Curd/ }).first();
+  await chip.click();
+  // The fields it fills are mostly below the fold, so the chip has to confirm
+  // the tap itself — otherwise it reads as having done nothing.
+  await expect(chip).toContainText("Filled");
+  await expect(page.locator("input[placeholder='0']").first()).toHaveValue("10");
+  // ...and it reverts on its own.
+  await expect(chip).toContainText("Curd", { timeout: 4000 });
 });
 
 test("new IOU: the name field is a ranked typeahead and a tap fills it", async ({ page }) => {

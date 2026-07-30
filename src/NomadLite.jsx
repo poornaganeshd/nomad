@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { IconChevronLeft, IconRefresh, IconPlus, IconX, IconTrash, IconCircleCheck, IconAlertTriangle, IconCopy, IconBrandWhatsapp, IconPrinter, IconHome, IconBolt, IconAirConditioning, IconDroplet, IconFlame, IconBulb, IconWind, IconWashMachine, IconFridge, IconDeviceTv, IconToolsKitchen2 } from "@tabler/icons-react";
+import { tint } from "./tint";
 import { LS_KEY, DEFAULT_STATE, loadState, computeSplit, computeTipSplit, uid, avatarColor, groupColor, initials, fmt, pctFmt, guessIcon, ICON_KEYS } from "./nomadLiteSplit";
 import { hapticSelection, hapticLight, hapticMedium } from "./haptics";
 
@@ -533,7 +534,7 @@ export default function NomadLite({ onBack, onToast = () => {} }) {
             <p style={{ fontSize: 13, color: "var(--muted)", fontWeight: 600, margin: "2px 0 16px", lineHeight: 1.5 }}>Quick calculators, no logging needed. Pick a preset.</p>
             {PRESETS.map(p => (
               <button key={p.id} onClick={() => { hapticLight(); setActive(p.id); }} style={{ ...card, width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 14, cursor: "pointer" }}>
-                <div style={{ width: 48, height: 48, borderRadius: 16, background: p.color + "1f", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0, boxShadow: CLAY_SOFT }}>{p.icon}</div>
+                <div style={{ width: 48, height: 48, borderRadius: 16, background: tint(p.color, "1f"), display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0, boxShadow: CLAY_SOFT }}>{p.icon}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 15, color: "var(--text)" }}>{p.name}</div>
                   <div style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600, marginTop: 2, lineHeight: 1.4 }}>{p.desc}</div>
