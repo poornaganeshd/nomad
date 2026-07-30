@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback, memo } from "react";
 import { roundMoney, localDateKey, defaultSettleWalletId, settlementNetAmount, isSuspiciousExcess } from "./financeUtils";
 import { parseAmount } from "./txParsers";
+import { rankPeople, highlightParts, peopleFromSplits, sameName } from "./peopleSearch";
 import { useLockBodyScroll } from "./scrollLock";
 import { CaretLeft, CaretRight, CheckCircle, ArrowUp, ArrowDown, Plus, Trash, SkipForward, CurrencyInr, Wallet, X, ArrowCounterClockwise, PencilSimple } from "@phosphor-icons/react";
 
@@ -59,6 +60,23 @@ const fmtSigned = (v, fmt) => (v > 0 ? "+" : "−") + fmt(Math.abs(v)).slice(1);
 // vertical gap between the flat person cards
 const GAP = 18;
 
+// Person-card display data. Module-level and fully parameterised so the caller
+// can memoize it — as a closure over component state it was rebuilt on every
+// render and no amount of memo() on PersonCard could help.
+const cardInfoOf = (name, personMap, catMap, fmt) => {
+  const pm = personMap[name]; const n = pm.net; const up = n > 0.5, down = n < -0.5;
+  const c1 = avatarColor(name);
+  const open = pm.splits.filter(s => !s.settled && !s.skipped);
+  const last = open.slice().sort((a, b) => iouDateKey(b).localeCompare(iouDateKey(a)))[0];
+  // Subtitle prefers a source summary (general + N events) when the balance
+  // spans more than one place, else falls back to the latest IOU's note/date.
+  const evCount = new Set(open.filter(s => s.eventId).map(s => s.eventId)).size;
+  const hasGen = open.some(s => !s.eventId);
+  const srcSummary = evCount > 0 ? `${evCount} event${evCount > 1 ? "s" : ""}${hasGen ? " + general" : ""}` : "";
+  const sub = open.length ? (srcSummary || (last ? `${last.note || (catMap.get(last.categoryId)?.name || "IOU")} · ${relDate(last.date || last.createdAt)}` : "")) : "All settled";
+  return { n, up, down, c1, openCount: open.length, sub, dir: up ? "Owes you" : down ? "You owe" : "Settled", amt: Math.abs(n) < 0.5 ? "—" : fmt(Math.abs(n)) };
+};
+
 export default function IOUWallet({ splits = [], settlements = [], categories = [], wallets = [], events = [], fmt = n => "₹" + n, uid = () => Math.random().toString(36).slice(2), isUpiLite = () => false, SettleModal = null, onAdd = () => {}, onSettle = () => {}, onSettleNet = () => {}, onSettleEventNet = () => {}, onSkip = () => {}, onUnskip = () => {}, onDelete = () => {}, onRenamePerson = () => {}, onError = () => {}, focusPerson = null, onFocusHandled = () => {} }) {
   const [view, sView] = useState("home");        // home | person
   const [cur, sCur] = useState(null);            // current person name
@@ -71,7 +89,9 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
   const [morph, sMorph] = useState(null);        // { name, rect } → card-morph quick-add
   const [renName, sRenName] = useState(null);    // person-detail rename/merge draft (null = closed)
   const [burst, sBurst] = useState(0);           // confetti trigger (increments on a settle)
-  const openMorph = (name, rect) => sMorph({ name, rect });
+  // Stable identities — PersonCard is memo()'d, so a fresh arrow per render
+  // would invalidate every card on every parent render and undo the memo.
+  const openMorph = useCallback((name, rect) => sMorph({ name, rect }), []);
 
   // ── derived: canonical people + nets (mirrors App.jsx Splits aggregation) ──
   // MERGED NET: event splits are folded in alongside personal IOUs so one
@@ -113,35 +133,34 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
       if (!personMap[n].parts[pk]) personMap[n].parts[pk] = { label: s.eventId ? (evMap.get(s.eventId)?.name || "Event") : "General", net: 0 };
       personMap[n].parts[pk].net += signed;
     });
-    return { evMap, paidBy, personMap };
+    // The home view's roster + totals are folded into the SAME memo rather than
+    // re-derived on every render. App re-renders on each 60s background pull and
+    // on every toast, and each of those used to re-walk every person, re-sort the
+    // active list, and rebuild each card's display data — which is the jank you
+    // feel scrolling a wallet with a dozen people.
+    const people = Object.keys(personMap);
+    const resolved = n => personMap[n].splits.every(s => s.settled || s.skipped);
+    const active = people.filter(n => !resolved(n)).sort((a, b) => Math.abs(personMap[b].net) - Math.abs(personMap[a].net));
+    const settledPeople = people.filter(resolved);
+    const owedTot = active.filter(n => personMap[n].net > 0.5).reduce((t, n) => t + personMap[n].net, 0);
+    const oweTot = active.filter(n => personMap[n].net < -0.5).reduce((t, n) => t - personMap[n].net, 0);
+    return { evMap, paidBy, personMap, people, active, settledPeople, owedTot, oweTot, net: roundMoney(owedTot - oweTot) };
   }, [splits, settlements, events]);
-  const { paidBy, personMap } = model;
+  const { paidBy, personMap, people, active, settledPeople, owedTot, oweTot, net } = model;
   const evName = id => model.evMap.get(id)?.name || "Event";
   const remOf = s => roundMoney(s.amount - (paidBy[s.id] || 0));
   const catMap = useMemo(() => new Map(categories.map(c => [c.id, c])), [categories]);
-  const people = Object.keys(personMap);
-  const isResolved = n => personMap[n].splits.every(s => s.settled || s.skipped);
-  const active = people.filter(n => !isResolved(n)).sort((a, b) => Math.abs(personMap[b].net) - Math.abs(personMap[a].net));
-  const settledPeople = people.filter(isResolved);
-  const owedTot = active.filter(n => personMap[n].net > 0.5).reduce((t, n) => t + personMap[n].net, 0);
-  const oweTot = active.filter(n => personMap[n].net < -0.5).reduce((t, n) => t - personMap[n].net, 0);
-  const net = roundMoney(owedTot - oweTot);
+  // Name-suggestion pool for the New-IOU field: EVERY person you've had an IOU
+  // with, most-recent-first. `people` above is only who the wallet currently
+  // shows (general + active events), so someone whose IOUs all sat in a completed
+  // event was unsuggestable — you'd retype the name and fork a duplicate person.
+  const allPeople = useMemo(() => peopleFromSplits(splits), [splits]);
 
-  // person-card display data (pure over personMap + props; not a component)
-  const cardInfo = name => {
-    const pm = personMap[name]; const n = pm.net; const up = n > 0.5, down = n < -0.5;
-    const c1 = avatarColor(name);
-    const open = pm.splits.filter(s => !s.settled && !s.skipped);
-    const last = open.slice().sort((a, b) => iouDateKey(b).localeCompare(iouDateKey(a)))[0];
-    // Subtitle prefers a source summary (general + N events) when the balance
-    // spans more than one place, else falls back to the latest IOU's note/date.
-    const evCount = new Set(open.filter(s => s.eventId).map(s => s.eventId)).size;
-    const hasGen = open.some(s => !s.eventId);
-    const srcSummary = evCount > 0 ? `${evCount} event${evCount > 1 ? "s" : ""}${hasGen ? " + general" : ""}` : "";
-    const sub = open.length ? (srcSummary || (last ? `${last.note || (catMap.get(last.categoryId)?.name || "IOU")} · ${relDate(last.date || last.createdAt)}` : "")) : "All settled";
-    return { n, up, down, c1, openCount: open.length, sub, dir: up ? "Owes you" : down ? "You owe" : "Settled", amt: Math.abs(n) < 0.5 ? "—" : fmt(Math.abs(n)) };
-  };
-  const openPerson = name => { sCur(name); sView("person"); sAdding(false); sSeg(personMap[name]?.splits.some(s => !s.eventId) ? "personal" : "events"); sMorph(null); sRenName(null); };
+  // Person-card display data, memoized together with the roster so a parent
+  // re-render (60s pull, any toast) doesn't rebuild every card object and force
+  // every memoized PersonCard to re-render on identity alone.
+  const cards = useMemo(() => model.active.map(name => ({ name, info: cardInfoOf(name, model.personMap, catMap, fmt) })), [model, catMap, fmt]);
+  const openPerson = useCallback(name => { sCur(name); sView("person"); sAdding(false); sSeg(personMap[name]?.splits.some(s => !s.eventId) ? "personal" : "events"); sMorph(null); sRenName(null); }, [personMap]);
   const addFormProps = { categories, uid, onAdd, onError, onDone: () => sAdding(false) };
 
   // Deep-link from a notification ("You owe ₹117.5 — Rakesh" → this person).
@@ -293,45 +312,64 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
     {active.length === 0 && people.length === 0 && <div style={{ ...neuCard, textAlign: "center", padding: "42px 18px", color: "var(--muted)" }}><div style={{ marginBottom: 12, display: "flex", justifyContent: "center" }}><div style={{ width: 58, height: 58, borderRadius: 18, background: SURF, boxShadow: NEU_INSET, display: "flex", alignItems: "center", justifyContent: "center" }}><Wallet size={28} color="var(--ts)" weight="duotone" /></div></div><div style={{ fontFamily: "var(--font-h)", color: "var(--text)", fontSize: 15, fontWeight: 800, marginBottom: 5 }}>No IOUs yet</div><div style={{ fontSize: 12.5, fontWeight: 500 }}>Tap “New IOU” to add your first.</div></div>}
 
     {active.length > 0 && <div style={{ display: "flex", flexDirection: "column", gap: GAP }}>
-      {active.map(name => <PersonCard key={name} name={name} info={cardInfo(name)} showAdd onOpen={() => openPerson(name)} onQuickAdd={rect => openMorph(name, rect)} />)}
+      {cards.map(({ name, info }) => <PersonCard key={name} name={name} info={info} showAdd onOpen={openPerson} onQuickAdd={openMorph} />)}
     </div>}
 
     {settledPeople.length > 0 && <details style={{ marginTop: 18 }}><summary style={{ fontSize: 11.5, color: "var(--muted)", cursor: "pointer", fontFamily: "var(--font-h)", fontWeight: 700 }}><CheckCircle size={12} weight="fill" style={{ verticalAlign: "-2px", marginRight: 4 }} />Settled up ({settledPeople.length})</summary><div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 9 }}>{settledPeople.map(name => <div key={name} onClick={() => openPerson(name)} role="button" tabIndex={0} onKeyDown={kbd(() => openPerson(name))} aria-label={`Open ${name}, settled`} style={{ display: "flex", alignItems: "center", gap: 11, padding: "11px 14px", ...neuCard, opacity: 0.72, cursor: "pointer" }}><div style={{ width: 32, height: 32, borderRadius: 11, background: avatarColor(name), color: ink(avatarColor(name)), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 12, boxShadow: NEU_SM }}>{initials(name)}</div><span style={{ flex: 1, fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--ts)" }}>{name}</span><span style={{ fontSize: 11, color: MINT, fontFamily: "var(--font-h)", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 3 }}><CheckCircle size={12} weight="fill" /> settled</span><button onClick={e => { e.stopPropagation(); openMorph(name, e.currentTarget.getBoundingClientRect()); }} aria-label={`New IOU with ${name}`} title="New IOU" style={{ width: 30, height: 30, border: "none", borderRadius: 10, boxShadow: NEU_SM, background: SURF, color: "var(--ts)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><Plus size={14} weight="bold" /></button></div>)}</div></details>}
 
     {sheets}
-    {morph && <MorphCompose rect={morph.rect} name={morph.name} categories={categories} uid={uid} onAdd={onAdd} onError={onError} suggestions={people} onClose={() => sMorph(null)} />}
+    {morph && <MorphCompose rect={morph.rect} name={morph.name} categories={categories} uid={uid} onAdd={onAdd} onError={onError} suggestions={allPeople} onClose={() => sMorph(null)} />}
     {netBk && <NetBreakdown rows={bkRows} net={net} owedTot={owedTot} oweTot={oweTot} fmt={fmt} onOpenPerson={name => { sNetBk(false); openPerson(name); }} onClose={() => sNetBk(false)} />}
   </div>;
 }
 
 // ── card-morph quick-add (module-level; grows from a rect to full-screen) ──
+// Open is slower than close on purpose: the grow sells the shared-element link,
+// but a 380ms shrink on the way out just reads as the app being slow to respond
+// to a tap. Both durations live here because close() must keep its unmount
+// timeout in step with the CSS — a drifted timeout is how you get a card that
+// pops out of existence mid-flight.
+const MORPH_IN = 300, MORPH_OUT = 200;
 function MorphCompose({ rect, name, categories = [], uid, onAdd, onError = () => {}, suggestions = [], onClose }) {
   const [open, sOpen] = useState(false);
+  // Read once, in an initializer, so the render stays pure.
+  const [still] = useState(() => typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true);
   useLockBodyScroll();
   useEffect(() => { const id = requestAnimationFrame(() => sOpen(true)); return () => cancelAnimationFrame(id); }, []);
-  const close = () => { sOpen(false); setTimeout(onClose, 380); };
+  const dur = still ? 0 : open ? MORPH_IN : MORPH_OUT;
+  const close = () => { sOpen(false); setTimeout(onClose, still ? 0 : MORPH_OUT); };
   const vw = typeof window !== "undefined" ? window.innerWidth : 400, vh = typeof window !== "undefined" ? window.innerHeight : 800;
   const M = 12;
   const isNew = name === "__new__";
   // centered, content-sized card (not full-screen) — free-name needs the extra name field
   const W = Math.min(vw - 2 * M, 440);
-  const H = Math.min(vh - 2 * M, isNew ? 472 : 414);
+  // The free-name variant is taller: it carries the name field AND the
+  // suggestion chips, and "Add IOU" has to stay reachable without scrolling the
+  // card's inner pane. Still clamped to the viewport, so short phones just scroll.
+  const H = Math.min(vh - 2 * M, isNew ? 516 : 414);
   const pos = { top: Math.max(M, (vh - H) / 2), left: (vw - W) / 2, width: W, height: H };
   const r = rect || { top: pos.top + 40, left: pos.left + W * 0.2, width: W * 0.6, height: 120 };
   // GPU-only morph: the card sits at its FINAL rect and animates `transform`
   // from the source button's rect. Animating top/left/width/height re-layouts
   // every frame under the heavy neumorphic shadows and visibly lags on phones.
-  const closedT = `translate(${r.left - pos.left}px, ${r.top - pos.top}px) scale(${r.width / W}, ${r.height / H})`;
+  const closedT = still ? "none" : `translate(${r.left - pos.left}px, ${r.top - pos.top}px) scale(${r.width / W}, ${r.height / H})`;
   const accent = name === "__new__" ? CORAL : avatarColor(name);
   const at = ink(accent);
   return <div style={{ position: "fixed", inset: 0, zIndex: 260, pointerEvents: open ? "auto" : "none" }}>
-    <div onClick={close} style={{ position: "absolute", inset: 0, background: "rgba(20,18,30,.45)", opacity: open ? 1 : 0, transition: "opacity .34s" }} />
-    <div style={{ position: "fixed", ...pos, background: SURF, borderRadius: RAD, boxShadow: NEU_RAISED, overflow: "hidden", transform: open ? "translate(0px, 0px) scale(1, 1)" : closedT, transformOrigin: "top left", transition: `transform .38s ${EASE}`, willChange: "transform" }}>
-      <div style={{ background: accent, color: at, padding: "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", opacity: open ? 1 : 0, transition: "opacity .22s", transitionDelay: open ? ".1s" : "0s" }}>
+    <div onClick={close} style={{ position: "absolute", inset: 0, background: "rgba(20,18,30,.45)", opacity: open ? 1 : 0, transition: `opacity ${dur}ms` }} />
+    {/* The card FADES as well as scales. Without the opacity leg, closing left a
+        fully-opaque blank panel shrunk onto the "New IOU" button for the whole
+        animation — a pale empty plate sitting exactly where the button should be,
+        which is what the button looked like it had turned into. The big double
+        NEU_RAISED shadow is also dropped the instant we start closing: scaling it
+        non-uniformly smears the soft edges and is the most expensive part of the
+        frame. */}
+    <div style={{ position: "fixed", ...pos, background: SURF, borderRadius: RAD, boxShadow: open ? NEU_RAISED : "none", overflow: "hidden", transform: open ? "translate(0px, 0px) scale(1, 1)" : closedT, opacity: open ? 1 : 0, transformOrigin: "top left", transition: `transform ${dur}ms ${EASE}, opacity ${dur}ms ease`, willChange: "transform, opacity" }}>
+      <div style={{ background: accent, color: at, padding: "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", opacity: open ? 1 : 0, transition: `opacity ${Math.round(dur * 0.6)}ms`, transitionDelay: open ? `${Math.round(dur * 0.25)}ms` : "0s" }}>
         <div style={{ minWidth: 0 }}><div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".8px", opacity: .8 }}>New IOU</div><div style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 23, letterSpacing: "-.3px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{name === "__new__" ? "Someone new" : name}</div></div>
         <button onClick={close} aria-label="Close" style={{ width: 38, height: 38, border: "none", borderRadius: 13, background: "rgba(255,255,255,.35)", color: at, display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><X size={20} weight="bold" /></button>
       </div>
-      <div style={{ opacity: open ? 1 : 0, transition: "opacity .25s", transitionDelay: open ? ".16s" : "0s", height: "calc(100% - 72px)", overflowY: "auto", padding: 18, boxSizing: "border-box" }}>
+      <div style={{ opacity: open ? 1 : 0, transition: `opacity ${Math.round(dur * 0.7)}ms`, transitionDelay: open ? `${Math.round(dur * 0.4)}ms` : "0s", height: "calc(100% - 72px)", overflowY: "auto", padding: 18, boxSizing: "border-box" }}>
         <AddForm fixedName={name === "__new__" ? undefined : name} categories={categories} uid={uid} onAdd={s => { onAdd(s); close(); }} onError={onError} onDone={() => {}} suggestions={suggestions} bare big />
       </div>
     </div>
@@ -361,7 +399,28 @@ function AddForm({ fixedName, categories = [], uid, onAdd, onError = () => {}, o
       {[["owe", ArrowDown, "I owe them"], ["owed", ArrowUp, "They owe me"]].map(([d, Ico, lbl]) => { const ac = d === "owe" ? CORAL : MINT; const on = dir === d; return <button key={d} onClick={() => sDir(d)} style={{ flex: 1, padding: big ? 13 : 11, borderRadius: RAD_SM, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 700, cursor: "pointer", border: "none", boxShadow: on ? NEU_INSET : NEU_SM, background: on ? ac + "30" : SURF, color: on ? (d === "owe" ? CORAL : MINT) : "var(--muted)", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, transition: "box-shadow .15s, background .15s" }}><Ico size={15} weight="bold" /> {lbl}</button>; })}
     </div>
     {!fixedName && <input value={nm} onChange={e => sNm(e.target.value)} placeholder="Friend's name" style={{ ...inpN, ...(big ? { fontSize: 16 } : {}) }} />}
-    {!fixedName && (() => { const q = nm.trim().toLowerCase(); const sugg = suggestions.filter(p => p.toLowerCase() !== q && (!q || p.toLowerCase().includes(q))).slice(0, 6); return sugg.length ? <div style={{ display: "flex", gap: 7, overflowX: "auto", scrollbarWidth: "none", marginBottom: 11, paddingBottom: 2 }}>{sugg.map(p => <button key={p} onClick={() => sNm(p)} style={{ flexShrink: 0, border: "none", borderRadius: 11, boxShadow: NEU_SM, background: SURF, color: "var(--ts)", fontFamily: "var(--font-h)", fontWeight: 700, fontSize: 11.5, padding: "7px 12px", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 16, height: 16, borderRadius: 6, background: avatarColor(p), color: ink(avatarColor(p)), display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 8.5, fontWeight: 800 }}>{initials(p)}</span>{p}</button>)}</div> : null; })()}
+    {/* Ranked typeahead over everyone you've had an IOU with. Was an unranked
+        `includes()` inside an overflow-x strip: typing "a" left "Arun" wherever
+        the load order happened to put it, and only the first ~3 chips were ever
+        on screen with no hint the rest existed. Now it WRAPS (nothing hidden),
+        prefix hits come first, and the matched run is highlighted so it's obvious
+        why a name is being offered. */}
+    {!fixedName && (() => {
+      const q = nm.trim();
+      const matches = rankPeople(q, suggestions, { limit: 0 });
+      // The morph card is a fixed height with its own inner scroll, so an
+      // 8-chip block on open pushes the amount field and Add button below the
+      // fold. Show the 4 most recent until the user actually searches; the
+      // "+N more" line doubles as the prompt to start typing.
+      const shown = matches.slice(0, q ? 8 : 4);
+      const more = matches.length - shown.length;
+      if (!suggestions.length) return null;
+      return <div style={{ marginBottom: 11 }}>
+        {shown.length > 0 && <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{shown.map(({ name: p }) => { const [pre, mid, post] = highlightParts(p, q); const on = sameName(p, q); const pc = avatarColor(p); return <button key={p} onClick={() => sNm(p)} aria-label={`Use ${p}`} style={{ border: "none", borderRadius: 11, boxShadow: on ? NEU_INSET : NEU_SM, background: SURF, color: on ? "var(--text)" : "var(--ts)", fontFamily: "var(--font-h)", fontWeight: 700, fontSize: 11.5, padding: "7px 12px", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6, maxWidth: "100%", minWidth: 0, transition: "box-shadow .15s" }}><span style={{ width: 16, height: 16, borderRadius: 6, background: pc, color: ink(pc), display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 8.5, fontWeight: 800, flexShrink: 0 }}>{initials(p)}</span><span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{pre}<b style={{ color: accent, fontWeight: 800 }}>{mid}</b>{post}</span></button>; })}</div>}
+        {more > 0 && <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 600, marginTop: 6 }}>+{more} more — keep typing to narrow it down.</div>}
+        {!!q && matches.length === 0 && <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 600 }}>No one matches — “{q.slice(0, 24)}” will be added as someone new.</div>}
+      </div>;
+    })()}
     {categories.length > 0 && <div style={{ display: "flex", gap: 8, overflowX: "auto", scrollbarWidth: "none", marginBottom: 11, paddingBottom: 4, paddingTop: 2 }}>{categories.map(c => { const on = catId === c.id; return <button key={c.id} onClick={() => sCatId(c.id)} style={{ flexShrink: 0, padding: "8px 12px", borderRadius: 12, fontSize: 11.5, fontFamily: "var(--font-h)", fontWeight: on ? 700 : 600, cursor: "pointer", whiteSpace: "nowrap", border: "none", boxShadow: on ? NEU_INSET : NEU_SM, background: on ? c.color + "33" : SURF, color: on ? "var(--text)" : "var(--muted)", display: "inline-flex", alignItems: "center", gap: 6, transition: "box-shadow .15s, background .15s" }}><span style={{ width: 9, height: 9, borderRadius: 9, background: c.color, flexShrink: 0 }} />{c.emoji ? c.emoji + " " : ""}{c.name}</button>; })}</div>}
     <div style={{ display: "flex", gap: 9, marginBottom: 11 }}>
       <input type="number" inputMode="decimal" value={amt} onChange={e => sAmt(e.target.value)} placeholder="₹ amount" style={{ ...inpN, marginBottom: 0, flex: 1, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: big ? 24 : 18 }} />
@@ -373,14 +432,20 @@ function AddForm({ fixedName, categories = [], uid, onAdd, onError = () => {}, o
 }
 
 // ── person card (module-level; pastel neumorphic block; fills its absolute wrapper) ──
-function PersonCard({ name, info, onOpen, showAdd = false, onQuickAdd = () => {} }) {
+// memo()'d: the wallet home renders one per person and App re-renders it on every
+// 60s background pull and every toast. `info` comes from a useMemo and the two
+// callbacks from useCallback, so this only re-renders when the person's data
+// actually moves. Both callbacks take `name` rather than closing over it, which
+// is what keeps those parent callbacks stable.
+const PersonCard = memo(function PersonCard({ name, info, onOpen, showAdd = false, onQuickAdd = () => {} }) {
   const d = info;
   const ref = useRef(null);
   const txt = ink(d.c1);
   const sub = "rgba(50,48,72,.62)";
   const glass = "rgba(255,255,255,.42)";
-  const quick = e => { e.stopPropagation(); onQuickAdd(ref.current ? ref.current.getBoundingClientRect() : null); };
-  return <div ref={ref} onClick={onOpen} role="button" tabIndex={0} onKeyDown={kbd(onOpen)} aria-label={`Open ${name}, ${d.dir.toLowerCase()} ${d.amt}`} style={{ position: "relative", minHeight: 104, boxSizing: "border-box", cursor: "pointer", padding: "14px 16px", display: "flex", flexDirection: "column", justifyContent: "space-between", background: d.c1, borderRadius: RAD, color: txt, overflow: "hidden", boxShadow: NEU_RAISED }}>
+  const open = () => onOpen(name);
+  const quick = e => { e.stopPropagation(); onQuickAdd(name, ref.current ? ref.current.getBoundingClientRect() : null); };
+  return <div ref={ref} onClick={open} role="button" tabIndex={0} onKeyDown={kbd(open)} aria-label={`Open ${name}, ${d.dir.toLowerCase()} ${d.amt}`} style={{ position: "relative", minHeight: 104, boxSizing: "border-box", cursor: "pointer", padding: "14px 16px", display: "flex", flexDirection: "column", justifyContent: "space-between", background: d.c1, borderRadius: RAD, color: txt, overflow: "hidden", boxShadow: NEU_RAISED }}>
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
         <span style={{ width: 34, height: 24, borderRadius: 7, background: glass, flexShrink: 0, boxShadow: "inset 1px 1px 2px rgba(255,255,255,.6), inset -1px -1px 2px rgba(0,0,0,.08)" }} />
@@ -393,7 +458,7 @@ function PersonCard({ name, info, onOpen, showAdd = false, onQuickAdd = () => {}
       {showAdd ? <button onClick={quick} aria-label={`Add IOU with ${name}`} style={{ width: 36, height: 36, border: "none", borderRadius: 12, background: glass, color: txt, display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0, boxShadow: "2px 2px 5px rgba(0,0,0,.12), -2px -2px 5px rgba(255,255,255,.45)" }}><Plus size={18} weight="bold" /></button> : <CaretRight size={20} color={txt} weight="bold" />}
     </div>
   </div>;
-}
+});
 
 // Net-tile breakdown sheet: every person contributing to the wallet net, with
 // their per-source parts (General / each event). Tapping a row jumps into that
