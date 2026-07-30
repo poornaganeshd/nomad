@@ -123,3 +123,74 @@ test("terrain hero: the graph runs edge to edge and closes into both top corners
   const lastData = parseFloat(pairs[pairs.length - 1].split(",")[0]);
   expect(vbW - lastData).toBeLessThanOrEqual(15);
 });
+
+test("terrain hero: the fill is a gradient that dissolves at the ceiling", async ({ page }) => {
+  const expenses = [];
+  for (let i = 0; i < 30; i++) expenses.push(exp({ amount: 80 + (i * 37) % 400, date: day(i), note: `d${i}` }));
+  await gotoLocal(page, { expenses, ...funded() });
+
+  const svg = page.locator('svg[aria-label^="Balance over the last"]');
+  const fill = await svg.evaluate((el) => {
+    const bands = [...el.querySelectorAll("path")].filter((p) => p.getAttribute("fill") !== "none");
+    const grad = el.querySelector("#nmTerrainFill");
+    const stops = [...grad.querySelectorAll("stop")].map((s) => ({
+      offset: s.getAttribute("offset"),
+      op: Number(getComputedStyle(s).stopOpacity),
+    }));
+    return { bandFills: bands.map((p) => p.getAttribute("fill")), stops };
+  });
+
+  // Every band is painted with the shared gradient, not a flat fillOpacity — a
+  // flat fill is what made the area above the ridgeline a uniform slab cut off
+  // by a straight line across the top (with square corners at both ends).
+  expect(fill.bandFills.length).toBeGreaterThan(0);
+  fill.bandFills.forEach((f) => expect(f).toBe("url(#nmTerrainFill)"));
+  // Transparent at the ceiling, opaque at the ridgeline.
+  expect(fill.stops[0].op).toBe(0);
+  expect(fill.stops[fill.stops.length - 1].op).toBeGreaterThan(0.9);
+});
+
+test("terrain hero: the axis labels sit inside the chart", async ({ page }) => {
+  await gotoLocal(page, { expenses: [exp({ amount: 200 })], ...funded() });
+
+  const chart = page.locator('svg[aria-label^="Balance over the last"]').locator("xpath=..");
+  const box = await chart.boundingBox();
+  for (const label of ["30 days back", "today"]) {
+    const r = await page.getByText(label, { exact: true }).boundingBox();
+    // Fully within the chart's own box — they used to need a separate row above
+    // it, which pushed the terrain down and drew a line of text right where the
+    // fill was being cut off.
+    expect(r.y).toBeGreaterThanOrEqual(box.y - 1);
+    expect(r.y + r.height).toBeLessThanOrEqual(box.y + box.height + 1);
+  }
+});
+
+test("wallet tiles: compact, with the share silhouette still proportional", async ({ page }) => {
+  await gotoLocal(page, { expenses: [exp({ amount: 200 })], ...funded() });
+
+  const tile = page.locator(".card-hover").filter({ hasText: /UPI Lite/i }).first();
+  const m = await tile.evaluate((el) => {
+    const svg = el.querySelector("svg");
+    return {
+      h: el.getBoundingClientRect().height,
+      silhouette: svg ? svg.getBoundingClientRect().height : 0,
+      // Vertical gap between the icon chip and the wallet-name label — an 11px
+      // margin under a 28px chip was the single biggest dead band in the tile.
+      iconGap: (() => {
+        const chip = el.querySelector("span[style*='dashed']");
+        const name = chip?.parentElement?.querySelector("div");
+        if (!chip || !name) return null;
+        return name.getBoundingClientRect().top - chip.getBoundingClientRect().bottom;
+      })(),
+    };
+  });
+
+  // Guard against re-inflating the tile: it was ~180px for four short lines of
+  // content and now sits around 135.
+  expect(m.h).toBeLessThanOrEqual(152);
+  expect(m.iconGap).toBeLessThanOrEqual(9);
+  // ...and the silhouette still reads as "this wallet's share of your money":
+  // it must stay roughly a third of the (now shorter) tile, not swell to fill it.
+  expect(m.silhouette / m.h).toBeGreaterThan(0.22);
+  expect(m.silhouette / m.h).toBeLessThan(0.45);
+});

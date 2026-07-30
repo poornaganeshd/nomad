@@ -21,6 +21,7 @@ import {
   recurringDaysOverdue, distributeAmount, expenseShareMap, historySortCompare,
   UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, isSuspiciousExcess, goalProgress, balanceTrail, runwayInfo,
 } from "./financeUtils";
+import { monotonePathD, smoothSeries } from "./financeUtils";
 import { parseAmount, parseVoiceTx, parseBankCsv, parseUpiStatement, htmlStatementToText } from "./txParsers";
 import { rankPeople, hasExactPerson, highlightParts, peopleFromSplits, sameName } from "./peopleSearch";
 import { matchesQuery, isAmountQuery } from "./txSearch";
@@ -590,17 +591,6 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
 }
 
 
-// Catmull-Rom → cubic bezier path through the trail points (terrain hero).
-const terrainPathD = (pts) => {
-  if (!pts.length) return "M0,196";
-  let d = `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
-    d += ` C${(p1.x + (p2.x - p0.x) / 6).toFixed(1)},${(p1.y + (p2.y - p0.y) / 6).toFixed(1)} ${(p2.x - (p3.x - p1.x) / 6).toFixed(1)},${(p2.y - (p3.y - p1.y) / 6).toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`;
-  }
-  return d;
-};
-
 // Terrain hero: 30-day total-balance trail drawn as layered contour bands
 // hanging from the top edge (inverted ridgeline — higher balance reaches
 // deeper), with the "where you stand" readout centered in the open ground
@@ -609,8 +599,12 @@ const terrainPathD = (pts) => {
 // numerals use --font-m (Martian Mono).
 function TerrainHero({ trail, balance, income, expense, runway: r }) {
   const n = trail.length;
-  const bals = trail.map(p => p.bal);
-  const lo = Math.min(...bals), hi = Math.max(...bals);
+  // The DRAWN ridgeline is lightly eased (endpoints pinned, so it still starts at
+  // the 30-day-ago balance and lands exactly on today's — which is where the pin
+  // and marker sit). Raw values still drive every number this card states; see
+  // smoothSeries in financeUtils for why the curve is eased at all.
+  const shape = smoothSeries(trail.map(p => p.bal), 2);
+  const lo = Math.min(...shape), hi = Math.max(...shape);
   const flat = hi - lo < 1;
   // Geometry notes — this block is what makes the hero fill its box:
   //  • Data runs 0 → DOT so the today marker lands on a real point and stays
@@ -622,14 +616,20 @@ function TerrainHero({ trail, balance, income, expense, runway: r }) {
   //    past its own pin line, i.e. implies data after today.
   //  • The area closes `L W,0 L 0,0`, so the fill reaches both top corners —
   //    with the wrapper's negative margins below, those are the screen corners.
-  //  • TOP/SPAN give the ridgeline more amplitude than the old 40/100 and thin
-  //    the always-solid slab above it, so the terrain reads as terrain. Keep
-  //    TOP + SPAN under ~155: the "where you stand" readout sits below it.
-  const W = 430, DOT = 418, TOP = 26, SPAN = 118;
-  const pts = trail.map((p, i) => ({ x: (i / Math.max(1, n - 1)) * DOT, y: flat ? TOP + SPAN / 2 : TOP + ((p.bal - lo) / (hi - lo)) * SPAN }));
+  //  • TOP leaves headroom for the axis labels, which now sit INSIDE the chart
+  //    at its top corners. Keep TOP + SPAN under ~150: the "where you stand"
+  //    readout sits in the open ground below the ridgeline.
+  //  • The fill is a vertical GRADIENT, not flat opacity — see nmTerrainFill.
+  const W = 430, H = 300, DOT = 418, TOP = 34, SPAN = 112;
+  const pts = shape.map((v, i) => ({ x: (i / Math.max(1, n - 1)) * DOT, y: flat ? TOP + SPAN / 2 : TOP + ((v - lo) / (hi - lo)) * SPAN }));
   const lastY = pts[n - 1].y;
-  const line = `${terrainPathD(pts)} L${W},${lastY.toFixed(1)}`;
+  const line = `${monotonePathD(pts)} L${W},${lastY.toFixed(1)}`;
   const area = `${line} L${W},0 L0,0 Z`;
+  // The three contour bands are the same ridgeline lifted toward the ceiling.
+  // Each fades out upward, so the composite dissolves into the page instead of
+  // being sliced off by a straight line across the top — that hard cut (and the
+  // square corners it made) is what read as "sharp".
+  const bands = [{ dy: 0, o: 0.34 }, { dy: -19, o: 0.24 }, { dy: -40, o: 0.16 }];
   const d30 = roundMoney(balance - trail[0].bal);
   const isNeg = balance < 0, abs = Math.abs(balance);
   const intPart = Math.floor(abs).toLocaleString("en-IN");
@@ -652,22 +652,51 @@ function TerrainHero({ trail, balance, income, expense, runway: r }) {
   else if (r.rate > 0) note = <>You're moving at <strong style={strongS}>{perDay(r.rate)}/day</strong> this week. Not enough history yet for a usual pace.</>;
   else note = <>No spending in the last 7 days — the ground holds.</>;
   return <div style={{ marginBottom: 4, textAlign: "left" }}>
-    <div style={{ display: "flex", justifyContent: "space-between", paddingBottom: 6, fontFamily: "var(--font-m)", fontSize: 8.5, letterSpacing: "0.14em", textTransform: "uppercase", color: "var(--muted)", opacity: 0.75 }}><span>30 days back</span><span>today</span></div>
     {/* Full-bleed: the page column pads 16px, and the graph sitting inside that
         padding left a flat inset gutter down both sides. Negative margins run it
         to the true edges so the fill reaches the corners; the root's
         `overflow-x: clip` keeps the bleed from ever becoming page scroll. */}
-    <div style={{ position: "relative", width: "auto", height: 260, marginLeft: -16, marginRight: -16 }}>
-      <svg viewBox="0 0 430 300" preserveAspectRatio="none" style={{ display: "block", width: "100%", height: "100%" }} aria-label={`Balance over the last 30 days, ending at ${fmt(balance)}`}>
-        <path className="nm-band nm-b3" d={area} fill="var(--neg)" fillOpacity="0.10" />
-        <g transform="translate(0,-20)"><path className="nm-band nm-b2" d={area} fill="var(--neg)" fillOpacity="0.16" /></g>
-        <g transform="translate(0,-42)"><path className="nm-band nm-b1" d={area} fill="var(--neg)" fillOpacity="0.24" /></g>
-        <path d={line} fill="none" stroke="var(--neg)" strokeOpacity="0.25" strokeWidth="1" />
-        <g transform="translate(0,-20)"><path d={line} fill="none" stroke="var(--neg)" strokeOpacity="0.25" strokeWidth="1" /></g>
-        <path className="nm-trail" d={line} fill="none" stroke="var(--text)" strokeWidth="2" strokeLinecap="round" />
-        <line className="nm-pin" x1="0" y1={lastY} x2={W} y2={lastY} stroke="var(--neg)" strokeWidth="1" strokeDasharray="2 5" />
-        <g className="nm-pin"><circle cx={DOT} cy={lastY} r="9" fill="var(--neg)" fillOpacity="0.2" /><circle cx={DOT} cy={lastY} r="4.5" fill="var(--neg)" stroke="var(--bg)" strokeWidth="2" /></g>
+    <div style={{ position: "relative", width: "auto", height: 274, marginLeft: -16, marginRight: -16 }}>
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: "block", width: "100%", height: "100%" }} aria-label={`Balance over the last 30 days, ending at ${fmt(balance)}`}>
+        <defs>
+          {/* One fill for all three bands: transparent at the ceiling, full at the
+              ridgeline, so each band dissolves upward and the composite has no
+              hard top edge and no square corners. Anchored in USER SPACE (not the
+              shape's bounding box) so a lifted band fades on the same axis as the
+              one below it instead of on its own translated box. */}
+          <linearGradient id="nmTerrainFill" gradientUnits="userSpaceOnUse" x1="0" y1={-46} x2="0" y2={TOP + SPAN}>
+            <stop offset="0" style={{ stopColor: "var(--neg)", stopOpacity: 0 }} />
+            <stop offset="0.42" style={{ stopColor: "var(--neg)", stopOpacity: 0.35 }} />
+            <stop offset="1" style={{ stopColor: "var(--neg)", stopOpacity: 1 }} />
+          </linearGradient>
+          {/* Contour edges fade out to the left so they read as depth, not as
+              three hard rules stacked across the whole width. */}
+          <linearGradient id="nmContour" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2={W} y2="0">
+            <stop offset="0" style={{ stopColor: "var(--neg)", stopOpacity: 0 }} />
+            <stop offset="0.35" style={{ stopColor: "var(--neg)", stopOpacity: 0.26 }} />
+            <stop offset="1" style={{ stopColor: "var(--neg)", stopOpacity: 0.34 }} />
+          </linearGradient>
+          {/* The today-pin emerges from nothing on the left and firms up at the
+              marker, instead of a full-width dotted rule. */}
+          <linearGradient id="nmPinFade" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2={W} y2="0">
+            <stop offset="0" style={{ stopColor: "var(--neg)", stopOpacity: 0 }} />
+            <stop offset="0.55" style={{ stopColor: "var(--neg)", stopOpacity: 0.3 }} />
+            <stop offset="1" style={{ stopColor: "var(--neg)", stopOpacity: 0.8 }} />
+          </linearGradient>
+        </defs>
+        {bands.map(({ dy, o }, i) => <g key={dy} transform={dy ? `translate(0,${dy})` : undefined}>
+          <path className={`nm-band nm-b${3 - i}`} d={area} fill="url(#nmTerrainFill)" fillOpacity={o} />
+          {i > 0 && <path className={`nm-band nm-b${3 - i}`} d={line} fill="none" stroke="url(#nmContour)" strokeWidth="0.9" strokeLinecap="round" strokeLinejoin="round" />}
+        </g>)}
+        <path className="nm-trail" d={line} fill="none" stroke="var(--text)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        <line className="nm-pin" x1="0" y1={lastY} x2={W} y2={lastY} stroke="url(#nmPinFade)" strokeWidth="1" strokeDasharray="1.5 5" />
+        <g className="nm-pin"><circle cx={DOT} cy={lastY} r="11" fill="var(--neg)" fillOpacity="0.12" /><circle cx={DOT} cy={lastY} r="6.5" fill="var(--neg)" fillOpacity="0.24" /><circle cx={DOT} cy={lastY} r="3.6" fill="var(--neg)" stroke="var(--bg)" strokeWidth="1.8" /></g>
       </svg>
+      {/* Axis labels live INSIDE the chart, riding its top corners. Outside, they
+          needed their own row above the graph, which pushed the terrain down and
+          drew a second horizontal line of text right where the fill was cut off.
+          The gradient is near-transparent up here, so they stay legible. */}
+      <div className="nm-read" style={{ position: "absolute", top: 9, left: 16, right: 16, display: "flex", justifyContent: "space-between", fontFamily: "var(--font-m)", fontSize: 8.5, letterSpacing: "0.14em", textTransform: "uppercase", color: "var(--muted)", opacity: 0.7, pointerEvents: "none" }}><span>30 days back</span><span>today</span></div>
       <div className="nm-read" style={{ position: "absolute", left: 0, right: 0, bottom: 22, textAlign: "center", pointerEvents: "none" }}>
         <div style={{ fontFamily: "var(--font-m)", fontSize: 9, letterSpacing: "0.26em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 }}>Where you stand</div>
         <div style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontWeight: 500, fontSize: 38, letterSpacing: "-0.06em", lineHeight: 1, display: "flex", alignItems: "baseline", justifyContent: "center", color: "var(--text)" }}><span style={{ fontSize: 20, color: "var(--neg)", marginRight: 3, letterSpacing: 0 }}>{isNeg ? "−₹" : "₹"}</span>{intPart}<span style={{ fontSize: 17, color: "var(--muted)" }}>{decPart}</span></div>
@@ -3778,7 +3807,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
       {tab === "dashboard" && <div className="pe">
         <TerrainHero trail={balTrail} balance={mBal} income={tI} expense={tE} runway={runway} />
         <div style={{ fontFamily: "var(--font-m)", fontSize: 9, letterSpacing: "0.26em", textTransform: "uppercase", color: "var(--muted)", margin: "12px 0 8px", textAlign: "left" }}>What you carry</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginBottom: 12 }}>{(() => { const tot = wallets.reduce((s, x) => s + Math.max(0, wBal[x.id] || 0), 0); return wallets.map(w => { const b = roundMoney(wBal[w.id] || 0); const share = tot > 0 && b > 0 ? Math.min(100, Math.round(b / tot * 100)) : 0; const v = walletVerify[w.id] || { state: "new" }; const cfg = { ok: { t: "✓ Verified", warn: false }, stale: { t: "Check", warn: true }, drift: { t: "Drift", warn: true }, new: { t: "Verify", warn: false } }[v.state]; const vTitle = v.state === "drift" ? `Last check was off by ${fmt(Math.abs(v.last.gap))} — tap to reconcile & find the missing entry` : v.state === "stale" ? `${v.newTx ? v.newTx + " new txn" + (v.newTx === 1 ? "" : "s") : v.days + "d"} ${v.last ? "since last verified" : "logged — never verified"} — tap to reconcile` : v.state === "ok" ? `Verified ${v.last.date}` : "Never verified — tap to set your real balance"; const ab = Math.abs(b), bi = Math.floor(ab), bd = ab - bi; const wk = wWeek[w.id] || 0, prior = roundMoney(b - wk); const tPct = Math.abs(wk) > 0.5 && prior > 1 ? Math.min(999, Math.max(-999, Math.round(wk / prior * 100))) : null; const lvl = 56 - (Math.max(share, 4) / 100) * 48; const ridge = `M0,${(lvl + 2).toFixed(1)} Q18,${(lvl - 4).toFixed(1)} 35,${(lvl + 1).toFixed(1)} Q55,${(lvl + 5).toFixed(1)} 70,${(lvl - 1).toFixed(1)} Q88,${(lvl - 5).toFixed(1)} 100,${(lvl + 2).toFixed(1)}`; return <div key={w.id} onClick={() => { hapticLight(); sCalW(w); }} title={vTitle} className="card-hover" style={{ position: "relative", borderRadius: 18, padding: "12px 11px 10px", display: "flex", flexDirection: "column", cursor: "pointer", overflow: "hidden", textAlign: "left", background: dm ? "rgba(255,255,255,0.055)" : "rgba(255,255,255,0.5)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: `1px solid ${dm ? "rgba(255,255,255,0.09)" : "rgba(255,255,255,0.75)"}`, boxShadow: dm ? "0 8px 20px -14px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.06)" : "0 8px 20px -14px rgba(26,26,46,0.25), inset 0 1px 0 rgba(255,255,255,0.8)" }}>{b > 0 && <svg viewBox="0 0 100 60" preserveAspectRatio="none" aria-hidden="true" style={{ position: "absolute", left: -2, right: -2, bottom: -1, width: "calc(100% + 4px)", height: 56, zIndex: 0 }}><path d={`${ridge} L100,60 L0,60 Z`} fill={w.color} fillOpacity={dm ? "0.16" : "0.13"} /><path d={ridge} fill="none" stroke={w.color} strokeOpacity="0.4" strokeWidth="1.2" /></svg>}{tPct !== null && tPct !== 0 && <span style={{ position: "absolute", top: 10, right: w.id === "cash" ? 26 : 10, zIndex: 2, fontFamily: "var(--font-m)", fontSize: 8.5, fontWeight: 600, color: tPct > 0 ? "var(--pos)" : "var(--neg)" }} title="Net movement, last 7 days">{tPct > 0 ? "▴" : "▾"}{Math.abs(tPct)}%</span>}{w.id === "cash" && <button onClick={e => { e.stopPropagation(); sRecountW(w); }} title="Count cash" style={{ position: "absolute", top: 7, right: 7, background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12, padding: 2, lineHeight: 1, zIndex: 2 }}>⟳</button>}<div style={{ position: "relative", zIndex: 1, minWidth: 0 }}><span style={{ width: 28, height: 28, borderRadius: 9, background: `${w.color}24`, outline: `1px dashed ${w.color}59`, outlineOffset: 2, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 11 }}><DI2 id={w.id} accent={w.color} size={14} /></span><div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 9, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.name}</div><div style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontSize: 14.5, fontWeight: 500, letterSpacing: "-0.05em", color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{b < 0 ? "−₹" : "₹"}{bi.toLocaleString("en-IN")}{bd > 0.004 && <span style={{ fontSize: 9.5, color: "var(--muted)", fontWeight: 600 }}>{bd.toFixed(2).slice(1)}</span>}</div><div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 9, paddingTop: 7, borderTop: "1px solid var(--border)" }}><span style={{ width: 5, height: 5, borderRadius: "50%", background: cfg.warn ? "var(--warn)" : w.color, flexShrink: 0 }} /><span style={{ fontFamily: "var(--font-m)", fontSize: 7.5, letterSpacing: "0.08em", textTransform: "uppercase", color: cfg.warn ? "var(--warn)" : "var(--muted)", fontWeight: cfg.warn ? 600 : 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cfg.t}</span></div></div></div>; }); })()}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginBottom: 12 }}>{(() => { const tot = wallets.reduce((s, x) => s + Math.max(0, wBal[x.id] || 0), 0); return wallets.map(w => { const b = roundMoney(wBal[w.id] || 0); const share = tot > 0 && b > 0 ? Math.min(100, Math.round(b / tot * 100)) : 0; const v = walletVerify[w.id] || { state: "new" }; const cfg = { ok: { t: "✓ Verified", warn: false }, stale: { t: "Check", warn: true }, drift: { t: "Drift", warn: true }, new: { t: "Verify", warn: false } }[v.state]; const vTitle = v.state === "drift" ? `Last check was off by ${fmt(Math.abs(v.last.gap))} — tap to reconcile & find the missing entry` : v.state === "stale" ? `${v.newTx ? v.newTx + " new txn" + (v.newTx === 1 ? "" : "s") : v.days + "d"} ${v.last ? "since last verified" : "logged — never verified"} — tap to reconcile` : v.state === "ok" ? `Verified ${v.last.date}` : "Never verified — tap to set your real balance"; const ab = Math.abs(b), bi = Math.floor(ab), bd = ab - bi; const wk = wWeek[w.id] || 0, prior = roundMoney(b - wk); const tPct = Math.abs(wk) > 0.5 && prior > 1 ? Math.min(999, Math.max(-999, Math.round(wk / prior * 100))) : null; const lvl = 56 - (Math.max(share, 4) / 100) * 48; const ridge = `M0,${(lvl + 2).toFixed(1)} Q18,${(lvl - 4).toFixed(1)} 35,${(lvl + 1).toFixed(1)} Q55,${(lvl + 5).toFixed(1)} 70,${(lvl - 1).toFixed(1)} Q88,${(lvl - 5).toFixed(1)} 100,${(lvl + 2).toFixed(1)}`; return <div key={w.id} onClick={() => { hapticLight(); sCalW(w); }} title={vTitle} className="card-hover" style={{ position: "relative", borderRadius: 18, padding: "10px 11px 8px", display: "flex", flexDirection: "column", cursor: "pointer", overflow: "hidden", textAlign: "left", background: dm ? "rgba(255,255,255,0.055)" : "rgba(255,255,255,0.5)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: `1px solid ${dm ? "rgba(255,255,255,0.09)" : "rgba(255,255,255,0.75)"}`, boxShadow: dm ? "0 8px 20px -14px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.06)" : "0 8px 20px -14px rgba(26,26,46,0.25), inset 0 1px 0 rgba(255,255,255,0.8)" }}>{b > 0 && <svg viewBox="0 0 100 60" preserveAspectRatio="none" aria-hidden="true" style={{ position: "absolute", left: -2, right: -2, bottom: -1, width: "calc(100% + 4px)", height: 46, zIndex: 0 }}><path d={`${ridge} L100,60 L0,60 Z`} fill={w.color} fillOpacity={dm ? "0.16" : "0.13"} /><path d={ridge} fill="none" stroke={w.color} strokeOpacity="0.4" strokeWidth="1.2" /></svg>}{tPct !== null && tPct !== 0 && <span style={{ position: "absolute", top: 8, right: w.id === "cash" ? 24 : 9, zIndex: 2, fontFamily: "var(--font-m)", fontSize: 8.5, fontWeight: 600, color: tPct > 0 ? "var(--pos)" : "var(--neg)" }} title="Net movement, last 7 days">{tPct > 0 ? "▴" : "▾"}{Math.abs(tPct)}%</span>}{w.id === "cash" && <button onClick={e => { e.stopPropagation(); sRecountW(w); }} title="Count cash" style={{ position: "absolute", top: 5, right: 5, background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12, padding: 2, lineHeight: 1, zIndex: 2 }}>⟳</button>}<div style={{ position: "relative", zIndex: 1, minWidth: 0 }}><span style={{ width: 24, height: 24, borderRadius: 8, background: `${w.color}24`, outline: `1px dashed ${w.color}59`, outlineOffset: 2, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 6 }}><DI2 id={w.id} accent={w.color} size={13} /></span><div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 9, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.name}</div><div style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontSize: 14.5, fontWeight: 500, letterSpacing: "-0.05em", color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{b < 0 ? "−₹" : "₹"}{bi.toLocaleString("en-IN")}{bd > 0.004 && <span style={{ fontSize: 9.5, color: "var(--muted)", fontWeight: 600 }}>{bd.toFixed(2).slice(1)}</span>}</div><div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 6, paddingTop: 5, borderTop: "1px solid var(--border)" }}><span style={{ width: 5, height: 5, borderRadius: "50%", background: cfg.warn ? "var(--warn)" : w.color, flexShrink: 0 }} /><span style={{ fontFamily: "var(--font-m)", fontSize: 7.5, letterSpacing: "0.08em", textTransform: "uppercase", color: cfg.warn ? "var(--warn)" : "var(--muted)", fontWeight: cfg.warn ? 600 : 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cfg.t}</span></div></div></div>; }); })()}</div>
         {(() => {
           const tod = new Date(), todS = localDateKey(tod), snoozed = (() => { try { return JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); } catch { return {}; } })(), due = rec.filter(r => isRecurringDueToday(r, todS) && !(snoozed[r.id] && snoozed[r.id] > todS));
           // Pay a due bill from the chosen wallet (the per-cycle override). The
