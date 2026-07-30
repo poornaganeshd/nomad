@@ -311,6 +311,82 @@ export const goalProgress = (goal, todayKey = localDateKey()) => {
 };
 
 // ── Terrain hero math (dashboard) ────────────────────────────────────────────
+// monotonePathD: SVG cubic path through `pts` using monotone cubic interpolation
+// (Fritsch–Carlson). This replaced a Catmull-Rom spline, and the difference is
+// the whole reason the hero used to look "sharp": Catmull-Rom takes the tangent
+// at each point from its NEIGHBOURS ((next − prev)/6), which at a one-day spike
+// is non-zero and asymmetric — so every reversal drew a hard corner, and the
+// curve overshot past the data on top of it. Monotone forces the tangent to ZERO
+// wherever the slope changes sign, so a peak lands as a rounded crest and a dip
+// as a rounded basin, and it provably never overshoots the input values.
+//
+// Pure geometry, no smoothing: every point is still hit exactly, so the trail
+// keeps telling the truth about the balance. Only the curve BETWEEN points
+// changes.
+export const monotonePathD = (pts) => {
+  const p = (Array.isArray(pts) ? pts : []).filter(
+    (q) => q && Number.isFinite(q.x) && Number.isFinite(q.y)
+  );
+  const n = p.length;
+  if (!n) return "";
+  const at = (i) => `${p[i].x.toFixed(1)},${p[i].y.toFixed(1)}`;
+  if (n === 1) return `M${at(0)}`;
+  if (n === 2) return `M${at(0)} L${at(1)}`;
+
+  // Secant slopes between consecutive points.
+  const h = [], m = [];
+  for (let i = 0; i < n - 1; i += 1) {
+    h[i] = p[i + 1].x - p[i].x;
+    m[i] = h[i] === 0 ? 0 : (p[i + 1].y - p[i].y) / h[i];
+  }
+  // Tangents: zero at every local extremum, weighted harmonic mean elsewhere
+  // (the harmonic mean is what keeps the segment monotone, so no overshoot).
+  const t = new Array(n);
+  t[0] = m[0];
+  t[n - 1] = m[n - 2];
+  for (let i = 1; i < n - 1; i += 1) {
+    if (m[i - 1] * m[i] <= 0) { t[i] = 0; continue; }
+    const w1 = 2 * h[i] + h[i - 1], w2 = h[i] + 2 * h[i - 1];
+    t[i] = (w1 + w2) / (w1 / m[i - 1] + w2 / m[i]);
+  }
+
+  let d = `M${at(0)}`;
+  for (let i = 0; i < n - 1; i += 1) {
+    const k = h[i] / 3;
+    d += ` C${(p[i].x + k).toFixed(1)},${(p[i].y + t[i] * k).toFixed(1)}`
+      + ` ${(p[i + 1].x - k).toFixed(1)},${(p[i + 1].y - t[i + 1] * k).toFixed(1)}`
+      + ` ${at(i + 1)}`;
+  }
+  return d;
+};
+
+// smoothSeries: light shape-preserving easing for the hero ridgeline. Each pass
+// is a [1,2,1]/4 kernel over the interior — a point moves a quarter of the way
+// toward each neighbour — with the ENDPOINTS PINNED, so the trail still begins
+// exactly at the 30-day-ago balance and ends exactly at today's. Two passes
+// leave a lone one-day spike at ~37% of its raw height and spread it over five
+// days, while a multi-day trend is essentially untouched.
+//
+// Why smooth at all: the hero is a decorative contour ridgeline with no y-axis,
+// no gridlines and no tooltips — nothing is read off it except the SHAPE. Drawn
+// raw, a ledger with a few big spend days becomes flat shelves joined by
+// near-vertical cliffs, which is what "sharp, no smoothness" meant. Every figure
+// the card actually STATES (today's balance, the 30-day delta, In/Out/Kept, the
+// burn rate) is computed from the raw values and never from this.
+export const smoothSeries = (values, passes = 1) => {
+  let v = (Array.isArray(values) ? values : []).map((x) => {
+    const num = Number(x);
+    return Number.isFinite(num) ? num : 0;
+  });
+  for (let p = 0; p < Math.max(0, passes); p += 1) {
+    if (v.length < 3) break;
+    const out = v.slice();
+    for (let i = 1; i < v.length - 1; i += 1) out[i] = (v[i - 1] + 2 * v[i] + v[i + 1]) / 4;
+    v = out;
+  }
+  return v;
+};
+
 // balanceTrail: end-of-day TOTAL balance for the last `days` days, ending at
 // `currentBalance` today. Walks BACKWARD from today subtracting each day's net
 // so the series always reconciles exactly with the live balance. `events` are
