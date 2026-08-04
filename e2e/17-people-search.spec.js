@@ -185,7 +185,7 @@ test("quick add: chips carry their category colour, even when it is a CSS var", 
         border: rgb(getComputedStyle(el).borderTopColor),
         spine: rgb(getComputedStyle(spine).backgroundColor),
         amount: rgb(getComputedStyle(el.querySelector("span[style*='tabular-nums']")).color),
-        hasRidge: !!el.querySelector("svg path"),
+        meterWidth: spine.getBoundingClientRect().width,
       };
     });
     // Nothing may resolve to pure black — that is precisely the NaN fallback.
@@ -193,68 +193,99 @@ test("quick add: chips carry their category colour, even when it is a CSS var", 
       expect(c.length).toBe(3);
       expect(c.reduce((a, b) => a + b, 0)).toBeGreaterThan(0);
     });
-    // The frequency ridge (same silhouette idiom as the wallet tiles) is drawn.
-    expect(paint.hasRidge).toBe(true);
+    // The frequency meter along the pill's bottom edge is drawn.
+    expect(paint.meterWidth).toBeGreaterThan(0);
   }
 });
 
-test("quick add: tapping a chip fills the form and says so on the chip", async ({ page }) => {
+test("quick add: one tap LOGS the pattern, with undo — no scroll to a save button", async ({ page }) => {
+  // The whole point of a quick-add pattern is that nothing is left to decide:
+  // amount, category, wallet and note are all settled by having logged it twice
+  // already. Filling the form still made you scroll past the amount hero to a
+  // save button, which was the entire cost of logging it.
   await gotoLocal(page, { expenses: qaExpense({ note: "Curd", categoryId: "food", amount: 10 }), ...funded() });
   await page.getByRole("button", { name: "Add", exact: true }).click();
 
-  const chip = page.getByRole("button", { name: /Curd/ }).first();
+  const chip = page.getByRole("button", { name: /Quick add .*Curd/ }).first();
   await chip.click();
-  // The fields it fills are mostly below the fold, so the chip has to confirm
-  // the tap itself — otherwise it reads as having done nothing.
-  await expect(chip).toContainText("Filled");
-  await expect(page.locator("input[placeholder='0']").first()).toHaveValue("10");
+
+  // The expense is written straight away...
+  await expect.poll(async () => {
+    const { expenses = [] } = await readBackup(page);
+    return expenses.filter((e) => e.note === "Curd" && e.amount === 10).length;
+  }).toBe(3); // the 2 seeded + the one just logged
+  // ...the pill says so, and the form is left alone.
+  await expect(chip).toContainText("Logged");
+  await expect(page.locator("input[placeholder='0']").first()).toHaveValue("");
   // ...and it reverts on its own.
   await expect(chip).toContainText("Curd", { timeout: 4000 });
+
+  // A tap that spends money has to be reversible in the same gesture.
+  await page.getByRole("button", { name: "UNDO" }).click();
+  await expect.poll(async () => {
+    const { expenses = [] } = await readBackup(page);
+    return expenses.filter((e) => e.note === "Curd" && e.amount === 10).length;
+  }).toBe(2);
 });
 
-test("quick add: markers are shelved by category, not strewn across one wrap", async ({ page }) => {
-  // The complaint this answers: five variable-width chips in a flat wrap read as
-  // a random pile — nothing grouped them, nothing lined up, and the only clue to
-  // what a chip belonged to was a 13px glyph repeated on every one.
+test("quick add: holding a pill fills the form instead of logging it", async ({ page }) => {
+  await gotoLocal(page, { expenses: qaExpense({ note: "Curd", categoryId: "food", amount: 10 }), ...funded() });
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+
+  const chip = page.getByRole("button", { name: /Quick add .*Curd/ }).first();
+  const box = await chip.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(650);
+  await page.mouse.up();
+
+  await expect(chip).toContainText("Filled");
+  await expect(page.locator("input[placeholder='0']").first()).toHaveValue("10");
+  // The hold must NOT also log it — the click that follows the release is
+  // swallowed, or a hold would both fill the form and spend the money.
+  const { expenses = [] } = await readBackup(page);
+  expect(expenses.filter((e) => e.note === "Curd" && e.amount === 10)).toHaveLength(2);
+});
+
+test("quick add: pills stay one compact wrapping rail, category by category", async ({ page }) => {
+  // The rail replaced per-category shelves that cost ~570px of scroll to save
+  // typing — backwards for the one screen whose job is to be fast. It has to
+  // stay short AND keep a category's patterns adjacent.
   await gotoLocal(page, {
     expenses: [
       ...qaExpense({ note: "Curd", categoryId: "food", amount: 10 }),
-      ...qaExpense({ note: "Water", categoryId: "food", amount: 20 }),
       ...qaExpense({ note: "Auto to office", categoryId: "transport", amount: 60 }),
+      ...qaExpense({ note: "Water", categoryId: "food", amount: 20 }),
     ],
     ...funded(),
   });
   await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("button", { name: /Quick add .*Curd/ })).toBeVisible();
 
-  const chipOf = (note) => page.getByRole("button", { name: new RegExp(note) }).first();
-  await expect(chipOf("Curd")).toBeVisible();
-
-  // Each category gets its own shelf, named once in the header rather than on
-  // every chip, and the two Food chips share it.
-  const shelves = await page.evaluate(() => {
-    const shelfOf = (note) => {
-      const btn = [...document.querySelectorAll("button")].find(b => (b.getAttribute("aria-label") || "").includes(note));
-      return btn?.parentElement?.parentElement || null;
-    };
-    const curd = shelfOf("Curd"), water = shelfOf("Water"), auto = shelfOf("Auto to office");
+  const rail = await page.evaluate(() => {
+    const pills = [...document.querySelectorAll("button")]
+      .filter((b) => (b.getAttribute("aria-label") || "").startsWith("Quick add "));
+    const row = pills[0].parentElement;
     return {
-      foodShared: curd === water,
-      transportSeparate: curd !== auto,
-      foodHeading: curd?.innerText || "",
-      transportHeading: auto?.innerText || "",
-      widths: [...document.querySelectorAll("button")]
-        .filter(b => /Curd|Water/.test(b.getAttribute("aria-label") || ""))
-        .map(b => b.getBoundingClientRect().width),
+      count: pills.length,
+      order: pills.map((b) => b.getAttribute("aria-label")),
+      height: row.getBoundingClientRect().height,
+      pillHeight: pills[0].getBoundingClientRect().height,
+      // Wraps rather than hiding pills past a horizontal scroll edge.
+      scrollsSideways: row.scrollWidth > row.clientWidth + 1,
+      insidePage: pills.every((b) => b.getBoundingClientRect().right <= row.getBoundingClientRect().right + 1),
     };
   });
-  expect(shelves.foodShared).toBe(true);
-  expect(shelves.transportSeparate).toBe(true);
-  // Same category → same width. A ragged right edge is what made the old wrap
-  // look accidental.
-  expect(shelves.widths).toHaveLength(2);
-  expect(Math.abs(shelves.widths[0] - shelves.widths[1])).toBeLessThan(1);
-  expect(shelves.foodHeading).toMatch(/FOOD/i);
-  expect(shelves.transportHeading).toMatch(/TRANSPORT/i);
+  expect(rail.count).toBe(3);
+  // Food's two patterns sit together even though Transport was logged between
+  // them — the rail is ordered by category run.
+  expect(rail.order[0]).toMatch(/Curd/);
+  expect(rail.order[1]).toMatch(/Water/);
+  expect(rail.order[2]).toMatch(/Auto to office/);
+  expect(rail.pillHeight).toBeLessThanOrEqual(40);
+  expect(rail.height).toBeLessThan(90);
+  expect(rail.scrollsSideways).toBe(false);
+  expect(rail.insidePage).toBe(true);
 });
 
 test("new IOU: the name field is a ranked typeahead and a tap fills it", async ({ page }) => {
