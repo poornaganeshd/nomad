@@ -198,6 +198,49 @@ test("quick add: chips carry their category colour, even when it is a CSS var", 
   }
 });
 
+test("quick add: every category wears its OWN colour, and an unknown one is not Food", async ({ page }) => {
+  // Four hues that must stay visibly apart at 34px: food orange, transport cyan,
+  // health mint, coffee amber (a CSS var). "ghostcat" is a category that no
+  // longer exists — it used to fall back to a hardcoded coral, which is Food's
+  // own hue, so a renamed or deleted category sat in the rail impersonating one.
+  await gotoLocal(page, {
+    expenses: [
+      ...qaExpense({ note: "Curd", categoryId: "food", amount: 10 }),
+      ...qaExpense({ note: "Auto to office", categoryId: "transport", amount: 60 }),
+      ...qaExpense({ note: "Gym protein", categoryId: "health", amount: 180 }),
+      ...qaExpense({ note: "Filter coffee", categoryId: "coffee", amount: 25 }),
+      ...qaExpense({ note: "Mystery buy", categoryId: "ghostcat", amount: 44 }),
+    ],
+    ...funded(),
+  });
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("button", { name: /Quick add .*Curd/ })).toBeVisible();
+
+  const hues = await page.evaluate(() => {
+    const rgb = (v) => (v.match(/[\d.]+/g) || []).slice(0, 3).map(Number);
+    const out = {};
+    for (const b of document.querySelectorAll("button")) {
+      const label = b.getAttribute("aria-label") || "";
+      if (!label.startsWith("Quick add ")) continue;
+      out[label.replace(/^Quick add \S+ /, "")] = rgb(getComputedStyle(b.querySelector("span[style*='tabular-nums']")).color);
+    }
+    return out;
+  });
+
+  const names = Object.keys(hues);
+  expect(names).toHaveLength(5);
+  // Every pill's amount is a distinct colour — no two categories share a hue.
+  const seen = names.map((n) => hues[n].join(","));
+  expect(new Set(seen).size).toBe(5);
+  // And they are far apart, not five shades of the same orange.
+  const dist = (a, b) => Math.max(...a.map((v, i) => Math.abs(v - b[i])));
+  for (let i = 0; i < names.length; i++) {
+    for (let j = i + 1; j < names.length; j++) {
+      expect(dist(hues[names[i]], hues[names[j]])).toBeGreaterThan(25);
+    }
+  }
+});
+
 test("quick add: one tap LOGS the pattern, with undo — no scroll to a save button", async ({ page }) => {
   // The whole point of a quick-add pattern is that nothing is left to decide:
   // amount, category, wallet and note are all settled by having logged it twice
