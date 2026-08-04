@@ -212,6 +212,51 @@ test("quick add: tapping a chip fills the form and says so on the chip", async (
   await expect(chip).toContainText("Curd", { timeout: 4000 });
 });
 
+test("quick add: markers are shelved by category, not strewn across one wrap", async ({ page }) => {
+  // The complaint this answers: five variable-width chips in a flat wrap read as
+  // a random pile — nothing grouped them, nothing lined up, and the only clue to
+  // what a chip belonged to was a 13px glyph repeated on every one.
+  await gotoLocal(page, {
+    expenses: [
+      ...qaExpense({ note: "Curd", categoryId: "food", amount: 10 }),
+      ...qaExpense({ note: "Water", categoryId: "food", amount: 20 }),
+      ...qaExpense({ note: "Auto to office", categoryId: "transport", amount: 60 }),
+    ],
+    ...funded(),
+  });
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+
+  const chipOf = (note) => page.getByRole("button", { name: new RegExp(note) }).first();
+  await expect(chipOf("Curd")).toBeVisible();
+
+  // Each category gets its own shelf, named once in the header rather than on
+  // every chip, and the two Food chips share it.
+  const shelves = await page.evaluate(() => {
+    const shelfOf = (note) => {
+      const btn = [...document.querySelectorAll("button")].find(b => (b.getAttribute("aria-label") || "").includes(note));
+      return btn?.parentElement?.parentElement || null;
+    };
+    const curd = shelfOf("Curd"), water = shelfOf("Water"), auto = shelfOf("Auto to office");
+    return {
+      foodShared: curd === water,
+      transportSeparate: curd !== auto,
+      foodHeading: curd?.innerText || "",
+      transportHeading: auto?.innerText || "",
+      widths: [...document.querySelectorAll("button")]
+        .filter(b => /Curd|Water/.test(b.getAttribute("aria-label") || ""))
+        .map(b => b.getBoundingClientRect().width),
+    };
+  });
+  expect(shelves.foodShared).toBe(true);
+  expect(shelves.transportSeparate).toBe(true);
+  // Same category → same width. A ragged right edge is what made the old wrap
+  // look accidental.
+  expect(shelves.widths).toHaveLength(2);
+  expect(Math.abs(shelves.widths[0] - shelves.widths[1])).toBeLessThan(1);
+  expect(shelves.foodHeading).toMatch(/FOOD/i);
+  expect(shelves.transportHeading).toMatch(/TRANSPORT/i);
+});
+
 test("new IOU: the name field is a ranked typeahead and a tap fills it", async ({ page }) => {
   await gotoLocal(page, { splits: peopleSplits() });
   await page.getByRole("button", { name: "Add", exact: true }).click();

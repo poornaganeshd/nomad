@@ -19,7 +19,7 @@ import { redactTransactions, redact } from "./redactor";
 import {
   roundMoney, localDateKey, getRecurringDueDate, isRecurringDueToday,
   recurringDaysOverdue, distributeAmount, expenseShareMap, historySortCompare,
-  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, isSuspiciousExcess, goalProgress, balanceTrail, runwayInfo,
+  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, settlementsCash, cashMatchesExpectation, isSuspiciousExcess, goalProgress, balanceTrail, runwayInfo,
 } from "./financeUtils";
 import { monotonePathD, smoothSeries } from "./financeUtils";
 import { withAlpha, tint } from "./tint";
@@ -151,6 +151,20 @@ const sbGetDeleted = async (table) => {
   } catch { return null; }
 };
 const sbDeleteWhere = async (table, filter) => sbWrite(`${SB_URL}/rest/v1/${table}?${filter}`, { method: "DELETE", dedupeKey: `${table}:delete:${filter}` });
+// Hard-delete ONE row by id. Every bulk cleanup goes through this rather than a
+// filtered DELETE, for two reasons that were both live bugs:
+//   1. PostgREST filters name columns EXACTLY. Our columns are camelCase
+//      ("groupId", "eventId", "splitId"), but the bulk deletes were written
+//      `group_id=eq.…` / `event_id=eq.…`, so Postgres answered 400 "column does
+//      not exist" and the rows were NEVER deleted server-side. Local state
+//      dropped them, then the 60s background pull handed them straight back —
+//      resurrected settlements put cash back into a wallet with no transaction
+//      left to explain it. `id` is spelled the same either way, so filtering on
+//      it alone makes the whole class impossible.
+//   2. mergeRemote shields a locally-deleted row from a racing pull only when
+//      the queue holds the id-shaped key `<table>:delete:<id>`; a filter-shaped
+//      key never matched, so an offline bulk delete un-deleted itself.
+const sbDeleteRow = async (table, id) => { clearVersion(table, id); return sbWrite(`${SB_URL}/rest/v1/${table}?id=eq.${id}`, { method: "DELETE", dedupeKey: `${table}:delete:${id}` }); };
 const fmt = n => CUR + (Number(n) || 0).toLocaleString("en-IN"), mk = d => d.slice(0, 7);
 // Group expenses someone ELSE paid (logged for the event ledger only). They
 // carry walletId "__tracked__", never touch a wallet, and must be EXCLUDED
@@ -1110,8 +1124,17 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
 
       return <>
         {isExp && patterns.length > 0 && <div style={{ marginBottom: 14 }}>
-          <div style={{ marginBottom: 9, display: "flex", alignItems: "baseline", gap: 7, flexWrap: "wrap" }}><span style={microLabel("var(--muted)")}>Quick add</span><span style={{ fontFamily: "var(--font-b)", fontSize: 10, color: "var(--muted)", opacity: 0.7 }}>your usual - tap to fill</span></div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>{(() => { const qaMax = Math.max(1, ...patterns.slice(0, 5).map(q => q.count || 1)); return patterns.slice(0, 5).map((p, i) => { const cat = cats.find(c => c.id === p.categoryId) || DC.find(c => c.id === p.categoryId) || { color: "#E07A5F", neon: "#FF9F1C" }; const sub = p.note || cat.name || ""; const hit = qaHit === i; const freq = Math.max(0.16, Math.min(1, (p.count || 1) / qaMax)); const lvl = 21 - freq * 16; const ridge = `M0,${(lvl + 1.4).toFixed(1)} Q18,${(lvl - 2.6).toFixed(1)} 35,${(lvl + 0.6).toFixed(1)} Q55,${(lvl + 2.8).toFixed(1)} 70,${(lvl - 1).toFixed(1)} Q88,${(lvl - 2.8).toFixed(1)} 100,${(lvl + 1.4).toFixed(1)}`; return <button key={i} title={`${sub}${p.count > 1 ? ` \u00b7 logged ${p.count}\u00d7` : ""}`} aria-label={`Quick add ${fmt(p.amount)} ${sub}`} onClick={() => { hapticLight(); sAmt(String(p.amount)); sCat(p.categoryId); sW(p.walletId); if (p.note) sNote(p.note); clearTimeout(qaTimer.current); sQaHit(i); qaTimer.current = setTimeout(() => sQaHit(-1), 1100); }} style={{ position: "relative", overflow: "hidden", flex: "0 1 auto", maxWidth: 172, minWidth: 104, display: "flex", alignItems: "stretch", padding: 0, borderRadius: 13, border: `1px solid ${alpha(cat.color, hit ? 0.85 : 0.3)}`, background: hit ? alpha(cat.color, 0.16) : "var(--card)", boxShadow: hit ? `0 0 0 3px ${alpha(cat.color, 0.15)}` : `0 1px 2px ${alpha(cat.color, 0.13)}`, cursor: "pointer", textAlign: "left", transition: "background .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease", transform: hit ? "translateY(-1px)" : "none" }}><span style={{ width: 3.5, flexShrink: 0, background: cat.color, opacity: hit ? 1 : 0.85 }} /><svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true" style={{ position: "absolute", left: 3.5, bottom: 0, width: "calc(100% - 3.5px)", height: 17, zIndex: 0 }}><path d={`${ridge} L100,24 L0,24 Z`} fill={cat.color} fillOpacity="0.14" /><path d={ridge} fill="none" stroke={cat.color} strokeOpacity="0.35" strokeWidth="1" /></svg><span style={{ position: "relative", zIndex: 1, flex: 1, minWidth: 0, padding: "8px 10px 9px 9px", display: "flex", flexDirection: "column", gap: 2 }}><span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}><DI2 id={p.categoryId} accent={cat.neon || cat.color} size={13} /><span style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontSize: 13, fontWeight: 500, letterSpacing: "-0.05em", color: cat.color, whiteSpace: "nowrap" }}>{fmt(p.amount)}</span></span><span style={{ fontFamily: "var(--font-b)", fontSize: 9.5, fontWeight: 600, color: hit ? cat.color : "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%" }}>{hit ? "Filled \u2713" : sub}</span></span></button>; }); })()}</div>
+          <div style={{ marginBottom: 9, display: "flex", alignItems: "baseline", gap: 7, flexWrap: "wrap" }}><span style={microLabel("var(--muted)")}>Quick add</span><span style={{ fontFamily: "var(--font-b)", fontSize: 10, color: "var(--muted)", opacity: 0.7 }}>your usual, by category - tap to fill</span></div>
+          {/* Markers are shelved BY CATEGORY, one bordered shelf per category in
+              that category's colour, chips in a fixed 2-up grid inside it. A flat
+              wrap of variable-width chips read as a random pile: nothing told you
+              what a chip belonged to except a 13px glyph repeated on every one,
+              and the ragged right edge made the group look accidental. The shelf
+              header carries the identity once (spine + icon + name + how many),
+              so each chip only has to carry its own amount, note and frequency
+              ridge \u2014 and the grid gives every chip the same width, which is what
+              makes the block read as organised rather than scattered. */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>{(() => { const list = patterns.slice(0, 5); const qaMax = Math.max(1, ...list.map(q => q.count || 1)); const order = []; const byCat = new Map(); list.forEach((p, i) => { const k = p.categoryId || "other"; if (!byCat.has(k)) { byCat.set(k, []); order.push(k); } byCat.get(k).push({ p, i }); }); return order.map(k => { const cat = cats.find(c => c.id === k) || DC.find(c => c.id === k) || { id: k, name: "Other", color: "#E07A5F", neon: "#FF9F1C" }; const rows = byCat.get(k); return <div key={k} style={{ position: "relative", overflow: "hidden", borderRadius: 14, border: `1px solid ${alpha(cat.color, 0.24)}`, background: alpha(cat.color, 0.05), padding: "8px 10px 10px 13px" }}><span aria-hidden="true" style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, background: cat.color, opacity: 0.9 }} /><div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, minWidth: 0 }}><DI2 id={cat.id} accent={cat.neon || cat.color} size={13} /><span style={{ fontFamily: "var(--font-h)", fontSize: 9.5, fontWeight: 700, letterSpacing: "0.09em", textTransform: "uppercase", color: cat.color, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{cat.name}</span><span style={{ flex: 1 }} /><span style={{ fontFamily: "var(--font-m)", fontSize: 8.5, fontWeight: 500, color: cat.color, opacity: 0.55, flexShrink: 0 }}>{rows.length}</span></div><div style={{ display: "grid", gridTemplateColumns: rows.length === 1 ? "minmax(0, 1fr)" : "repeat(2, minmax(0, 1fr))", gap: 7 }}>{rows.map(({ p, i }) => { const sub = p.note || cat.name || ""; const hit = qaHit === i; const freq = Math.max(0.16, Math.min(1, (p.count || 1) / qaMax)); const lvl = 21 - freq * 16; const ridge = `M0,${(lvl + 1.4).toFixed(1)} Q18,${(lvl - 2.6).toFixed(1)} 35,${(lvl + 0.6).toFixed(1)} Q55,${(lvl + 2.8).toFixed(1)} 70,${(lvl - 1).toFixed(1)} Q88,${(lvl - 2.8).toFixed(1)} 100,${(lvl + 1.4).toFixed(1)}`; return <button key={i} title={`${sub}${p.count > 1 ? ` \u00b7 logged ${p.count}\u00d7` : ""}`} aria-label={`Quick add ${fmt(p.amount)} ${sub}`} onClick={() => { hapticLight(); sAmt(String(p.amount)); sCat(p.categoryId); sW(p.walletId); if (p.note) sNote(p.note); clearTimeout(qaTimer.current); sQaHit(i); qaTimer.current = setTimeout(() => sQaHit(-1), 1100); }} style={{ position: "relative", overflow: "hidden", width: "100%", minWidth: 0, display: "flex", alignItems: "stretch", padding: 0, borderRadius: 11, border: `1px solid ${alpha(cat.color, hit ? 0.85 : 0.3)}`, background: hit ? alpha(cat.color, 0.16) : "var(--card)", boxShadow: hit ? `0 0 0 3px ${alpha(cat.color, 0.15)}` : `0 1px 2px ${alpha(cat.color, 0.13)}`, cursor: "pointer", textAlign: "left", transition: "background .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease", transform: hit ? "translateY(-1px)" : "none" }}><span style={{ width: 3.5, flexShrink: 0, background: cat.color, opacity: hit ? 1 : 0.85 }} /><svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true" style={{ position: "absolute", left: 3.5, bottom: 0, width: "calc(100% - 3.5px)", height: 17, zIndex: 0 }}><path d={`${ridge} L100,24 L0,24 Z`} fill={cat.color} fillOpacity="0.14" /><path d={ridge} fill="none" stroke={cat.color} strokeOpacity="0.35" strokeWidth="1" /></svg><span style={{ position: "relative", zIndex: 1, flex: 1, minWidth: 0, padding: "8px 9px 9px 8px", display: "flex", flexDirection: "column", gap: 2 }}><span style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontSize: 13, fontWeight: 500, letterSpacing: "-0.05em", color: cat.color, whiteSpace: "nowrap" }}>{fmt(p.amount)}</span><span style={{ fontFamily: "var(--font-b)", fontSize: 9.5, fontWeight: 600, color: hit ? cat.color : "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%" }}>{hit ? "Filled \u2713" : sub}</span></span></button>; })}</div></div>; }); })()}</div>
         </div>}
 
         {/* AMOUNT HERO */}
@@ -1295,7 +1318,7 @@ const TxCard = memo(function TxCard({ item: it, categories: cats, incomeSources:
     return <div style={{ ...cc, borderRadius: 14, marginBottom: 10, overflow: "hidden" }}>
       <div onClick={() => setGrpOpen(o => !o)} style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
         <div style={{ width: 44, height: 44, borderRadius: 12, background: tint(accent, "14"), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><DI2 id={it.direction === "owed" ? "received" : "paid"} accent={accent} size={22} /></div>
-        <div style={{ flex: 1, minWidth: 0 }}><div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}><span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{it.direction === "owed" ? `${it.splitName} paid back` : `Paid ${it.splitName}`}</span><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: accent, background: tint(accent, "15"), padding: "1px 5px", borderRadius: 3 }}>{n} PAYMENTS</span></div><div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 2, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{gW?.name} · {dl(it.date)}{(() => { const gx = roundMoney(it.items.reduce((t, x) => t + (x.excess || 0), 0)); return gx > 0.005 ? ` · incl ${fmt(gx)} extra` : ""; })()} · tap to {grpOpen ? "hide" : "see"} {n}</div></div>
+        <div style={{ flex: 1, minWidth: 0 }}><div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}><span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{it.__netted ? `Settled with ${it.splitName}` : it.direction === "owed" ? `${it.splitName} paid back` : `Paid ${it.splitName}`}</span><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: accent, background: tint(accent, "15"), padding: "1px 5px", borderRadius: 3 }}>{it.__netted ? "NET" : `${n} PAYMENTS`}</span></div><div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 2, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{gW?.name} · {dl(it.date)}{it.__netted ? ` · ${n} IOUs cancel to ${it.direction === "owed" ? "+" : "−"}${fmt(it.amount)}` : ""}{(() => { const gx = roundMoney(it.items.reduce((t, x) => t + (x.excess || 0), 0)); return gx > 0.005 ? ` · incl ${fmt(gx)} extra` : ""; })()} · tap to {grpOpen ? "hide" : "see"} {n}</div></div>
         <div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 15, color: accent, flexShrink: 0 }}>{it.direction === "owed" ? "+" : "−"}{fmt(it.amount)}</div>
         <span style={{ fontSize: 10, color: "var(--muted)", transition: "transform 0.2s", display: "inline-block", transform: grpOpen ? "rotate(0deg)" : "rotate(-90deg)", flexShrink: 0 }}>▾</span>
       </div>
@@ -2433,12 +2456,26 @@ export default function Nomad() {
         continue;
       }
       if (it.type !== "settlement") { out.push(it); continue; }
-      const key = `${(it.splitName || "").trim().toLowerCase()}|${it.date}|${it.direction}`;
+      // Key deliberately EXCLUDES direction: a net settle records one row per
+      // IOU, and when someone both owes you and is owed by you those rows point
+      // opposite ways while only their NET ever reaches the wallet. Keyed by
+      // direction, History filed them as two unrelated cards — "Rakesh paid back
+      // ₹74.50" next to "Paid Rakesh ₹32.50" — so reconciling against a bank
+      // statement read as if the gross had landed. One card per person, day and
+      // wallet, showing the net, is what the wallet actually did.
+      const key = `${(it.splitName || "").trim().toLowerCase()}|${it.date}|${it.walletId || ""}`;
       const g = groups.get(key);
       if (g) g.items.push(it);
       else { const c = { __group: true, type: "settlement", direction: it.direction, splitName: it.splitName, date: it.date, walletId: it.walletId, items: [it], id: "sg_" + key }; groups.set(key, c); out.push(c); }
     }
-    return out.map(o => o.__group ? (o.items.length === 1 ? o.items[0] : { ...o, amount: roundMoney(o.items.reduce((t, s) => t + s.amount, 0)) }) : o);
+    return out.map(o => {
+      if (!o.__group) return o;
+      if (o.items.length === 1) return o.items[0];
+      if (o.type !== "settlement") return { ...o, amount: roundMoney(o.items.reduce((t, s) => t + s.amount, 0)) };
+      const cash = settlementsCash(o.items);
+      const netted = o.items.some(s => s.direction === "owed") && o.items.some(s => s.direction === "owe");
+      return { ...o, __netted: netted, direction: cash < 0 ? "owe" : "owed", amount: roundMoney(Math.abs(cash)) };
+    });
   }, [historyItems, bulkMode, hTimeline]);
   const timelineData = useMemo(() => {
     // Only consumed by history rows when the timeline toggle is ON — skip the
@@ -2836,6 +2873,12 @@ export default function Nomad() {
   // leftover IOU one at a time. Same semantics as the per-IOU settle's
   // forgiveRemainder: leftovers become settled+skipped, so they land in the
   // write-off ledger and stay reversible via each IOU's Restore.
+  // Bail-out for the cash invariant below. The settle sheet promised a number
+  // and the user tapped it; if the records we are about to write would move
+  // anything else, we write NOTHING and say what the balance really is now.
+  // Silently moving the other number is what put a gross "paid back" credit in
+  // a bank that only ever received the net.
+  const refuseStaleSettle = (expected, actual) => { showT(`Amounts don't line up — this would move ${fmt(Math.abs(roundMoney(actual)))}, not ${fmt(Math.abs(roundMoney(expected)))}. Reopen settle up.`, "error"); return false; };
   const settleNet = (name, wid, payAmt, sources = null, opts = {}) => {
     const remOf = s => roundMoney(s.amount - stl.filter(x => x.splitId === s.id).reduce((t, x) => t + settlementNetAmount(x), 0));
     const nameLc = String(name || "").trim().toLowerCase();
@@ -2881,6 +2924,7 @@ export default function Nomad() {
         cap = roundMoney(cap - pay);
       }
       const paid = roundMoney(recs.reduce((t, r) => t + r.amount, 0));
+      { const cash = settlementsCash(recs); if (!cashMatchesExpectation(opts.expectCash, cash)) return refuseStaleSettle(opts.expectCash, cash); }
       sStl(p => [...p, ...recs]);
       sbUpsert("settlements", recs.map(r => toSB(r, COLS.settlements)));
       if (doneIds.length) { sSp(p => p.map(x => doneIds.includes(x.id) ? { ...x, settled: true } : x)); doneIds.forEach(id => sbUpsert("splits", [{ id, settled: true }], `splits:${id}`)); }
@@ -2917,6 +2961,7 @@ export default function Nomad() {
     }
     const recs = items.map(x => mkRec(x, x.rem));
     if (excess > 0.005) { const dir = net > 0 ? "owed" : "owe"; const host = recs.find(r => r.direction === dir); if (host) { host.amount = roundMoney(host.amount + excess); host.excess = excess; } }
+    { const cash = settlementsCash(recs); if (!cashMatchesExpectation(opts.expectCash, cash)) return refuseStaleSettle(opts.expectCash, cash); }
     const ids = items.map(x => x.s.id);
     sStl(p => [...p, ...recs]);
     sbUpsert("settlements", recs.map(r => toSB(r, COLS.settlements)));
@@ -2968,6 +3013,7 @@ export default function Nomad() {
         cap = roundMoney(cap - pay);
       }
       const paid = roundMoney(recs.reduce((t, r) => t + r.amount, 0));
+      { const cash = settlementsCash(recs); if (!cashMatchesExpectation(opts.expectCash, cash)) return refuseStaleSettle(opts.expectCash, cash); }
       sStl(p => [...p, ...recs]);
       sbUpsert("settlements", recs.map(r => toSB(r, COLS.settlements)));
       if (doneIds.length) { sSp(p => p.map(x => doneIds.includes(x.id) ? { ...x, settled: true } : x)); doneIds.forEach(id => sbUpsert("splits", [{ id, settled: true }], `splits:${id}`)); }
@@ -2993,6 +3039,7 @@ export default function Nomad() {
       if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + (-net)) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (₹${u.day} used)`, "error"); return false; } if (roundMoney(u.month + (-net)) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
     }
     const recs = items.map(x => mkRec(x, x.rem));
+    { const cash = settlementsCash(recs); if (!cashMatchesExpectation(opts.expectCash, cash)) return refuseStaleSettle(opts.expectCash, cash); }
     const ids = items.map(x => x.s.id);
     sStl(p => [...p, ...recs]);
     sbUpsert("settlements", recs.map(r => toSB(r, COLS.settlements)));
@@ -3019,7 +3066,7 @@ export default function Nomad() {
     else if (buf.type === "settlement") { sStl(p => [...p, buf.exp]); sbUpsert("settlements", [toSB(buf.exp, COLS.settlements)]); if (buf.exp.splitId && buf.splitFlags) { const f = buf.splitFlags; sSp(p => p.map(x => x.id === buf.exp.splitId ? { ...x, settled: f.settled, skipped: f.skipped } : x)); sbUpsert("splits", [{ id: buf.exp.splitId, settled: f.settled, skipped: f.skipped }], `splits:${buf.exp.splitId}`); } }
     else if (buf.type === "recurring") { sRec(p => [buf.exp, ...p]); sbUpsert("recurring", [{ ...toSB(buf.exp, COLS.recurring), deleted_at: null }]); }
     else if (buf.type === "event") { sEvs(p => [buf.exp, ...p]); sbUpsert("events", [{ ...toSB(buf.exp, COLS.events), deleted_at: null }]); if (buf.splits?.length) { sSp(p => [...p, ...buf.splits]); sbUpsert("splits", buf.splits.map(s => ({ ...toSB(s, COLS.splits), deleted_at: null }))); } if (buf.settlements?.length) { sStl(p => [...p, ...buf.settlements]); sbUpsert("settlements", buf.settlements.map(s => toSB(s, COLS.settlements))); } }
-    else if (buf.type === "split") { sSp(p => [...p, buf.exp]); sbUpsert("splits", [{ ...toSB(buf.exp, COLS.splits), deleted_at: null }]); }
+    else if (buf.type === "split") { sSp(p => [...p, buf.exp]); sbUpsert("splits", [{ ...toSB(buf.exp, COLS.splits), deleted_at: null }]); if (buf.settlements?.length) { sStl(p => [...p, ...buf.settlements]); sbUpsert("settlements", buf.settlements.map(s => toSB(s, COLS.settlements))); } }
     else if (buf.type === "skip") { sSp(p => p.map(x => x.id === buf.id ? { ...x, settled: false, skipped: false } : x)); sbUpsert("splits", [{ id: buf.id, settled: false, skipped: false }], `splits:${buf.id}`); }
     undoBuffersRef.current.delete(toastId);
     dismissToast(toastId);
@@ -3048,8 +3095,8 @@ export default function Nomad() {
       if (exp.groupId) {
         sSp(p => p.filter(s => s.groupId !== exp.groupId));
         sStl(p => p.filter(s => s.groupId !== exp.groupId));
-        sbDeleteWhere("splits", `group_id=eq.${exp.groupId}`);
-        sbDeleteWhere("settlements", `group_id=eq.${exp.groupId}`);
+        splits.forEach(s => sbDelete("splits", s.id));
+        settlements.forEach(s => sbDeleteRow("settlements", s.id));
       }
       showUndoToast("Expense deleted", { type: "expense", exp, splits, settlements });
     } else if (type === "income") {
@@ -3065,13 +3112,20 @@ export default function Nomad() {
       // Snapshot the linked split's flags so Undo can put them back exactly.
       const linked = stlRec.splitId ? sp.find(x => x.id === stlRec.splitId) : null;
       const splitFlags = linked ? { settled: !!linked.settled, skipped: !!linked.skipped } : null;
-      sStl(p => p.filter(s => s.id !== id)); sbDeleteWhere("settlements", `id=eq.${id}`);
+      sStl(p => p.filter(s => s.id !== id)); sbDeleteRow("settlements", id);
       if (stlRec.splitId) { sSp(p => p.map(x => x.id === stlRec.splitId ? { ...x, settled: false } : x)); sbUpsert("splits", [{ id: stlRec.splitId, settled: false }], `splits:${stlRec.splitId}`); }
       showUndoToast("Settlement deleted", { type: "settlement", exp: stlRec, splitFlags });
     } else if (type === "split") {
       const s = sp.find(x => x.id === id); if (!s) return;
+      // Its settlements go WITH it. A settlement is the record of cash that
+      // moved in or out of a wallet; leaving them behind when the IOU is gone
+      // leaves that cash in the wallet with nothing left to explain it, and no
+      // screen can trace it back — the wallet just silently disagrees with the
+      // bank. Undo restores both.
+      const settlements = stl.filter(x => x.splitId === id);
       sSp(p => p.filter(x => x.id !== id)); sbDelete("splits", id);
-      showUndoToast("IOU deleted", { type: "split", exp: s });
+      if (settlements.length) { sStl(p => p.filter(x => x.splitId !== id)); settlements.forEach(x => sbDeleteRow("settlements", x.id)); }
+      showUndoToast(settlements.length ? `IOU deleted · ${settlements.length} payment${settlements.length === 1 ? "" : "s"} reversed` : "IOU deleted", { type: "split", exp: s, settlements });
     }
   }, [ex, sp, stl, inc, tr]);
   // Skip = write-off without payment; undo-able. Unskip restores a skipped IOU to pending.
@@ -3850,7 +3904,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         </div>}
 
       {tab === "add" && <div className="pse" style={{ paddingTop: 20 }}><div style={{ display: "flex", gap: 6, marginBottom: 16 }}>{[["log", "Log"], ["iou", "IOU · Splits"]].map(([s, lbl]) => <button key={s} onClick={() => sAddSeg(s)} style={{ flex: 1, padding: "9px", borderRadius: 10, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, cursor: "pointer", border: `1.5px solid ${addSeg === s ? "var(--neg)" : "var(--border)"}`, background: addSeg === s ? "var(--neg)" : "var(--card)", color: addSeg === s ? "#fff" : "var(--muted)" }}>{lbl}</button>)}</div>{addSeg === "log" && <AddPage categories={cats} incomeSources={isrc} recurringCats={recCats} onAddExpense={addE} onAddIncome={addI} onAddTransfer={addT} onAddRec={addRec} onError={showT} patterns={quickPatterns} defaults={addDefaults} autoRules={autoRules} onLearnRule={rule => { sAutoRules(prev => { if (prev.find(r => r.keyword === rule.keyword)) return prev; return [...prev, rule]; }); }} wallets={wallets} cloudinaryEnabled={!!_creds.cloudName} splitPeople={splitPeopleList} onAddSplits={rows => { if (!rows.length) return; sSp(p => [...p, ...rows]); sbUpsert("splits", rows.map(r => ({ ...toSB(r, COLS.splits), deleted_at: null }))); const tot = roundMoney(rows.reduce((s, r) => s + r.amount, 0)); showT(`${rows.length} IOU${rows.length === 1 ? "" : "s"} created · ${fmt(tot)} to collect`, "success"); }} />}{addSeg === "iou" && <IOUWallet splits={sp} settlements={stl} categories={cats} wallets={wallets} events={evs} fmt={fmt} uid={uid} isUpiLite={isUpiLite} SettleModal={SettleM} onAdd={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); }} onSettle={settle} onSettleNet={settleNet} onSettleEventNet={settleEventNet} focusPerson={iouFocus} onFocusHandled={() => sIouFocus(null)} onSkip={skipSplit} onUnskip={unskipSplit} onDelete={id => delItem(id, "split")} onRenamePerson={(from, to) => { const f = (from || "").trim().toLowerCase(); const t = (to || "").trim(); if (!f || !t) return; const affected = sp.filter(s => !s.deleted_at && (s.name || "").trim().toLowerCase() === f); if (!affected.length) return; sSp(p => p.map(s => (s.name || "").trim().toLowerCase() === f ? { ...s, name: t } : s)); sbUpsert("splits", affected.map(s => toSB({ ...s, name: t }, COLS.splits))); showT(`${affected.length} IOU${affected.length === 1 ? "" : "s"} now under "${t}"`, "success"); }} onError={msg => showT(msg, "error")} />}</div>}
-      {tab === "events" && <div className="pse" style={{ background: "transparent", padding: 0 }}><Events events={evs} expenses={ex} splits={sp} settlements={stl} categories={cats} wallets={wallets} staleByEvent={staleByEvent} onCreate={ev => { sEvs(p => [...p, ev]); sbUpsert("events", [toSB(ev, COLS.events)]) }} onAddExp={addE} onAddSplit={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); showT(sr.direction === "owe" ? `You owe ${sr.name} ${fmt(sr.amount)}` : `${sr.name} owes you ${fmt(sr.amount)}`, "info") }} onSettleSplit={settle} onSettleEventNet={settleEventNet} onDeleteSplit={id => delItem(id, "split")} onSkipSplit={skipSplit} onUnskipSplit={unskipSplit} onEditSplit={(id, patch) => { sSp(p => p.map(s => s.id === id ? { ...s, ...patch } : s)); sbUpsert("splits", [{ id, ...patch }]); }} onDeleteExp={id => delItem(id, "expense")} onEditExp={(id, patch) => { const exp = ex.find(e => e.id === id); if (!exp) return false; const gid = exp.groupId || exp.id; sSp(p => p.filter(s => s.groupId !== gid)); sStl(p => p.filter(s => s.groupId !== gid)); sbDeleteWhere("splits", `group_id=eq.${gid}`); sbDeleteWhere("settlements", `group_id=eq.${gid}`); const wallet = patch.paidBy && patch.paidBy !== "me" ? "__tracked__" : (patch.walletId ?? exp.walletId); const updated = { ...exp, ...patch, walletId: wallet }; sEx(p => p.map(e => e.id === id ? updated : e)); sbUpsert("expenses", [toSB(updated, COLS.expenses)]); return true; }} onMarkDone={id => { sEvs(p => p.map(e => e.id === id ? { ...e, status: "completed" } : e)); sbUpsert("events", [{ id, status: "completed" }]) }} onReopen={id => { sEvs(p => p.map(e => e.id === id ? { ...e, status: "active" } : e)); sbUpsert("events", [{ id, status: "active" }]); showT("Event reopened", "info") }} onUpdate={ev => { sEvs(p => p.map(e => e.id === ev.id ? ev : e)); sbUpsert("events", [toSB(ev, COLS.events)]); showT("Event updated", "success") }} onToast={showT} onDelete={id => { const ev = evs.find(e => e.id === id); if (!ev) return; const evSplits = sp.filter(s => s.eventId === id && !s.deleted_at); const evStls = stl.filter(s => s.eventId === id); sEvs(p => p.filter(e => e.id !== id)); sbDelete("events", id); if (evSplits.length) { sSp(p => p.filter(s => s.eventId !== id)); evSplits.forEach(s => sbDelete("splits", s.id)); } if (evStls.length) { sStl(p => p.filter(s => s.eventId !== id)); sbDeleteWhere("settlements", `event_id=eq.${id}`); } showUndoToast(ev.name + " deleted", { type: "event", exp: ev, splits: evSplits, settlements: evStls }); }} dm={dm} /></div>}
+      {tab === "events" && <div className="pse" style={{ background: "transparent", padding: 0 }}><Events events={evs} expenses={ex} splits={sp} settlements={stl} categories={cats} wallets={wallets} staleByEvent={staleByEvent} onCreate={ev => { sEvs(p => [...p, ev]); sbUpsert("events", [toSB(ev, COLS.events)]) }} onAddExp={addE} onAddSplit={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); showT(sr.direction === "owe" ? `You owe ${sr.name} ${fmt(sr.amount)}` : `${sr.name} owes you ${fmt(sr.amount)}`, "info") }} onSettleSplit={settle} onSettleEventNet={settleEventNet} onDeleteSplit={id => delItem(id, "split")} onSkipSplit={skipSplit} onUnskipSplit={unskipSplit} onEditSplit={(id, patch) => { sSp(p => p.map(s => s.id === id ? { ...s, ...patch } : s)); sbUpsert("splits", [{ id, ...patch }]); }} onDeleteExp={id => delItem(id, "expense")} onEditExp={(id, patch) => { const exp = ex.find(e => e.id === id); if (!exp) return false; const gid = exp.groupId || exp.id; const oldSplits = sp.filter(s => s.groupId === gid); const oldStls = stl.filter(s => s.groupId === gid); sSp(p => p.filter(s => s.groupId !== gid)); sStl(p => p.filter(s => s.groupId !== gid)); oldSplits.forEach(s => sbDelete("splits", s.id)); oldStls.forEach(s => sbDeleteRow("settlements", s.id)); const wallet = patch.paidBy && patch.paidBy !== "me" ? "__tracked__" : (patch.walletId ?? exp.walletId); const updated = { ...exp, ...patch, walletId: wallet }; sEx(p => p.map(e => e.id === id ? updated : e)); sbUpsert("expenses", [toSB(updated, COLS.expenses)]); return true; }} onMarkDone={id => { sEvs(p => p.map(e => e.id === id ? { ...e, status: "completed" } : e)); sbUpsert("events", [{ id, status: "completed" }]) }} onReopen={id => { sEvs(p => p.map(e => e.id === id ? { ...e, status: "active" } : e)); sbUpsert("events", [{ id, status: "active" }]); showT("Event reopened", "info") }} onUpdate={ev => { sEvs(p => p.map(e => e.id === ev.id ? ev : e)); sbUpsert("events", [toSB(ev, COLS.events)]); showT("Event updated", "success") }} onToast={showT} onDelete={id => { const ev = evs.find(e => e.id === id); if (!ev) return; const evSplits = sp.filter(s => s.eventId === id && !s.deleted_at); const evStls = stl.filter(s => s.eventId === id); sEvs(p => p.filter(e => e.id !== id)); sbDelete("events", id); if (evSplits.length) { sSp(p => p.filter(s => s.eventId !== id)); evSplits.forEach(s => sbDelete("splits", s.id)); } if (evStls.length) { sStl(p => p.filter(s => s.eventId !== id)); evStls.forEach(s => sbDeleteRow("settlements", s.id)); } showUndoToast(ev.name + " deleted", { type: "event", exp: ev, splits: evSplits, settlements: evStls }); }} dm={dm} /></div>}
       {tab === "history" && <div className="pe"><CalendarView compact expenses={exAll} incomes={inc} refunds={settlementsInAsRefunds} transfers={tr} categories={cats.concat(isrc)} wallets={wallets} viewMonth={fm === "all" ? null : fm} onMonthChange={m => { if (fm !== "all" && fm !== m) { sFm(m); sHCalDay(null); } }} selectedDay={hCalDay} onDayClick={d => { sHCalDay(d); if (d) { const dm = d.slice(0, 7); if (fm !== "all" && fm !== dm) sFm(dm); if (typeof document !== "undefined") { const scrollToDay = () => { const el = document.querySelector(`[data-history-date="${d}"]`); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }; requestAnimationFrame(() => requestAnimationFrame(scrollToDay)); } } }} />{(() => { // Counts only the HIDDEN filters behind the Filter button. The search box is
 // right there on screen; counting it made "Filter 1" light up for a plain
 // search and read as "something you can't see is suppressing your results".

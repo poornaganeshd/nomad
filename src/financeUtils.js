@@ -234,6 +234,32 @@ export const defaultSettleWalletId = (direction, wallets, isUpiLiteFn) => {
 export const settlementNetAmount = (s) =>
   roundMoney((Number(s?.amount) || 0) - (Number(s?.excess) || 0));
 
+// The signed CASH a batch of settlement records moves in its wallet: money
+// received ("owed") counts up, money handed over ("owe") counts down. It reads
+// `amount` in full, not settlementNetAmount — an overpay genuinely leaves the
+// wallet, so the wallet must see all of it.
+export const settlementsCash = (recs) =>
+  roundMoney((Array.isArray(recs) ? recs : []).reduce(
+    (t, r) => t + (r?.direction === "owed" ? (Number(r?.amount) || 0) : -(Number(r?.amount) || 0)), 0));
+
+// A net settle must move EXACTLY the cash its confirm button promised, and this
+// is the check that proves it before anything is written.
+//
+// Why it exists: a net settle nets "you owe" against "owes you" and records one
+// settlement per IOU, relying on the opposite-direction rows to cancel the
+// gross. That only balances while the sheet and the handler are netting the
+// SAME set of IOUs — and they each derive it independently. Whenever those sets
+// drift (a sheet left open while the data moved, an event IOU inside the
+// sheet's net but outside the handler's scope) the wallet quietly banks the
+// difference: History reports the GROSS of every "owes you" IOU as money that
+// reached the bank while only the net ever did, and the wallet then disagrees
+// with the real account by exactly the cancelled side. Comparing the two to the
+// paisa turns that silent drift into a refusal the user can act on.
+// `expected` null/undefined means "no expectation supplied" → always passes.
+export const cashMatchesExpectation = (expected, actual) =>
+  expected == null ||
+  Math.abs(roundMoney(Number(expected) || 0) - roundMoney(Number(actual) || 0)) <= 0.011;
+
 // Fat-finger guard for overpaid settles. A small tip-sized surplus (₹12 against
 // ₹11.66) sails through; a surplus that's large in absolute terms (> ₹50) or
 // relative to the amount due (> 20%) is more likely a typo (120 for 12), so the

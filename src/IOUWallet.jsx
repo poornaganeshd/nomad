@@ -518,6 +518,11 @@ function NetSheet({ desc, wallets, fmt, isUpiLite, onConfirm, onClose }) {
   const over = validEntered && overAllowed && roundMoney(entered) > absNet + 0.005;
   const extra = over ? roundMoney(entered - absNet) : 0;
   const bigOver = isSuspiciousExcess(extra, absNet);
+  // The exact figure printed on the confirm button — and, signed by the net's
+  // direction, the cash the handler is then held to. The sheet and the handler
+  // derive the IOU set independently; passing this across is what lets the
+  // handler refuse instead of silently moving a different amount.
+  const confirmAmt = roundMoney(partial || over ? roundMoney(entered) : absNet);
   const accent = pos ? MINT : CORAL;
   return <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(20,18,30,.5)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
     <div onClick={e => e.stopPropagation()} style={{ background: SURF, borderRadius: "24px 24px 0 0", width: "100%", maxWidth: 430, boxShadow: NEU_RAISED, overflow: "hidden" }}>
@@ -541,7 +546,7 @@ function NetSheet({ desc, wallets, fmt, isUpiLite, onConfirm, onClose }) {
         <div style={{ display: "flex", gap: 9, marginBottom: 18 }}>{opts.map(w => { const on = wid === w.id; return <button key={w.id} onClick={() => sWid(w.id)} style={{ flex: 1, padding: "11px 5px", borderRadius: 14, display: "flex", flexDirection: "column", alignItems: "center", gap: 5, cursor: "pointer", border: "none", boxShadow: on ? NEU_INSET : NEU_SM, background: on ? tint(w.color, "30") : SURF, transition: "box-shadow .15s, background .15s" }}><span style={{ width: 14, height: 14, borderRadius: 5, background: w.color }} /><span style={{ fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 700, color: on ? "var(--text)" : "var(--muted)" }}>{w.name}</span></button>; })}</div>
         <div style={{ display: "flex", gap: 11 }}>
           <button onClick={onClose} style={{ flex: 1, padding: 13, border: "none", borderRadius: 14, background: SURF, boxShadow: NEU_SM, color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
-          <button onClick={ev => { if (ev.currentTarget.disabled) return; if (bigOver && !armed) { sArmed(true); return; } ev.currentTarget.disabled = true; const ok = onConfirm(wid, partial || over ? amt : "", { forgiveRemainder: partial && forgive }); if (ok !== false) onClose(); else ev.currentTarget.disabled = false; }} style={{ flex: 2, padding: 13, border: "none", borderRadius: 14, boxShadow: NEU_SM, background: bigOver && armed ? AMBER : accent, color: ink(bigOver && armed ? AMBER : accent), fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>{bigOver && armed ? `Tap again — ${fmt(extra)} extra is intentional` : `${pos ? "Collect" : "Pay"} ${fmt(partial || over ? roundMoney(entered) : absNet)}${partial && forgive ? " & close" : " & settle"}`}</button>
+          <button onClick={ev => { if (ev.currentTarget.disabled) return; if (bigOver && !armed) { sArmed(true); return; } ev.currentTarget.disabled = true; const ok = onConfirm(wid, partial || over ? amt : "", { forgiveRemainder: partial && forgive, expectCash: n < 0 ? -confirmAmt : confirmAmt }); if (ok !== false) onClose(); else ev.currentTarget.disabled = false; }} style={{ flex: 2, padding: 13, border: "none", borderRadius: 14, boxShadow: NEU_SM, background: bigOver && armed ? AMBER : accent, color: ink(bigOver && armed ? AMBER : accent), fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>{bigOver && armed ? `Tap again — ${fmt(extra)} extra is intentional` : `${pos ? "Collect" : "Pay"} ${fmt(confirmAmt)}${partial && forgive ? " & close" : " & settle"}`}</button>
         </div>
       </div>
     </div>
