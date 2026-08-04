@@ -19,7 +19,7 @@ import { redactTransactions, redact } from "./redactor";
 import {
   roundMoney, localDateKey, getRecurringDueDate, isRecurringDueToday,
   recurringDaysOverdue, distributeAmount, expenseShareMap, historySortCompare,
-  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, isSuspiciousExcess, goalProgress, balanceTrail, runwayInfo,
+  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, settlementsCash, cashMatchesExpectation, isSuspiciousExcess, goalProgress, balanceTrail, runwayInfo,
 } from "./financeUtils";
 import { monotonePathD, smoothSeries } from "./financeUtils";
 import { withAlpha, tint } from "./tint";
@@ -151,6 +151,20 @@ const sbGetDeleted = async (table) => {
   } catch { return null; }
 };
 const sbDeleteWhere = async (table, filter) => sbWrite(`${SB_URL}/rest/v1/${table}?${filter}`, { method: "DELETE", dedupeKey: `${table}:delete:${filter}` });
+// Hard-delete ONE row by id. Every bulk cleanup goes through this rather than a
+// filtered DELETE, for two reasons that were both live bugs:
+//   1. PostgREST filters name columns EXACTLY. Our columns are camelCase
+//      ("groupId", "eventId", "splitId"), but the bulk deletes were written
+//      `group_id=eq.…` / `event_id=eq.…`, so Postgres answered 400 "column does
+//      not exist" and the rows were NEVER deleted server-side. Local state
+//      dropped them, then the 60s background pull handed them straight back —
+//      resurrected settlements put cash back into a wallet with no transaction
+//      left to explain it. `id` is spelled the same either way, so filtering on
+//      it alone makes the whole class impossible.
+//   2. mergeRemote shields a locally-deleted row from a racing pull only when
+//      the queue holds the id-shaped key `<table>:delete:<id>`; a filter-shaped
+//      key never matched, so an offline bulk delete un-deleted itself.
+const sbDeleteRow = async (table, id) => { clearVersion(table, id); return sbWrite(`${SB_URL}/rest/v1/${table}?id=eq.${id}`, { method: "DELETE", dedupeKey: `${table}:delete:${id}` }); };
 const fmt = n => CUR + (Number(n) || 0).toLocaleString("en-IN"), mk = d => d.slice(0, 7);
 // Group expenses someone ELSE paid (logged for the event ledger only). They
 // carry walletId "__tracked__", never touch a wallet, and must be EXCLUDED
@@ -764,7 +778,7 @@ function VoiceAdd({ onParsed, accent = "var(--neg)", compact = false }) {
   return <div style={{ marginBottom: 14 }}><button onClick={listening ? stop : start} style={{ width: "100%", padding: "10px 14px", border: `1.5px dashed ${listening ? "var(--neg)" : accent}`, borderRadius: 10, background: listening ? "#E07A5F12" : "var(--card)", color: listening ? "var(--neg)" : accent, fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}><Microphone size={14} weight={listening ? "fill" : "regular"} />{listening ? "Listening… tap to stop" : "Voice add — say e.g. \"300 coffee bank\""}</button>{error && <div style={{ fontSize: 11, color: "var(--neg)", marginTop: 4, fontFamily: "var(--font-h)" }}>{error}</div>}</div>;
 }
 
-function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], autoRules = [], onLearnRule = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false, splitPeople = [], onAddSplits = () => {}, defaults = {} }) {
+function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], onQuickLog = null, autoRules = [], onLearnRule = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false, splitPeople = [], onAddSplits = () => {}, defaults = {} }) {
   const _AD = (() => { try { return JSON.parse(sessionStorage.getItem("nomad-add-draft") || "{}"); } catch { return {}; } })();
   const [type, sType] = useState(_AD.type || "expense"), [amt, sAmt] = useState(_AD.amt || "0"), [catId, sCat] = useState(_AD.catId || defaults.categoryId || cats[0]?.id || ""), [srcId, sSrc] = useState(isrc[0]?.id || ""), [wid, sW] = useState(_AD.wid || defaults.walletId || "bank"), [iwid, sIW] = useState("bank"), [tFrom, sTF] = useState("bank"), [tTo, sTT] = useState("upi_lite"), [date, sDate] = useState(_AD.date || localDateKey()), [note, sNote] = useState(_AD.note || ""), [fixed, sFixed] = useState(false);
   // Smart defaults can land AFTER mount (history loads async, so a cold start
@@ -788,9 +802,13 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
   // Index of the quick-add chip just tapped. Tapping one fills fields that are
   // mostly BELOW the fold, so without a confirmation on the chip itself the tap
   // looked like it did nothing — that's the "abrupt" part. Clears itself.
-  const [qaHit, sQaHit] = useState(-1);
+  const [qaHit, sQaHit] = useState(null); // { i, mode: "logged" | "filled" }
   const qaTimer = useRef(null);
-  useEffect(() => () => clearTimeout(qaTimer.current), []);
+  // Long-press state for the quick-add rail. `held` is set when the hold timer
+  // fires so the click that follows the release is swallowed — otherwise a hold
+  // would fill the form AND log the expense.
+  const qaHold = useRef({ t: null, held: false });
+  useEffect(() => () => { clearTimeout(qaTimer.current); clearTimeout(qaHold.current.t); }, []);
   const [rName, sRN] = useState(""), [rAmt, sRA] = useState(""), [rCat, sRC] = useState("rent"), [rWal, sRW] = useState("bank"), [rFreq, sRF] = useState("monthly"), [rDay, sRD] = useState(new Date().getDate()), [rInt, sRI] = useState(30), [rStart, sRS] = useState(localDateKey()), [rOther, sRO] = useState(""), [rYM, sRYM] = useState(1), [rYD, sRYD] = useState(1);
   const [fxCur, setFxCur] = useState("INR"), [fxRate, setFxRate] = useState(null), [fxFetching, setFxFetching] = useState(false), [fxDate, setFxDate] = useState(null);
   const [fxExpanded, setFxExpanded] = useState(false), [fxSearch, setFxSearch] = useState("");
@@ -1108,10 +1126,38 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       const setSelCat = isExp ? sCat : sSrc;
       const catList = isExp ? [...cats, ...(cats.find(c => c.id === "other") ? [] : [DC.find(c => c.id === "other")])].filter(Boolean) : isrc;
 
+      // Quick add = ONE TAP LOGS IT. These patterns are things already logged
+      // twice or more in the last 60 days, so the amount, category, wallet and
+      // note are all settled — there is nothing left to decide, and making you
+      // scroll past the amount hero to a save button was the whole cost of
+      // logging them. Tap writes the expense (with Undo in the toast, because a
+      // tap that spends money has to be reversible in the same gesture); HOLD
+      // still fills the form for the times you want to tweak one first.
+      const qaFill = (p, i) => { sAmt(String(p.amount)); sCat(p.categoryId); sW(p.walletId); if (p.note) sNote(p.note); clearTimeout(qaTimer.current); sQaHit({ i, mode: "filled" }); qaTimer.current = setTimeout(() => sQaHit(null), 1100); };
+      const qaTap = (p, i) => { if (qaHold.current.held) { qaHold.current.held = false; return; } if (qaHit && qaHit.i === i) return; if (!onQuickLog) { hapticLight(); qaFill(p, i); return; } if (onQuickLog(p) === false) return; clearTimeout(qaTimer.current); sQaHit({ i, mode: "logged" }); qaTimer.current = setTimeout(() => sQaHit(null), 1400); };
+      const qaHoldStart = (p, i) => { qaHold.current.held = false; clearTimeout(qaHold.current.t); qaHold.current.t = setTimeout(() => { qaHold.current.held = true; hapticMedium(); qaFill(p, i); }, 420); };
+      const qaHoldEnd = () => clearTimeout(qaHold.current.t);
       return <>
         {isExp && patterns.length > 0 && <div style={{ marginBottom: 14 }}>
-          <div style={{ marginBottom: 9, display: "flex", alignItems: "baseline", gap: 7, flexWrap: "wrap" }}><span style={microLabel("var(--muted)")}>Quick add</span><span style={{ fontFamily: "var(--font-b)", fontSize: 10, color: "var(--muted)", opacity: 0.7 }}>your usual - tap to fill</span></div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>{(() => { const qaMax = Math.max(1, ...patterns.slice(0, 5).map(q => q.count || 1)); return patterns.slice(0, 5).map((p, i) => { const cat = cats.find(c => c.id === p.categoryId) || DC.find(c => c.id === p.categoryId) || { color: "#E07A5F", neon: "#FF9F1C" }; const sub = p.note || cat.name || ""; const hit = qaHit === i; const freq = Math.max(0.16, Math.min(1, (p.count || 1) / qaMax)); const lvl = 21 - freq * 16; const ridge = `M0,${(lvl + 1.4).toFixed(1)} Q18,${(lvl - 2.6).toFixed(1)} 35,${(lvl + 0.6).toFixed(1)} Q55,${(lvl + 2.8).toFixed(1)} 70,${(lvl - 1).toFixed(1)} Q88,${(lvl - 2.8).toFixed(1)} 100,${(lvl + 1.4).toFixed(1)}`; return <button key={i} title={`${sub}${p.count > 1 ? ` \u00b7 logged ${p.count}\u00d7` : ""}`} aria-label={`Quick add ${fmt(p.amount)} ${sub}`} onClick={() => { hapticLight(); sAmt(String(p.amount)); sCat(p.categoryId); sW(p.walletId); if (p.note) sNote(p.note); clearTimeout(qaTimer.current); sQaHit(i); qaTimer.current = setTimeout(() => sQaHit(-1), 1100); }} style={{ position: "relative", overflow: "hidden", flex: "0 1 auto", maxWidth: 172, minWidth: 104, display: "flex", alignItems: "stretch", padding: 0, borderRadius: 13, border: `1px solid ${alpha(cat.color, hit ? 0.85 : 0.3)}`, background: hit ? alpha(cat.color, 0.16) : "var(--card)", boxShadow: hit ? `0 0 0 3px ${alpha(cat.color, 0.15)}` : `0 1px 2px ${alpha(cat.color, 0.13)}`, cursor: "pointer", textAlign: "left", transition: "background .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease", transform: hit ? "translateY(-1px)" : "none" }}><span style={{ width: 3.5, flexShrink: 0, background: cat.color, opacity: hit ? 1 : 0.85 }} /><svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true" style={{ position: "absolute", left: 3.5, bottom: 0, width: "calc(100% - 3.5px)", height: 17, zIndex: 0 }}><path d={`${ridge} L100,24 L0,24 Z`} fill={cat.color} fillOpacity="0.14" /><path d={ridge} fill="none" stroke={cat.color} strokeOpacity="0.35" strokeWidth="1" /></svg><span style={{ position: "relative", zIndex: 1, flex: 1, minWidth: 0, padding: "8px 10px 9px 9px", display: "flex", flexDirection: "column", gap: 2 }}><span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}><DI2 id={p.categoryId} accent={cat.neon || cat.color} size={13} /><span style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontSize: 13, fontWeight: 500, letterSpacing: "-0.05em", color: cat.color, whiteSpace: "nowrap" }}>{fmt(p.amount)}</span></span><span style={{ fontFamily: "var(--font-b)", fontSize: 9.5, fontWeight: 600, color: hit ? cat.color : "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%" }}>{hit ? "Filled \u2713" : sub}</span></span></button>; }); })()}</div>
+          <div style={{ marginBottom: 8, display: "flex", alignItems: "baseline", gap: 7, flexWrap: "wrap" }}><span style={microLabel("var(--muted)")}>Quick add</span><span style={{ fontFamily: "var(--font-b)", fontSize: 10, color: "var(--muted)", opacity: 0.7 }}>tap logs it · hold to edit</span></div>
+          {/* One WRAPPING row of small pills, ordered so a category's patterns sit
+              together and each pill carries that category's colour + icon. The
+              previous per-category shelves grouped things properly but cost ~570px
+              of scroll to save typing, which is backwards for the one part of the
+              app whose entire job is to be fast. A pill is ~34px tall, so five of
+              them fit in two rows under 90px and the amount hero stays on screen.
+              Frequency lives in the bar along the pill's bottom edge (width =
+              share of the most-logged pattern) rather than a stacked ridge, so it
+              costs no height at all. WRAP, never overflow-x: a hidden horizontal
+              scroller used to slice the last pill off at the viewport edge.
+              The category's colour has to READ at 34px, so the pill carries it
+              four ways — tint, border, icon and amount — and the icon uses
+              `cat.color`, not the pastel `neon` variant that washes out at this
+              size. An unresolved category falls back to the real "Other"
+              category rather than a hardcoded coral: that coral was Food's own
+              hue, so a pattern whose category had been deleted or renamed sat in
+              the rail wearing Food's colour. */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{(() => { const list = patterns.slice(0, 5); const qaMax = Math.max(1, ...list.map(q => q.count || 1)); const byCat = new Map(); list.forEach((p, i) => { const k = p.categoryId || "other"; if (!byCat.has(k)) byCat.set(k, []); byCat.get(k).push({ p, i }); }); return [...byCat.values()].flat().map(({ p, i }) => { const cat = cats.find(c => c.id === p.categoryId) || DC.find(c => c.id === p.categoryId) || cats.find(c => c.id === "other") || DC[DC.length - 1]; const sub = p.note || cat.name || ""; const mode = qaHit && qaHit.i === i ? qaHit.mode : null; const freq = Math.max(0.18, Math.min(1, (p.count || 1) / qaMax)); return <button key={i} title={`${sub}${p.count > 1 ? ` \u00b7 logged ${p.count}\u00d7` : ""}`} aria-label={`Quick add ${fmt(p.amount)} ${sub}`} onContextMenu={e => e.preventDefault()} onPointerDown={() => qaHoldStart(p, i)} onPointerUp={qaHoldEnd} onPointerLeave={qaHoldEnd} onPointerCancel={qaHoldEnd} onClick={() => qaTap(p, i)} style={{ position: "relative", overflow: "hidden", flex: "0 1 auto", maxWidth: 168, minWidth: 0, height: 34, display: "inline-flex", alignItems: "center", gap: 6, padding: "0 11px 0 9px", borderRadius: 999, border: `1.5px solid ${alpha(cat.color, mode ? 0.9 : 0.42)}`, background: alpha(cat.color, mode ? 0.26 : 0.14), cursor: "pointer", textAlign: "left", userSelect: "none", touchAction: "manipulation", WebkitTouchCallout: "none", transition: "background .16s ease, border-color .16s ease, transform .16s ease", transform: mode ? "translateY(-1px)" : "none" }}><span aria-hidden="true" style={{ position: "absolute", left: 0, bottom: 0, height: 2, width: `${(freq * 100).toFixed(0)}%`, background: cat.color, opacity: mode ? 0.95 : 0.6 }} /><DI2 id={p.categoryId} accent={cat.color} size={13} /><span style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontSize: 12, fontWeight: 500, letterSpacing: "-0.05em", color: cat.color, whiteSpace: "nowrap", flexShrink: 0 }}>{fmt(p.amount)}</span><span style={{ fontFamily: "var(--font-b)", fontSize: 10.5, fontWeight: 600, color: mode ? cat.color : "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{mode === "logged" ? "Logged \u2713" : mode === "filled" ? "Filled \u2713" : sub}</span></button>; }); })()}</div>
         </div>}
 
         {/* AMOUNT HERO */}
@@ -1295,7 +1341,7 @@ const TxCard = memo(function TxCard({ item: it, categories: cats, incomeSources:
     return <div style={{ ...cc, borderRadius: 14, marginBottom: 10, overflow: "hidden" }}>
       <div onClick={() => setGrpOpen(o => !o)} style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
         <div style={{ width: 44, height: 44, borderRadius: 12, background: tint(accent, "14"), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><DI2 id={it.direction === "owed" ? "received" : "paid"} accent={accent} size={22} /></div>
-        <div style={{ flex: 1, minWidth: 0 }}><div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}><span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{it.direction === "owed" ? `${it.splitName} paid back` : `Paid ${it.splitName}`}</span><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: accent, background: tint(accent, "15"), padding: "1px 5px", borderRadius: 3 }}>{n} PAYMENTS</span></div><div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 2, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{gW?.name} · {dl(it.date)}{(() => { const gx = roundMoney(it.items.reduce((t, x) => t + (x.excess || 0), 0)); return gx > 0.005 ? ` · incl ${fmt(gx)} extra` : ""; })()} · tap to {grpOpen ? "hide" : "see"} {n}</div></div>
+        <div style={{ flex: 1, minWidth: 0 }}><div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}><span style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{it.__netted ? `Settled with ${it.splitName}` : it.direction === "owed" ? `${it.splitName} paid back` : `Paid ${it.splitName}`}</span><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: accent, background: tint(accent, "15"), padding: "1px 5px", borderRadius: 3 }}>{it.__netted ? "NET" : `${n} PAYMENTS`}</span></div><div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 2, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>{gW?.name} · {dl(it.date)}{it.__netted ? ` · ${n} IOUs cancel to ${it.direction === "owed" ? "+" : "−"}${fmt(it.amount)}` : ""}{(() => { const gx = roundMoney(it.items.reduce((t, x) => t + (x.excess || 0), 0)); return gx > 0.005 ? ` · incl ${fmt(gx)} extra` : ""; })()} · tap to {grpOpen ? "hide" : "see"} {n}</div></div>
         <div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 15, color: accent, flexShrink: 0 }}>{it.direction === "owed" ? "+" : "−"}{fmt(it.amount)}</div>
         <span style={{ fontSize: 10, color: "var(--muted)", transition: "transform 0.2s", display: "inline-block", transform: grpOpen ? "rotate(0deg)" : "rotate(-90deg)", flexShrink: 0 }}>▾</span>
       </div>
@@ -2433,12 +2479,26 @@ export default function Nomad() {
         continue;
       }
       if (it.type !== "settlement") { out.push(it); continue; }
-      const key = `${(it.splitName || "").trim().toLowerCase()}|${it.date}|${it.direction}`;
+      // Key deliberately EXCLUDES direction: a net settle records one row per
+      // IOU, and when someone both owes you and is owed by you those rows point
+      // opposite ways while only their NET ever reaches the wallet. Keyed by
+      // direction, History filed them as two unrelated cards — "Rakesh paid back
+      // ₹74.50" next to "Paid Rakesh ₹32.50" — so reconciling against a bank
+      // statement read as if the gross had landed. One card per person, day and
+      // wallet, showing the net, is what the wallet actually did.
+      const key = `${(it.splitName || "").trim().toLowerCase()}|${it.date}|${it.walletId || ""}`;
       const g = groups.get(key);
       if (g) g.items.push(it);
       else { const c = { __group: true, type: "settlement", direction: it.direction, splitName: it.splitName, date: it.date, walletId: it.walletId, items: [it], id: "sg_" + key }; groups.set(key, c); out.push(c); }
     }
-    return out.map(o => o.__group ? (o.items.length === 1 ? o.items[0] : { ...o, amount: roundMoney(o.items.reduce((t, s) => t + s.amount, 0)) }) : o);
+    return out.map(o => {
+      if (!o.__group) return o;
+      if (o.items.length === 1) return o.items[0];
+      if (o.type !== "settlement") return { ...o, amount: roundMoney(o.items.reduce((t, s) => t + s.amount, 0)) };
+      const cash = settlementsCash(o.items);
+      const netted = o.items.some(s => s.direction === "owed") && o.items.some(s => s.direction === "owe");
+      return { ...o, __netted: netted, direction: cash < 0 ? "owe" : "owed", amount: roundMoney(Math.abs(cash)) };
+    });
   }, [historyItems, bulkMode, hTimeline]);
   const timelineData = useMemo(() => {
     // Only consumed by history rows when the timeline toggle is ON — skip the
@@ -2738,7 +2798,7 @@ export default function Nomad() {
   // (and store a stale balBefore). Callers thread the net effect of the
   // batch entries already accepted so each one sees the balance the previous
   // ones left behind — as if they'd been typed one at a time.
-  const addE = (data, { balanceDelta = 0 } = {}) => {
+  const addE = (data, { balanceDelta = 0, silent = false } = {}) => {
     const amt = roundMoney(data.amount);
     if (amt <= 0) { showT("Enter a valid amount", "error"); return false }
     if (amt > 10000000) { showT("Amount too large (max ₹1 crore)", "error"); return false }
@@ -2768,7 +2828,20 @@ export default function Nomad() {
     sbUpsert("expenses", [toSB(rec, COLS.expenses)]);
     dance();
     if (budgets[data.categoryId] > 0) { const cm = localDateKey().slice(0, 7); const prev = ex.filter(e => e.categoryId === data.categoryId && mk(e.date) === cm && !isTrackedExp(e)).reduce((s, e) => s + e.amount, 0); const tot = prev + amt; const lim = budgets[data.categoryId]; const cn = cats.find(c => c.id === data.categoryId)?.name || data.categoryId; if (tot >= lim) { showT(`${cn} budget exceeded! ${fmt(tot)} / ${fmt(lim)}`, "error"); sNotifs(pushNotifications([{ id: `budget-${data.categoryId}-${cm}`, kind: "budget", title: `${cn} budget exceeded`, body: `${fmt(tot)} spent of a ${fmt(lim)} limit this month. Tap to adjust.`, meta: { go: "budget" } }])); } else if (tot >= lim * 0.8) showT(`${cn} at ${Math.round(tot / lim * 100)}% of budget (${fmt(lim)})`, "info"); }
-    showT(online ? "Expense added" : "Expense saved offline", "success");
+    if (!silent) showT(online ? "Expense added" : "Expense saved offline", "success");
+    return silent ? rec : true;
+  };
+  // One-tap logging for a quick-add pattern. These are things you have already
+  // logged at least twice — amount, category, wallet and note are all settled,
+  // so there is nothing left to decide and no reason to make you scroll to the
+  // save button. addE stays the single write path (balance checks, UPI Lite
+  // caps, budget alerts all still fire); we only swap its confirmation toast for
+  // one that can take the expense back, since a tap that spends money must be
+  // reversible in the same gesture.
+  const quickLog = (p) => {
+    const rec = addE({ id: uid(), amount: p.amount, categoryId: p.categoryId, walletId: p.walletId, date: localDateKey(), note: p.note || "" }, { silent: true });
+    if (!rec) return false;
+    showUndoToast(`${fmt(p.amount)} ${p.note || cats.find(c => c.id === p.categoryId)?.name || "logged"} · logged`, { type: "unadd", id: rec.id });
     return true;
   };
   const addI = (data, { balanceDelta = 0 } = {}) => { const amt = roundMoney(data.amount); if (isUpiLite(data.walletId, wallets)) { showT("UPI Lite is for spending only", "error"); return false } if (amt <= 0) { showT("Enter a valid amount", "error"); return false } if (amt > 10000000) { showT("Amount too large (max ₹1 crore)", "error"); return false } if (typeof data.note === "string" && data.note.length > 500) data = { ...data, note: data.note.slice(0, 500) }; const isBackdated = data.date && data.date < localDateKey(); const balBefore = roundMoney((isBackdated ? balanceOnDate(data.walletId, data.date) : (wBal[data.walletId] || 0)) + balanceDelta); const rec = { id: uid(), type: "income", ...data, amount: amt, balBefore, created_at: new Date().toISOString() }; sInc(p => [rec, ...p]); sbUpsert("incomes", [toSB(rec, COLS.incomes)]); dance(); showT(online ? "Income added" : "Income saved offline", "success"); return true };
@@ -2836,6 +2909,12 @@ export default function Nomad() {
   // leftover IOU one at a time. Same semantics as the per-IOU settle's
   // forgiveRemainder: leftovers become settled+skipped, so they land in the
   // write-off ledger and stay reversible via each IOU's Restore.
+  // Bail-out for the cash invariant below. The settle sheet promised a number
+  // and the user tapped it; if the records we are about to write would move
+  // anything else, we write NOTHING and say what the balance really is now.
+  // Silently moving the other number is what put a gross "paid back" credit in
+  // a bank that only ever received the net.
+  const refuseStaleSettle = (expected, actual) => { showT(`Amounts don't line up — this would move ${fmt(Math.abs(roundMoney(actual)))}, not ${fmt(Math.abs(roundMoney(expected)))}. Reopen settle up.`, "error"); return false; };
   const settleNet = (name, wid, payAmt, sources = null, opts = {}) => {
     const remOf = s => roundMoney(s.amount - stl.filter(x => x.splitId === s.id).reduce((t, x) => t + settlementNetAmount(x), 0));
     const nameLc = String(name || "").trim().toLowerCase();
@@ -2881,6 +2960,7 @@ export default function Nomad() {
         cap = roundMoney(cap - pay);
       }
       const paid = roundMoney(recs.reduce((t, r) => t + r.amount, 0));
+      { const cash = settlementsCash(recs); if (!cashMatchesExpectation(opts.expectCash, cash)) return refuseStaleSettle(opts.expectCash, cash); }
       sStl(p => [...p, ...recs]);
       sbUpsert("settlements", recs.map(r => toSB(r, COLS.settlements)));
       if (doneIds.length) { sSp(p => p.map(x => doneIds.includes(x.id) ? { ...x, settled: true } : x)); doneIds.forEach(id => sbUpsert("splits", [{ id, settled: true }], `splits:${id}`)); }
@@ -2917,6 +2997,7 @@ export default function Nomad() {
     }
     const recs = items.map(x => mkRec(x, x.rem));
     if (excess > 0.005) { const dir = net > 0 ? "owed" : "owe"; const host = recs.find(r => r.direction === dir); if (host) { host.amount = roundMoney(host.amount + excess); host.excess = excess; } }
+    { const cash = settlementsCash(recs); if (!cashMatchesExpectation(opts.expectCash, cash)) return refuseStaleSettle(opts.expectCash, cash); }
     const ids = items.map(x => x.s.id);
     sStl(p => [...p, ...recs]);
     sbUpsert("settlements", recs.map(r => toSB(r, COLS.settlements)));
@@ -2968,6 +3049,7 @@ export default function Nomad() {
         cap = roundMoney(cap - pay);
       }
       const paid = roundMoney(recs.reduce((t, r) => t + r.amount, 0));
+      { const cash = settlementsCash(recs); if (!cashMatchesExpectation(opts.expectCash, cash)) return refuseStaleSettle(opts.expectCash, cash); }
       sStl(p => [...p, ...recs]);
       sbUpsert("settlements", recs.map(r => toSB(r, COLS.settlements)));
       if (doneIds.length) { sSp(p => p.map(x => doneIds.includes(x.id) ? { ...x, settled: true } : x)); doneIds.forEach(id => sbUpsert("splits", [{ id, settled: true }], `splits:${id}`)); }
@@ -2993,6 +3075,7 @@ export default function Nomad() {
       if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + (-net)) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (₹${u.day} used)`, "error"); return false; } if (roundMoney(u.month + (-net)) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
     }
     const recs = items.map(x => mkRec(x, x.rem));
+    { const cash = settlementsCash(recs); if (!cashMatchesExpectation(opts.expectCash, cash)) return refuseStaleSettle(opts.expectCash, cash); }
     const ids = items.map(x => x.s.id);
     sStl(p => [...p, ...recs]);
     sbUpsert("settlements", recs.map(r => toSB(r, COLS.settlements)));
@@ -3019,11 +3102,13 @@ export default function Nomad() {
     else if (buf.type === "settlement") { sStl(p => [...p, buf.exp]); sbUpsert("settlements", [toSB(buf.exp, COLS.settlements)]); if (buf.exp.splitId && buf.splitFlags) { const f = buf.splitFlags; sSp(p => p.map(x => x.id === buf.exp.splitId ? { ...x, settled: f.settled, skipped: f.skipped } : x)); sbUpsert("splits", [{ id: buf.exp.splitId, settled: f.settled, skipped: f.skipped }], `splits:${buf.exp.splitId}`); } }
     else if (buf.type === "recurring") { sRec(p => [buf.exp, ...p]); sbUpsert("recurring", [{ ...toSB(buf.exp, COLS.recurring), deleted_at: null }]); }
     else if (buf.type === "event") { sEvs(p => [buf.exp, ...p]); sbUpsert("events", [{ ...toSB(buf.exp, COLS.events), deleted_at: null }]); if (buf.splits?.length) { sSp(p => [...p, ...buf.splits]); sbUpsert("splits", buf.splits.map(s => ({ ...toSB(s, COLS.splits), deleted_at: null }))); } if (buf.settlements?.length) { sStl(p => [...p, ...buf.settlements]); sbUpsert("settlements", buf.settlements.map(s => toSB(s, COLS.settlements))); } }
-    else if (buf.type === "split") { sSp(p => [...p, buf.exp]); sbUpsert("splits", [{ ...toSB(buf.exp, COLS.splits), deleted_at: null }]); }
+    else if (buf.type === "split") { sSp(p => [...p, buf.exp]); sbUpsert("splits", [{ ...toSB(buf.exp, COLS.splits), deleted_at: null }]); if (buf.settlements?.length) { sStl(p => [...p, ...buf.settlements]); sbUpsert("settlements", buf.settlements.map(s => toSB(s, COLS.settlements))); } }
     else if (buf.type === "skip") { sSp(p => p.map(x => x.id === buf.id ? { ...x, settled: false, skipped: false } : x)); sbUpsert("splits", [{ id: buf.id, settled: false, skipped: false }], `splits:${buf.id}`); }
+    // Undo of an ADD (one-tap quick log) — take the expense back out.
+    else if (buf.type === "unadd") { sEx(p => p.filter(e => e.id !== buf.id)); sbDelete("expenses", buf.id); }
     undoBuffersRef.current.delete(toastId);
     dismissToast(toastId);
-    showT("Restored", "success");
+    showT(buf.type === "unadd" ? "Removed" : "Restored", "success");
   };
 
   const showUndoToast = (msg, buffer) => {
@@ -3048,8 +3133,8 @@ export default function Nomad() {
       if (exp.groupId) {
         sSp(p => p.filter(s => s.groupId !== exp.groupId));
         sStl(p => p.filter(s => s.groupId !== exp.groupId));
-        sbDeleteWhere("splits", `group_id=eq.${exp.groupId}`);
-        sbDeleteWhere("settlements", `group_id=eq.${exp.groupId}`);
+        splits.forEach(s => sbDelete("splits", s.id));
+        settlements.forEach(s => sbDeleteRow("settlements", s.id));
       }
       showUndoToast("Expense deleted", { type: "expense", exp, splits, settlements });
     } else if (type === "income") {
@@ -3065,13 +3150,20 @@ export default function Nomad() {
       // Snapshot the linked split's flags so Undo can put them back exactly.
       const linked = stlRec.splitId ? sp.find(x => x.id === stlRec.splitId) : null;
       const splitFlags = linked ? { settled: !!linked.settled, skipped: !!linked.skipped } : null;
-      sStl(p => p.filter(s => s.id !== id)); sbDeleteWhere("settlements", `id=eq.${id}`);
+      sStl(p => p.filter(s => s.id !== id)); sbDeleteRow("settlements", id);
       if (stlRec.splitId) { sSp(p => p.map(x => x.id === stlRec.splitId ? { ...x, settled: false } : x)); sbUpsert("splits", [{ id: stlRec.splitId, settled: false }], `splits:${stlRec.splitId}`); }
       showUndoToast("Settlement deleted", { type: "settlement", exp: stlRec, splitFlags });
     } else if (type === "split") {
       const s = sp.find(x => x.id === id); if (!s) return;
+      // Its settlements go WITH it. A settlement is the record of cash that
+      // moved in or out of a wallet; leaving them behind when the IOU is gone
+      // leaves that cash in the wallet with nothing left to explain it, and no
+      // screen can trace it back — the wallet just silently disagrees with the
+      // bank. Undo restores both.
+      const settlements = stl.filter(x => x.splitId === id);
       sSp(p => p.filter(x => x.id !== id)); sbDelete("splits", id);
-      showUndoToast("IOU deleted", { type: "split", exp: s });
+      if (settlements.length) { sStl(p => p.filter(x => x.splitId !== id)); settlements.forEach(x => sbDeleteRow("settlements", x.id)); }
+      showUndoToast(settlements.length ? `IOU deleted · ${settlements.length} payment${settlements.length === 1 ? "" : "s"} reversed` : "IOU deleted", { type: "split", exp: s, settlements });
     }
   }, [ex, sp, stl, inc, tr]);
   // Skip = write-off without payment; undo-able. Unskip restores a skipped IOU to pending.
@@ -3849,8 +3941,8 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         <div style={{ ...cc, padding: 18, marginBottom: 16, position: "relative", overflow: "hidden" }}><div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "var(--neg)" }} /><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "var(--neg)", marginBottom: 16, letterSpacing: "0.5px", fontWeight: 700 }}>Spending by Category</div>{fltExAll.length === 0 ? <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: 20 }}>No expenses yet</p> : (() => { const t = {}; fltExAll.forEach(e => { t[e.categoryId] = (t[e.categoryId] || 0) + e.amount }); const s = Object.entries(t).sort((a, b) => b[1] - a[1]), mx = s[0]?.[1] || 1; const curM = heroM; const [pY, pM] = curM.split("-").map(Number); const prevM = pM === 1 ? `${pY - 1}-12` : `${pY}-${String(pM - 1).padStart(2, "0")}`; const prevT = {}; exAll.filter(e => mk(e.date) === prevM).forEach(e => { prevT[e.categoryId] = (prevT[e.categoryId] || 0) + e.amount }); return s.map(([cid, total]) => { const c = cats.find(x => x.id === cid) || { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#6366F1", neon: "#818CF8" }; const cExps = fltExAll.filter(e => e.categoryId === cid); const realEx = cExps.filter(e => !e.__settlement); const ctag = realEx.length > 0 && realEx.every(isFix) ? "fixed" : "flexible"; const prevTotal = prevT[cid] || 0; const momPct = prevTotal > 0 ? Math.round((total - prevTotal) / prevTotal * 100) : null; const isDrilled = drillCat === cid; const allTx = isDrilled ? [...cExps].sort((a, b) => (b.date || "").localeCompare(a.date || "")) : []; return <div key={cid} style={{ marginBottom: 12 }}><div onClick={() => sDrillCat(isDrilled ? null : cid)} style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}><span style={{ width: 30, display: "flex", justifyContent: "center" }}><DI2 id={c.id} accent={c.neon || c.color} size={20} /></span><div style={{ flex: 1 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><div style={{ display: "flex", alignItems: "center" }}><span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{c.name}</span><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: ctag === "fixed" ? "var(--acc2)" : "var(--warn)", background: ctag === "fixed" ? "#A78BFA15" : "#FBBF2415", padding: "2px 6px", borderRadius: 4, marginLeft: 6 }}>{ctag === "fixed" ? "FIXED" : "FLEX"}</span><span style={{ fontSize: 9, color: "var(--muted)", marginLeft: 6, fontFamily: "var(--font-h)" }}>{cExps.length} tx</span></div><div style={{ display: "flex", alignItems: "center", gap: 6 }}>{momPct !== null && <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: momPct > 0 ? "var(--neg)" : "var(--pos)", background: momPct > 0 ? "#E07A5F15" : "#6BAA7515", padding: "1px 5px", borderRadius: 3 }}>{momPct > 0 ? "+" : ""}{momPct}% MoM</span>}<span style={{ fontSize: 13, fontFamily: "var(--font-h)", color: "var(--ts)", fontWeight: 500 }}>{fmt(total)}</span></div></div><div style={{ height: 5, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${(total / mx) * 100}%`, background: c.color, borderRadius: 3 }} /></div></div><span style={{ fontSize: 10, color: "var(--muted)" }}>{isDrilled ? "▲" : "▼"}</span></div>{isDrilled && <div style={{ marginLeft: 42, marginTop: 6, padding: "8px 10px", background: "var(--bg)", borderRadius: 8, border: "1px solid var(--border)", maxHeight: 260, overflowY: "auto" }}>{allTx.length === 0 && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: 8 }}>No entries</div>}{allTx.map(tx => <div key={tx.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, paddingBottom: 6, borderBottom: "1px dashed var(--border)" }}><div style={{ flex: 1, minWidth: 0, marginRight: 8 }}><div style={{ fontSize: 11, color: "var(--ts)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-h)", fontWeight: 600 }}>{tx.note || "(no note)"}{tx.__settlement && <span style={{ marginLeft: 5, fontSize: 8, color: "var(--danger)", background: "#D4726A15", padding: "1px 4px", borderRadius: 3, fontWeight: 700 }}>SPLIT</span>}</div><div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 1 }}>{dl(tx.date)}</div></div><span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--text)", fontWeight: 600, flexShrink: 0 }}>{fmt(tx.amount)}</span></div>)}</div>}</div> }) })()}</div>
         </div>}
 
-      {tab === "add" && <div className="pse" style={{ paddingTop: 20 }}><div style={{ display: "flex", gap: 6, marginBottom: 16 }}>{[["log", "Log"], ["iou", "IOU · Splits"]].map(([s, lbl]) => <button key={s} onClick={() => sAddSeg(s)} style={{ flex: 1, padding: "9px", borderRadius: 10, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, cursor: "pointer", border: `1.5px solid ${addSeg === s ? "var(--neg)" : "var(--border)"}`, background: addSeg === s ? "var(--neg)" : "var(--card)", color: addSeg === s ? "#fff" : "var(--muted)" }}>{lbl}</button>)}</div>{addSeg === "log" && <AddPage categories={cats} incomeSources={isrc} recurringCats={recCats} onAddExpense={addE} onAddIncome={addI} onAddTransfer={addT} onAddRec={addRec} onError={showT} patterns={quickPatterns} defaults={addDefaults} autoRules={autoRules} onLearnRule={rule => { sAutoRules(prev => { if (prev.find(r => r.keyword === rule.keyword)) return prev; return [...prev, rule]; }); }} wallets={wallets} cloudinaryEnabled={!!_creds.cloudName} splitPeople={splitPeopleList} onAddSplits={rows => { if (!rows.length) return; sSp(p => [...p, ...rows]); sbUpsert("splits", rows.map(r => ({ ...toSB(r, COLS.splits), deleted_at: null }))); const tot = roundMoney(rows.reduce((s, r) => s + r.amount, 0)); showT(`${rows.length} IOU${rows.length === 1 ? "" : "s"} created · ${fmt(tot)} to collect`, "success"); }} />}{addSeg === "iou" && <IOUWallet splits={sp} settlements={stl} categories={cats} wallets={wallets} events={evs} fmt={fmt} uid={uid} isUpiLite={isUpiLite} SettleModal={SettleM} onAdd={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); }} onSettle={settle} onSettleNet={settleNet} onSettleEventNet={settleEventNet} focusPerson={iouFocus} onFocusHandled={() => sIouFocus(null)} onSkip={skipSplit} onUnskip={unskipSplit} onDelete={id => delItem(id, "split")} onRenamePerson={(from, to) => { const f = (from || "").trim().toLowerCase(); const t = (to || "").trim(); if (!f || !t) return; const affected = sp.filter(s => !s.deleted_at && (s.name || "").trim().toLowerCase() === f); if (!affected.length) return; sSp(p => p.map(s => (s.name || "").trim().toLowerCase() === f ? { ...s, name: t } : s)); sbUpsert("splits", affected.map(s => toSB({ ...s, name: t }, COLS.splits))); showT(`${affected.length} IOU${affected.length === 1 ? "" : "s"} now under "${t}"`, "success"); }} onError={msg => showT(msg, "error")} />}</div>}
-      {tab === "events" && <div className="pse" style={{ background: "transparent", padding: 0 }}><Events events={evs} expenses={ex} splits={sp} settlements={stl} categories={cats} wallets={wallets} staleByEvent={staleByEvent} onCreate={ev => { sEvs(p => [...p, ev]); sbUpsert("events", [toSB(ev, COLS.events)]) }} onAddExp={addE} onAddSplit={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); showT(sr.direction === "owe" ? `You owe ${sr.name} ${fmt(sr.amount)}` : `${sr.name} owes you ${fmt(sr.amount)}`, "info") }} onSettleSplit={settle} onSettleEventNet={settleEventNet} onDeleteSplit={id => delItem(id, "split")} onSkipSplit={skipSplit} onUnskipSplit={unskipSplit} onEditSplit={(id, patch) => { sSp(p => p.map(s => s.id === id ? { ...s, ...patch } : s)); sbUpsert("splits", [{ id, ...patch }]); }} onDeleteExp={id => delItem(id, "expense")} onEditExp={(id, patch) => { const exp = ex.find(e => e.id === id); if (!exp) return false; const gid = exp.groupId || exp.id; sSp(p => p.filter(s => s.groupId !== gid)); sStl(p => p.filter(s => s.groupId !== gid)); sbDeleteWhere("splits", `group_id=eq.${gid}`); sbDeleteWhere("settlements", `group_id=eq.${gid}`); const wallet = patch.paidBy && patch.paidBy !== "me" ? "__tracked__" : (patch.walletId ?? exp.walletId); const updated = { ...exp, ...patch, walletId: wallet }; sEx(p => p.map(e => e.id === id ? updated : e)); sbUpsert("expenses", [toSB(updated, COLS.expenses)]); return true; }} onMarkDone={id => { sEvs(p => p.map(e => e.id === id ? { ...e, status: "completed" } : e)); sbUpsert("events", [{ id, status: "completed" }]) }} onReopen={id => { sEvs(p => p.map(e => e.id === id ? { ...e, status: "active" } : e)); sbUpsert("events", [{ id, status: "active" }]); showT("Event reopened", "info") }} onUpdate={ev => { sEvs(p => p.map(e => e.id === ev.id ? ev : e)); sbUpsert("events", [toSB(ev, COLS.events)]); showT("Event updated", "success") }} onToast={showT} onDelete={id => { const ev = evs.find(e => e.id === id); if (!ev) return; const evSplits = sp.filter(s => s.eventId === id && !s.deleted_at); const evStls = stl.filter(s => s.eventId === id); sEvs(p => p.filter(e => e.id !== id)); sbDelete("events", id); if (evSplits.length) { sSp(p => p.filter(s => s.eventId !== id)); evSplits.forEach(s => sbDelete("splits", s.id)); } if (evStls.length) { sStl(p => p.filter(s => s.eventId !== id)); sbDeleteWhere("settlements", `event_id=eq.${id}`); } showUndoToast(ev.name + " deleted", { type: "event", exp: ev, splits: evSplits, settlements: evStls }); }} dm={dm} /></div>}
+      {tab === "add" && <div className="pse" style={{ paddingTop: 20 }}><div style={{ display: "flex", gap: 6, marginBottom: 16 }}>{[["log", "Log"], ["iou", "IOU · Splits"]].map(([s, lbl]) => <button key={s} onClick={() => sAddSeg(s)} style={{ flex: 1, padding: "9px", borderRadius: 10, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, cursor: "pointer", border: `1.5px solid ${addSeg === s ? "var(--neg)" : "var(--border)"}`, background: addSeg === s ? "var(--neg)" : "var(--card)", color: addSeg === s ? "#fff" : "var(--muted)" }}>{lbl}</button>)}</div>{addSeg === "log" && <AddPage categories={cats} incomeSources={isrc} recurringCats={recCats} onAddExpense={addE} onAddIncome={addI} onAddTransfer={addT} onAddRec={addRec} onError={showT} patterns={quickPatterns} onQuickLog={quickLog} defaults={addDefaults} autoRules={autoRules} onLearnRule={rule => { sAutoRules(prev => { if (prev.find(r => r.keyword === rule.keyword)) return prev; return [...prev, rule]; }); }} wallets={wallets} cloudinaryEnabled={!!_creds.cloudName} splitPeople={splitPeopleList} onAddSplits={rows => { if (!rows.length) return; sSp(p => [...p, ...rows]); sbUpsert("splits", rows.map(r => ({ ...toSB(r, COLS.splits), deleted_at: null }))); const tot = roundMoney(rows.reduce((s, r) => s + r.amount, 0)); showT(`${rows.length} IOU${rows.length === 1 ? "" : "s"} created · ${fmt(tot)} to collect`, "success"); }} />}{addSeg === "iou" && <IOUWallet splits={sp} settlements={stl} categories={cats} wallets={wallets} events={evs} fmt={fmt} uid={uid} isUpiLite={isUpiLite} SettleModal={SettleM} onAdd={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); }} onSettle={settle} onSettleNet={settleNet} onSettleEventNet={settleEventNet} focusPerson={iouFocus} onFocusHandled={() => sIouFocus(null)} onSkip={skipSplit} onUnskip={unskipSplit} onDelete={id => delItem(id, "split")} onRenamePerson={(from, to) => { const f = (from || "").trim().toLowerCase(); const t = (to || "").trim(); if (!f || !t) return; const affected = sp.filter(s => !s.deleted_at && (s.name || "").trim().toLowerCase() === f); if (!affected.length) return; sSp(p => p.map(s => (s.name || "").trim().toLowerCase() === f ? { ...s, name: t } : s)); sbUpsert("splits", affected.map(s => toSB({ ...s, name: t }, COLS.splits))); showT(`${affected.length} IOU${affected.length === 1 ? "" : "s"} now under "${t}"`, "success"); }} onError={msg => showT(msg, "error")} />}</div>}
+      {tab === "events" && <div className="pse" style={{ background: "transparent", padding: 0 }}><Events events={evs} expenses={ex} splits={sp} settlements={stl} categories={cats} wallets={wallets} staleByEvent={staleByEvent} onCreate={ev => { sEvs(p => [...p, ev]); sbUpsert("events", [toSB(ev, COLS.events)]) }} onAddExp={addE} onAddSplit={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); showT(sr.direction === "owe" ? `You owe ${sr.name} ${fmt(sr.amount)}` : `${sr.name} owes you ${fmt(sr.amount)}`, "info") }} onSettleSplit={settle} onSettleEventNet={settleEventNet} onDeleteSplit={id => delItem(id, "split")} onSkipSplit={skipSplit} onUnskipSplit={unskipSplit} onEditSplit={(id, patch) => { sSp(p => p.map(s => s.id === id ? { ...s, ...patch } : s)); sbUpsert("splits", [{ id, ...patch }]); }} onDeleteExp={id => delItem(id, "expense")} onEditExp={(id, patch) => { const exp = ex.find(e => e.id === id); if (!exp) return false; const gid = exp.groupId || exp.id; const oldSplits = sp.filter(s => s.groupId === gid); const oldStls = stl.filter(s => s.groupId === gid); sSp(p => p.filter(s => s.groupId !== gid)); sStl(p => p.filter(s => s.groupId !== gid)); oldSplits.forEach(s => sbDelete("splits", s.id)); oldStls.forEach(s => sbDeleteRow("settlements", s.id)); const wallet = patch.paidBy && patch.paidBy !== "me" ? "__tracked__" : (patch.walletId ?? exp.walletId); const updated = { ...exp, ...patch, walletId: wallet }; sEx(p => p.map(e => e.id === id ? updated : e)); sbUpsert("expenses", [toSB(updated, COLS.expenses)]); return true; }} onMarkDone={id => { sEvs(p => p.map(e => e.id === id ? { ...e, status: "completed" } : e)); sbUpsert("events", [{ id, status: "completed" }]) }} onReopen={id => { sEvs(p => p.map(e => e.id === id ? { ...e, status: "active" } : e)); sbUpsert("events", [{ id, status: "active" }]); showT("Event reopened", "info") }} onUpdate={ev => { sEvs(p => p.map(e => e.id === ev.id ? ev : e)); sbUpsert("events", [toSB(ev, COLS.events)]); showT("Event updated", "success") }} onToast={showT} onDelete={id => { const ev = evs.find(e => e.id === id); if (!ev) return; const evSplits = sp.filter(s => s.eventId === id && !s.deleted_at); const evStls = stl.filter(s => s.eventId === id); sEvs(p => p.filter(e => e.id !== id)); sbDelete("events", id); if (evSplits.length) { sSp(p => p.filter(s => s.eventId !== id)); evSplits.forEach(s => sbDelete("splits", s.id)); } if (evStls.length) { sStl(p => p.filter(s => s.eventId !== id)); evStls.forEach(s => sbDeleteRow("settlements", s.id)); } showUndoToast(ev.name + " deleted", { type: "event", exp: ev, splits: evSplits, settlements: evStls }); }} dm={dm} /></div>}
       {tab === "history" && <div className="pe"><CalendarView compact expenses={exAll} incomes={inc} refunds={settlementsInAsRefunds} transfers={tr} categories={cats.concat(isrc)} wallets={wallets} viewMonth={fm === "all" ? null : fm} onMonthChange={m => { if (fm !== "all" && fm !== m) { sFm(m); sHCalDay(null); } }} selectedDay={hCalDay} onDayClick={d => { sHCalDay(d); if (d) { const dm = d.slice(0, 7); if (fm !== "all" && fm !== dm) sFm(dm); if (typeof document !== "undefined") { const scrollToDay = () => { const el = document.querySelector(`[data-history-date="${d}"]`); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }; requestAnimationFrame(() => requestAnimationFrame(scrollToDay)); } } }} />{(() => { // Counts only the HIDDEN filters behind the Filter button. The search box is
 // right there on screen; counting it made "Filter 1" light up for a plain
 // search and read as "something you can't see is suppressing your results".
@@ -4360,7 +4452,7 @@ const activeCount = [hMinAmt, hMaxAmt, hDateFrom, hDateTo, hType !== "all" ? "x"
           <div key={t.id} onClick={() => dismissToast(t.id)} style={{ pointerEvents: "auto", cursor: "pointer", background: t.type === "error" ? "var(--danger)" : t.type === "success" ? "var(--pos)" : t.type === "warn" ? "var(--neg)" : "var(--acc)", color: "#fff", borderRadius: 18, padding: "10px 18px", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, boxShadow: "0 4px 16px rgba(0,0,0,0.15)", textAlign: "center", lineHeight: 1.4, wordBreak: "break-word", maxWidth: "min(440px, 92vw)", animation: "ti 0.25s ease-out", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
             <span>{t.msg}</span>
             {t.count > 1 && <span style={{ background: "rgba(255,255,255,0.28)", borderRadius: 10, padding: "1px 7px", fontSize: 10, fontWeight: 700 }}>×{t.count}</span>}
-            {t.undo && <button onClick={(e) => { e.stopPropagation(); undoDelete(t.id); }} style={{ background: "rgba(255,255,255,0.25)", color: "#fff", border: "none", borderRadius: 12, padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>UNDO</button>}
+            {t.undo && <button onClick={(e) => { e.stopPropagation(); undoDelete(t.id); }} style={{ background: "rgba(255,255,255,0.25)", color: "#fff", border: "none", borderRadius: 12, padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>UNDO</button>}
           </div>
         ))}
       </div>
