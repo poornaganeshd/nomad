@@ -6,6 +6,7 @@ import {
   resolveRecCategory,
   settlementNetAmount,
   isSuspiciousExcess,
+  settleWritesIncoming,
 } from '../financeUtils.js';
 
 // Regression "wall" for the class of bugs that kept recurring in App.jsx:
@@ -141,5 +142,41 @@ describe('isSuspiciousExcess — fat-finger guard on overpaid settles', () => {
   it('no excess or junk input → never suspicious', () => {
     expect(isSuspiciousExcess(0, 11.66)).toBe(false);
     expect(isSuspiciousExcess(undefined, undefined)).toBe(false);
+  });
+});
+
+describe('settleWritesIncoming — the one rule for offering/accepting UPI Lite', () => {
+  it('an incoming net writes incoming records', () => {
+    expect(settleWritesIncoming({ net: 300 })).toBe(true);
+    expect(settleWritesIncoming({ net: 300, partial: true })).toBe(true);
+  });
+
+  it('a plain "you pay" net with no owed legs does not', () => {
+    expect(settleWritesIncoming({ net: -300, hasOwedItems: false })).toBe(false);
+  });
+
+  // The bug this exists for: net −200 (they owe you 500, you owe them 700).
+  // The sheet asked only "is the net incoming?" → offered UPI Lite; the handler
+  // asked "is ANY leg owed?" → refused it, every time, with no way out.
+  it('a MIXED net you pay still writes an incoming leg on a full settle', () => {
+    expect(settleWritesIncoming({ net: -200, hasOwedItems: true })).toBe(true);
+  });
+
+  it('but a partial pay-down of that same net writes only the paying direction', () => {
+    expect(settleWritesIncoming({ net: -200, hasOwedItems: true, partial: true })).toBe(false);
+  });
+
+  it('a net that cancels to zero still settles every leg, so owed legs count', () => {
+    expect(settleWritesIncoming({ net: 0, hasOwedItems: true })).toBe(true);
+    expect(settleWritesIncoming({ net: 0, hasOwedItems: false })).toBe(false);
+  });
+
+  it('sub-paisa noise is not an incoming net', () => {
+    expect(settleWritesIncoming({ net: 0.004 })).toBe(false);
+    expect(settleWritesIncoming({ net: 0.02 })).toBe(true);
+  });
+
+  it('defaults to "no incoming" with nothing passed', () => {
+    expect(settleWritesIncoming()).toBe(false);
   });
 });

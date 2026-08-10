@@ -260,6 +260,23 @@ export const cashMatchesExpectation = (expected, actual) =>
   expected == null ||
   Math.abs(roundMoney(Number(expected) || 0) - roundMoney(Number(actual) || 0)) <= 0.011;
 
+// Will this settle write any INCOMING settlement record? UPI Lite is spend-only,
+// so the answer decides both which wallets a settle sheet may OFFER and which a
+// settle handler will ACCEPT.
+//
+// The net's own sign is NOT the rule. A FULL net settle records one settlement
+// per IOU and leans on the opposite-direction rows to cancel, so a net you PAY
+// can still carry "owes you" legs that credit the wallet — one such leg is
+// enough to disqualify UPI Lite. A PARTIAL pay-down writes records for the
+// paying direction alone, so there only the net's direction matters.
+//
+// Single source because the sheet and the handler derive this independently:
+// while the sheet asked only "is the net incoming?", it listed UPI Lite for
+// every mixed net you pay, and the handler then refused it every time — a
+// dead end with no way out from inside the sheet.
+export const settleWritesIncoming = ({ net = 0, hasOwedItems = false, partial = false } = {}) =>
+  roundMoney(Number(net) || 0) > 0.005 || (!partial && !!hasOwedItems);
+
 // Fat-finger guard for overpaid settles. A small tip-sized surplus (₹12 against
 // ₹11.66) sails through; a surplus that's large in absolute terms (> ₹50) or
 // relative to the amount due (> 20%) is more likely a typo (120 for 12), so the
