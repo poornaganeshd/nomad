@@ -29,7 +29,7 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 
 ## Baselines (verify before/after edits; don't regress)
 
-- **Tests:** 973 pass / 0 fail, 44 files (`npm test`). E2E: 95 pass, 20 files (`npm run test:e2e`).
+- **Tests:** 989 pass / 0 fail, 45 files (`npm test`). E2E: 95 pass, 20 files (`npm run test:e2e`).
 - **Lint:** 0 errors / 12 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
 - **Build:** succeeds. Main chunk ~875 kB (gzip ~231 kB) + lazy chunks (Routine, CatDonut/recharts, IOUWallet, CalendarView, CredentialSetup, pdfjs); the >500 kB warning on the main chunk is expected.
@@ -50,6 +50,7 @@ Vitest + jsdom (configured in `vite.config.js` under `test`). Coverage via `@vit
 | `src/financeUtils.js` | `src/__tests__/financeUtils.test.js` |
 | `src/billReminders.js` | `src/__tests__/billReminders.test.js` |
 | `src/credentials.js` | `src/__tests__/credentials.test.js` |
+| `src/receiptUpload.js` (mode selection, signing, fallback) | `src/__tests__/receiptUpload.test.js` |
 | `src/currencyConverter.js` | `src/__tests__/currencyConverter.test.js` |
 | `src/offlineSync.js` | `src/__tests__/offlineSync.test.js` |
 | `src/syncMerge.js` | `src/__tests__/syncMerge.test.js` |
