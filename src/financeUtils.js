@@ -292,6 +292,42 @@ export const pendingIouNet = (splits, settlements) => {
   }, 0));
 };
 
+// Debts a group expense creates between two OTHER participants — the ones NOMAD
+// does not record. It tracks IOUs only between You and each participant
+// (`makeExpIOUs`: when someone else pays, only YOUR share becomes a debt to
+// them), so when A pays for B, "B owes A" is real but has no IOU row and no way
+// to settle in the app.
+//
+// Returned as { debtor: { creditor: amount } }. The event BALANCES card states
+// these out loud instead of folding them into a headline number that nothing on
+// screen can act on: a person's tracked IOU net PLUS their untracked edges is
+// exactly their fair share, so the row still reconciles.
+export const untrackedGroupDebts = (expenses, allParts) => {
+  const parts = (allParts || []).filter(Boolean);
+  const out = {};
+  (expenses || []).forEach((e) => {
+    if (!e) return;
+    const raw = e.paidBy;
+    const payer = !raw || raw === "me"
+      ? "You"
+      : (parts.find((p) => p.toLowerCase() === String(raw).toLowerCase()) || "You");
+    // You paid → every other share is a tracked "owes you". Nothing hidden.
+    if (payer === "You") return;
+    const sw = e.splitWith && typeof e.splitWith === "object" ? e.splitWith : null;
+    // Mirrors expenseShareMap's equal-split fallback exactly (same order, same
+    // residue distribution) so the two can never disagree by a paisa.
+    const equal = sw ? null : distributeAmount(e.amount, parts.length);
+    parts.forEach((q, i) => {
+      if (q === "You" || q === payer) return;
+      const share = sw ? Number(sw[q]) : equal[i];
+      if (!Number.isFinite(share) || share <= 0.005) return;
+      if (!out[q]) out[q] = {};
+      out[q][payer] = roundMoney((out[q][payer] || 0) + share);
+    });
+  });
+  return out;
+};
+
 // Will this settle write any INCOMING settlement record? UPI Lite is spend-only,
 // so the answer decides both which wallets a settle sheet may OFFER and which a
 // settle handler will ACCEPT.

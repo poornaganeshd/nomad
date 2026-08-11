@@ -162,3 +162,66 @@ test("an event whose IOUs cannot net per-group still gets a whole-person settle"
   expect(backup.splits.filter((s) => !s.settled && !s.skipped)).toHaveLength(0);
   expect(backup.settlements.reduce((t, s) => t + s.amount, 0)).toBe(620);
 });
+
+// The case the balances card and the IOU ledger used to disagree on. You pay
+// ₹300 three ways, then A pays ₹60 three ways:
+//   IOUs recorded: A owes You 100, B owes You 100, You owe A 20
+//   NOT recorded:  B owes A 20 (neither side is You)
+// Fair shares put A down 60 and B down 120; the IOU ledger puts A at 80 and B at
+// 100. Both route the same ₹180 to you — but only the IOU plan is recordable, so
+// that is what the card, SETTLE UP and the settle sheet all now show.
+const trioEvent = () => ({ id: "ev3", name: "Trio Trip", type: "group", participants: ["A", "B"], status: "active", date: today(), icon: "travel" });
+const trioState = () => ({
+  events: [trioEvent()],
+  expenses: [
+    { id: "x1", type: "expense", amount: 300, categoryId: "food", walletId: "bank", eventId: "ev3", groupId: "x1", splitWith: { You: 100, A: 100, B: 100 }, note: "Hotel", date: today(), balBefore: 5000 },
+    { id: "x2", type: "expense", amount: 60, categoryId: "food", walletId: "__tracked__", eventId: "ev3", groupId: "x2", paidBy: "A", splitWith: { You: 20, A: 20, B: 20 }, note: "Cab", date: today() },
+  ],
+  splits: [
+    { id: "p1", name: "A", amount: 100, direction: "owed", settled: false, eventId: "ev3", groupId: "x1", date: today() },
+    { id: "p2", name: "B", amount: 100, direction: "owed", settled: false, eventId: "ev3", groupId: "x1", date: today() },
+    { id: "p3", name: "A", amount: 20, direction: "owe", settled: false, eventId: "ev3", groupId: "x2", date: today() },
+  ],
+  incomes: [bankFloat()],
+});
+
+test("balances card quotes the IOU ledger and names the debt it cannot track", async ({ page }) => {
+  await gotoLocal(page, trioState());
+  await page.getByRole("button", { name: "Events", exact: true }).click();
+  await page.getByText("Trio Trip").first().click();
+
+  await expect(page.getByText("BALANCES")).toBeVisible();
+  // The IOU figures, not the simplifier's 60 / 120.
+  await expect(page.getByText("₹80", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("₹100", { exact: true }).first()).toBeVisible();
+  // ...and the simplifier's plan (B pays 120, A pays 60) is not offered at all.
+  await expect(page.getByRole("button", { name: /B You ₹120/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /A You ₹60/ })).toHaveCount(0);
+  // Your own row is unchanged either way.
+  await expect(page.getByText("₹180", { exact: true }).first()).toBeVisible();
+  // Every SETTLE UP row routes through You, because every tracked debt does.
+  await expect(page.getByRole("button", { name: "A You ₹80 Settle" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "B You ₹100 Settle" })).toBeVisible();
+  // The ₹20 B owes A is stated, not silently folded into a number.
+  await expect(page.getByText(/Also owes .*20 to A .* not tracked here/)).toBeVisible();
+  await expect(page.getByText(/Also owed .*20 from B .* not tracked here/)).toBeVisible();
+});
+
+test("settling from that card moves exactly what the row promised", async ({ page }) => {
+  await gotoLocal(page, trioState());
+  await page.getByRole("button", { name: "Events", exact: true }).click();
+  await page.getByText("Trio Trip").first().click();
+
+  // A's row: the IOU net is 80 (100 owed to you, less the 20 you owe them).
+  await page.getByRole("button", { name: "A You ₹80 Settle" }).click();
+  await expect(page.getByText("Settle up with A")).toBeVisible();
+  await expect(amountField(page)).toHaveValue("80");
+  await page.getByRole("button", { name: /^Settle ₹80$/ }).click();
+
+  // Two settlement rows (the +100 and the −20) netting to the ₹80 promised.
+  await expect.poll(async () => (await readBackup(page)).settlements?.length ?? 0).toBe(2);
+  const backup = await readBackup(page);
+  const cash = backup.settlements.reduce((t, s) => t + (s.direction === "owed" ? s.amount : -s.amount), 0);
+  expect(Math.round(cash * 100) / 100).toBe(80);
+  expect(backup.splits.filter((s) => s.name === "A" && !s.settled)).toHaveLength(0);
+});
