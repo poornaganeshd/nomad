@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { roundMoney, groupShareTotals } from '../financeUtils.js';
+import { roundMoney, groupShareTotals, expenseShareMap, pendingIouNet } from '../financeUtils.js';
 
 // Mirrors the event-detail group ledger in App.jsx (Events component):
 // per-person balance and the greedy who-pays-whom matcher behind the
@@ -99,24 +99,32 @@ describe('event group ledger', () => {
 // IOUs, which live in their own owe/owed tally. Mixing them in over-subtracts and
 // leaves a phantom balance after everything looks settled. Keep in sync with the
 // `eStl`/`grpSettled`/`bal` math in App.jsx.
-const grpSettled = (parts, settlements, expenseIds) => {
+const grpSettled = (parts, settlements, expenseIds, splits = []) => {
   const ids = new Set(expenseIds);
   const eStl = settlements.filter(s => s.groupId && ids.has(s.groupId));
+  // A WRITTEN-OFF expense IOU resolves the balance just as a paid one does — the
+  // money is not coming and you have said so. Its unpaid remainder folds in with
+  // the sign a settlement of it would have carried. Without this the BALANCES
+  // card kept quoting a debt already written off and SETTLE UP kept proposing a
+  // transfer for it that settleEventNet then refused (the IOU is not pending).
+  const paidBy = {};
+  settlements.forEach(s => { if (s.splitId != null) paidBy[s.splitId] = roundMoney((paidBy[s.splitId] || 0) + s.amount); });
+  const eSkipped = splits.filter(s => s.groupId && ids.has(s.groupId) && s.skipped && !s.deleted_at);
+  const rows = [
+    ...eStl.map(s => ({ name: s.splitName, direction: s.direction, amount: s.amount })),
+    ...eSkipped.map(s => ({ name: s.name, direction: s.direction, amount: roundMoney(s.amount - (paidBy[s.id] || 0)) })),
+  ].filter(x => x.amount > 0.005);
   return Object.fromEntries(parts.map(p => {
     const pl = p.toLowerCase();
-    if (p === 'You') {
-      const out = eStl.filter(s => s.direction === 'owe').reduce((t, s) => t + s.amount, 0);
-      const inn = eStl.filter(s => s.direction === 'owed').reduce((t, s) => t + s.amount, 0);
-      return [p, inn - out];
-    }
-    const out = eStl.filter(s => s.direction === 'owe' && (s.splitName || '').toLowerCase() === pl).reduce((t, s) => t + s.amount, 0);
-    const inn = eStl.filter(s => s.direction === 'owed' && (s.splitName || '').toLowerCase() === pl).reduce((t, s) => t + s.amount, 0);
-    return [p, out - inn];
+    const mine = p === 'You' ? rows : rows.filter(x => (x.name || '').toLowerCase() === pl);
+    const out = mine.filter(x => x.direction === 'owe').reduce((t, x) => t + x.amount, 0);
+    const inn = mine.filter(x => x.direction === 'owed').reduce((t, x) => t + x.amount, 0);
+    return [p, roundMoney(p === 'You' ? inn - out : out - inn)];
   }));
 };
 
-const grpBalances = ({ parts, paid, shares, settlements, expenseIds }) => {
-  const settled = grpSettled(parts, settlements, expenseIds);
+const grpBalances = ({ parts, paid, shares, settlements, expenseIds, splits = [] }) => {
+  const settled = grpSettled(parts, settlements, expenseIds, splits);
   return parts.map(p => ({ name: p, bal: roundMoney((paid[p] || 0) - (shares[p] || 0) - (settled[p] || 0)) }));
 };
 
@@ -165,5 +173,91 @@ describe('event group BALANCES vs settlements', () => {
     });
     expect(bals).toEqual([{ name: 'You', bal: 275.5 }, { name: 'Rakesh', bal: -275.5 }]);
     expect(suggestSettlements(bals)).toEqual([{ from: 'Rakesh', to: 'You', amt: 275.5 }]);
+  });
+});
+
+describe('event group BALANCES vs write-offs', () => {
+  // Skipping an event IOU is a write-off: you have decided the money is not
+  // coming. The balance card kept showing the full debt anyway, and SETTLE UP
+  // kept proposing a transfer that settleEventNet refuses outright ("No pending
+  // IOUs with X in this event") — an event that could never be closed.
+  it('a written-off expense IOU clears the balance instead of nagging forever', () => {
+    const bals = grpBalances({
+      parts: ['You', 'Rakesh'],
+      paid: { You: 1151, Rakesh: 0 },
+      shares: { You: 575.5, Rakesh: 575.5 },
+      settlements: [],
+      splits: [{ id: 's1', name: 'Rakesh', amount: 575.5, direction: 'owed', groupId: 'exp1', settled: true, skipped: true }],
+      expenseIds: ['exp1'],
+    });
+    expect(bals).toEqual([{ name: 'You', bal: 0 }, { name: 'Rakesh', bal: 0 }]);
+    expect(suggestSettlements(bals)).toEqual([]);
+  });
+
+  it('only the UNPAID remainder of a part-paid, then written-off IOU counts', () => {
+    const bals = grpBalances({
+      parts: ['You', 'Rakesh'],
+      paid: { You: 1151, Rakesh: 0 },
+      shares: { You: 575.5, Rakesh: 575.5 },
+      settlements: [{ splitId: 's1', direction: 'owed', splitName: 'Rakesh', amount: 300, groupId: 'exp1' }],
+      splits: [{ id: 's1', name: 'Rakesh', amount: 575.5, direction: 'owed', groupId: 'exp1', settled: true, skipped: true }],
+      expenseIds: ['exp1'],
+    });
+    // 300 paid + 275.5 written off = the whole share, settled either way.
+    expect(bals).toEqual([{ name: 'You', bal: 0 }, { name: 'Rakesh', bal: 0 }]);
+  });
+
+  it('a written-off IOU you OWE clears symmetrically', () => {
+    const bals = grpBalances({
+      parts: ['You', 'Rakesh'],
+      paid: { You: 0, Rakesh: 400 },
+      shares: { You: 200, Rakesh: 200 },
+      settlements: [],
+      splits: [{ id: 's1', name: 'Rakesh', amount: 200, direction: 'owe', groupId: 'exp1', settled: true, skipped: true }],
+      expenseIds: ['exp1'],
+    });
+    expect(bals).toEqual([{ name: 'You', bal: 0 }, { name: 'Rakesh', bal: 0 }]);
+  });
+});
+
+describe('event SETTLE UP must quote the tracked IOU net, not the simplifier', () => {
+  // NOMAD only records IOUs between You and each participant: when someone else
+  // pays, just YOUR share becomes a debt to them (makeExpIOUs in App.jsx). The
+  // fair-share simplifier does not know that — it happily routes a debt through
+  // a participant pair the IOU ledger has no row for. Both plans are valid and
+  // both settle the same total, but only the IOU plan is one the app can record.
+  //
+  // You pay 300 (3-way), then A pays 60 (3-way).
+  //   IOUs:      A owes You 100, B owes You 100, You owe A 20
+  //   simplifier: B -> You 120, A -> You 60
+  const expenses = [{ amount: 300 }, { amount: 60 }];
+  const parts = ['You', 'A', 'B'];
+  const shares = expenseShareMap(expenses, parts);
+  const splits = [
+    { id: 'i1', name: 'A', amount: 100, direction: 'owed', groupId: 'e1', settled: false },
+    { id: 'i2', name: 'B', amount: 100, direction: 'owed', groupId: 'e1', settled: false },
+    { id: 'i3', name: 'A', amount: 20, direction: 'owe', groupId: 'e2', settled: false },
+  ];
+  const bals = parts.map(p => ({ name: p, bal: roundMoney(({ You: 300, A: 60, B: 0 })[p] - shares[p]) }));
+
+  it('the two plans disagree per person while agreeing on the total', () => {
+    const sug = suggestSettlements(bals);
+    expect(sug).toEqual([{ from: 'B', to: 'You', amt: 120 }, { from: 'A', to: 'You', amt: 60 }]);
+    const iouB = pendingIouNet(splits.filter(s => s.name === 'B'), []);
+    const iouA = pendingIouNet(splits.filter(s => s.name === 'A'), []);
+    expect(iouB).toBe(100); // simplifier said 120
+    expect(iouA).toBe(80);  // simplifier said 60
+    // Same money either way — only the routing differs.
+    expect(roundMoney(iouA + iouB)).toBe(roundMoney(120 + 60));
+  });
+
+  it('settling at the simplifier figure would move the wrong cash', () => {
+    // B: the sheet promised 120, the handler can only move the 100 that exists.
+    const iouB = pendingIouNet(splits.filter(s => s.name === 'B'), []);
+    expect(Math.abs(120 - iouB)).toBeGreaterThan(0.011); // expectCash refuses this
+    // A: 60 is UNDER the 80 net, so it books as a partial and strands 20 —
+    // while the balance card reads "settled". The sheet now quotes 80.
+    const iouA = pendingIouNet(splits.filter(s => s.name === 'A'), []);
+    expect(iouA).toBe(80);
   });
 });

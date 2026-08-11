@@ -260,6 +260,38 @@ export const cashMatchesExpectation = (expected, actual) =>
   expected == null ||
   Math.abs(roundMoney(Number(expected) || 0) - roundMoney(Number(actual) || 0)) <= 0.011;
 
+// How much has been paid against each split id, net of overpay excess. The one
+// answer to "how much of this IOU has landed", so every caller that needs a
+// REMAINING balance starts from the same number.
+export const settlementsBySplit = (settlements) => {
+  const m = {};
+  (settlements || []).forEach((x) => {
+    if (!x || x.splitId == null) return;
+    m[x.splitId] = roundMoney((m[x.splitId] || 0) + settlementNetAmount(x));
+  });
+  return m;
+};
+
+// The pending net across a set of IOU rows — "owes you" counts up, "you owe"
+// counts down, each on its REMAINING balance, with settled / written-off /
+// soft-deleted rows excluded.
+//
+// This is exactly what a net settle will move, which is why a settle sheet must
+// quote THIS and not some other derivation of the same debt. The Events tab's
+// "Settle up" row was priced from the greedy fair-share simplifier instead — a
+// different (also valid) plan that can route a debt through a participant the
+// IOU ledger has no row for — so the button promised one figure and the handler
+// moved another, silently.
+export const pendingIouNet = (splits, settlements) => {
+  const paid = settlementsBySplit(settlements);
+  return roundMoney((splits || []).reduce((t, s) => {
+    if (!s || s.deleted_at || s.settled || s.skipped) return t;
+    const rem = roundMoney((Number(s.amount) || 0) - (paid[s.id] || 0));
+    if (!(rem > 0.005)) return t;
+    return t + (s.direction === "owed" ? rem : -rem);
+  }, 0));
+};
+
 // Will this settle write any INCOMING settlement record? UPI Lite is spend-only,
 // so the answer decides both which wallets a settle sheet may OFFER and which a
 // settle handler will ACCEPT.
