@@ -58,3 +58,35 @@ test("undoing a deleted FULL settlement restores the settled IOU", async ({ page
   expect(backup.settlements[0].amount).toBe(300);
   expect(splitById(backup, "e2e-iou").settled).toBe(true);
 });
+
+test("deleting the payment on a written-off IOU reopens it, rather than writing off the lot", async ({ page }) => {
+  // "Full and final": ₹240 paid against a ₹300 IOU with the ₹60 tail written
+  // off, so the split carries settled + skipped. Deleting the payment used to
+  // clear `settled` only, leaving { settled: false, skipped: true } — a
+  // combination nothing else writes, which reads as having written off the
+  // whole ₹300 and hides the row behind Restore.
+  await gotoLocal(page, {
+    ...seed,
+    splits: [{ ...seed.splits[0], settled: true, skipped: true }],
+  });
+  await page.getByRole("button", { name: "History", exact: true }).click();
+  await dismissBanner(page);
+  await page.getByRole("button", { name: "✕", exact: true }).click();
+  await expect.poll(() => stlCount(page), { timeout: 5000 }).toBe(0);
+
+  const split = splitById(await readBackup(page), "e2e-iou");
+  expect(split.settled).toBeFalsy();
+  expect(split.skipped).toBeFalsy();
+});
+
+test("...and UNDO puts the write-off back exactly as it was", async ({ page }) => {
+  await gotoLocal(page, {
+    ...seed,
+    splits: [{ ...seed.splits[0], settled: true, skipped: true }],
+  });
+  await deleteThenUndo(page);
+
+  const split = splitById(await readBackup(page), "e2e-iou");
+  expect(split.settled).toBe(true);
+  expect(split.skipped).toBe(true);
+});

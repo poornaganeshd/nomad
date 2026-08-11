@@ -3314,7 +3314,16 @@ export default function Nomad() {
       const linked = stlRec.splitId ? sp.find(x => x.id === stlRec.splitId) : null;
       const splitFlags = linked ? { settled: !!linked.settled, skipped: !!linked.skipped } : null;
       sStl(p => p.filter(s => s.id !== id)); sbDeleteRow("settlements", id);
-      if (stlRec.splitId) { sSp(p => p.map(x => x.id === stlRec.splitId ? { ...x, settled: false } : x)); sbUpsert("splits", [{ id: stlRec.splitId, settled: false }], `splits:${stlRec.splitId}`); }
+      // Reopen the IOU on BOTH flags. Clearing `settled` alone left a
+      // "full and final" IOU (settled + skipped, closed with a write-off for the
+      // unpaid tail) sitting at { settled: false, skipped: true } — a
+      // combination nothing else in the app ever writes. It read as a write-off
+      // of the WHOLE amount, since the payment that justified the partial had
+      // just been deleted, and the row vanished from the wallet's active list
+      // with only Restore to get it back. Payment and write-off were one
+      // action, so removing the payment removes the write-off with it. Undo is
+      // unaffected — it restores the exact prior flags from `splitFlags`.
+      if (stlRec.splitId) { sSp(p => p.map(x => x.id === stlRec.splitId ? { ...x, settled: false, skipped: false } : x)); sbUpsert("splits", [{ id: stlRec.splitId, settled: false, skipped: false }], `splits:${stlRec.splitId}`); }
       showUndoToast("Settlement deleted", { type: "settlement", exp: stlRec, splitFlags });
     } else if (type === "split") {
       const s = sp.find(x => x.id === id); if (!s) return;
