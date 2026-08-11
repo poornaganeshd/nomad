@@ -260,6 +260,91 @@ export const cashMatchesExpectation = (expected, actual) =>
   expected == null ||
   Math.abs(roundMoney(Number(expected) || 0) - roundMoney(Number(actual) || 0)) <= 0.011;
 
+// How much has been paid against each split id, net of overpay excess. The one
+// answer to "how much of this IOU has landed", so every caller that needs a
+// REMAINING balance starts from the same number.
+export const settlementsBySplit = (settlements) => {
+  const m = {};
+  (settlements || []).forEach((x) => {
+    if (!x || x.splitId == null) return;
+    m[x.splitId] = roundMoney((m[x.splitId] || 0) + settlementNetAmount(x));
+  });
+  return m;
+};
+
+// The pending net across a set of IOU rows — "owes you" counts up, "you owe"
+// counts down, each on its REMAINING balance, with settled / written-off /
+// soft-deleted rows excluded.
+//
+// This is exactly what a net settle will move, which is why a settle sheet must
+// quote THIS and not some other derivation of the same debt. The Events tab's
+// "Settle up" row was priced from the greedy fair-share simplifier instead — a
+// different (also valid) plan that can route a debt through a participant the
+// IOU ledger has no row for — so the button promised one figure and the handler
+// moved another, silently.
+export const pendingIouNet = (splits, settlements) => {
+  const paid = settlementsBySplit(settlements);
+  return roundMoney((splits || []).reduce((t, s) => {
+    if (!s || s.deleted_at || s.settled || s.skipped) return t;
+    const rem = roundMoney((Number(s.amount) || 0) - (paid[s.id] || 0));
+    if (!(rem > 0.005)) return t;
+    return t + (s.direction === "owed" ? rem : -rem);
+  }, 0));
+};
+
+// Debts a group expense creates between two OTHER participants — the ones NOMAD
+// does not record. It tracks IOUs only between You and each participant
+// (`makeExpIOUs`: when someone else pays, only YOUR share becomes a debt to
+// them), so when A pays for B, "B owes A" is real but has no IOU row and no way
+// to settle in the app.
+//
+// Returned as { debtor: { creditor: amount } }. The event BALANCES card states
+// these out loud instead of folding them into a headline number that nothing on
+// screen can act on: a person's tracked IOU net PLUS their untracked edges is
+// exactly their fair share, so the row still reconciles.
+export const untrackedGroupDebts = (expenses, allParts) => {
+  const parts = (allParts || []).filter(Boolean);
+  const out = {};
+  (expenses || []).forEach((e) => {
+    if (!e) return;
+    const raw = e.paidBy;
+    const payer = !raw || raw === "me"
+      ? "You"
+      : (parts.find((p) => p.toLowerCase() === String(raw).toLowerCase()) || "You");
+    // You paid → every other share is a tracked "owes you". Nothing hidden.
+    if (payer === "You") return;
+    const sw = e.splitWith && typeof e.splitWith === "object" ? e.splitWith : null;
+    // Mirrors expenseShareMap's equal-split fallback exactly (same order, same
+    // residue distribution) so the two can never disagree by a paisa.
+    const equal = sw ? null : distributeAmount(e.amount, parts.length);
+    parts.forEach((q, i) => {
+      if (q === "You" || q === payer) return;
+      const share = sw ? Number(sw[q]) : equal[i];
+      if (!Number.isFinite(share) || share <= 0.005) return;
+      if (!out[q]) out[q] = {};
+      out[q][payer] = roundMoney((out[q][payer] || 0) + share);
+    });
+  });
+  return out;
+};
+
+// Will this settle write any INCOMING settlement record? UPI Lite is spend-only,
+// so the answer decides both which wallets a settle sheet may OFFER and which a
+// settle handler will ACCEPT.
+//
+// The net's own sign is NOT the rule. A FULL net settle records one settlement
+// per IOU and leans on the opposite-direction rows to cancel, so a net you PAY
+// can still carry "owes you" legs that credit the wallet — one such leg is
+// enough to disqualify UPI Lite. A PARTIAL pay-down writes records for the
+// paying direction alone, so there only the net's direction matters.
+//
+// Single source because the sheet and the handler derive this independently:
+// while the sheet asked only "is the net incoming?", it listed UPI Lite for
+// every mixed net you pay, and the handler then refused it every time — a
+// dead end with no way out from inside the sheet.
+export const settleWritesIncoming = ({ net = 0, hasOwedItems = false, partial = false } = {}) =>
+  roundMoney(Number(net) || 0) > 0.005 || (!partial && !!hasOwedItems);
+
 // Fat-finger guard for overpaid settles. A small tip-sized surplus (₹12 against
 // ₹11.66) sails through; a surplus that's large in absolute terms (> ₹50) or
 // relative to the amount due (> 20%) is more likely a typo (120 for 12), so the
