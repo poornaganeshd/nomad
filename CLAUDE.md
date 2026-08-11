@@ -29,7 +29,7 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 
 ## Baselines (verify before/after edits; don't regress)
 
-- **Tests:** 938 pass / 0 fail, 42 files (`npm test`). E2E: 95 pass, 20 files (`npm run test:e2e`).
+- **Tests:** 973 pass / 0 fail, 44 files (`npm test`). E2E: 95 pass, 20 files (`npm run test:e2e`).
 - **Lint:** 0 errors / 12 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
 - **Build:** succeeds. Main chunk ~875 kB (gzip ~231 kB) + lazy chunks (Routine, CatDonut/recharts, IOUWallet, CalendarView, CredentialSetup, pdfjs); the >500 kB warning on the main chunk is expected.
@@ -83,6 +83,8 @@ Vitest + jsdom (configured in `vite.config.js` under `test`). Coverage via `@vit
 | settle confetti (fires once, never replays) / refused settle keeps its sheet open / write-off card gating | e2e `19-iou-settle-feedback.spec.js` |
 | `pendingIouNet`/`settlementsBySplit` + the FULL write-off branch of `settleNet`/`settleEventNet` | `src/__tests__/writeOffAll.test.js` |
 | full write-off (amount 0) / event settle-up wallet + write-off / written-off event IOU clears its balance | e2e `20-write-off-and-event-settle.spec.js` |
+| `api/sync.ts` (SSRF host guard + idempotency) | `api/__tests__/sync.test.ts` |
+| `api/send-now.ts` (registry gate — fails CLOSED) | `api/__tests__/send-now.test.ts` |
 | `api/_shared.ts` | `api/__tests__/_shared.test.ts` |
 | `api/_ai-provider.ts` | `api/__tests__/ai-provider.test.ts` |
 | `api/ai-analyze.ts` | `api/__tests__/ai-analyze.test.ts` |
