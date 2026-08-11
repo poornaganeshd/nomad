@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { localDateKey } from "./financeUtils";
+import { localDateKey, formatMoney} from "./financeUtils";
 
-const fmt = n => "₹" + (Number(n) || 0).toLocaleString("en-IN");
+// Shared formatter — this used to be a second copy of the same expression, and
+// it drifted from App's the moment either changed.
+const fmt = n => formatMoney(n);
 
 export default function CalendarView({
   expenses = [],
