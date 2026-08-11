@@ -153,6 +153,28 @@ export const expenseShareMap = (expenses, allParts) => {
   return totals;
 };
 
+// THE money formatter. Whole rupees render without decimals, anything with a
+// fractional part renders with exactly two.
+//
+// `toLocaleString("en-IN")` with no options was showing whatever each number
+// happened to have: ₹670.56 sat next to ₹572.2 in the same card, and a value
+// carrying float noise rendered a THIRD of a paisa (₹1,234.567) or an amount
+// nobody has (₹99.999). Pinning only maximumFractionDigits fixes the second
+// problem and not the first — 572.2 still prints one decimal — so the minimum
+// has to move with the value.
+//
+// The whole-number test uses a half-paisa tolerance, so distributeAmount
+// residue (₹1,500.001) reads as ₹1,500 rather than ₹1,500.00.
+//
+// Sign handling is deliberately unchanged: callers pass Math.abs() and add
+// their own +/− (IOUWallet's fmtSigned slices the currency symbol off the
+// front, which only works while the symbol stays first).
+export const formatMoney = (value, currency = "\u20B9") => {
+  const v = Number(value) || 0;
+  const whole = Math.abs(v - Math.round(v)) < 0.005;
+  return currency + v.toLocaleString("en-IN", { minimumFractionDigits: whole ? 0 : 2, maximumFractionDigits: 2 });
+};
+
 // Stable, descending comparator for history rows.
 // Order: date desc → creation timestamp desc → id desc.
 //

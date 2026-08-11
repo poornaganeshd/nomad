@@ -19,7 +19,7 @@ import { redactTransactions, redact } from "./redactor";
 import {
   roundMoney, localDateKey, getRecurringDueDate, isRecurringDueToday,
   recurringDaysOverdue, distributeAmount, expenseShareMap, historySortCompare,
-  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, settlementsCash, cashMatchesExpectation, isSuspiciousExcess, settleWritesIncoming, pendingIouNet, untrackedGroupDebts, goalProgress, balanceTrail, runwayInfo,
+  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, settlementsCash, cashMatchesExpectation, isSuspiciousExcess, settleWritesIncoming, formatMoney, pendingIouNet, untrackedGroupDebts, goalProgress, balanceTrail, runwayInfo,
 } from "./financeUtils";
 import { monotonePathD, smoothSeries } from "./financeUtils";
 import { CAT_MODEL_VERSION, CONFIDENT_ENOUGH, emptyModel, learn as learnCat, predict as predictCat, buildFromHistory, seedFromRules, modelSize } from "./categoryModel";
@@ -165,7 +165,7 @@ const sbDeleteWhere = async (table, filter) => sbWrite(`${SB_URL}/rest/v1/${tabl
 //      the queue holds the id-shaped key `<table>:delete:<id>`; a filter-shaped
 //      key never matched, so an offline bulk delete un-deleted itself.
 const sbDeleteRow = async (table, id) => { clearVersion(table, id); return sbWrite(`${SB_URL}/rest/v1/${table}?id=eq.${id}`, { method: "DELETE", dedupeKey: `${table}:delete:${id}` }); };
-const fmt = n => CUR + (Number(n) || 0).toLocaleString("en-IN"), mk = d => d.slice(0, 7);
+const fmt = n => formatMoney(n, CUR), mk = d => d.slice(0, 7);
 // Group expenses someone ELSE paid (logged for the event ledger only). They
 // carry walletId "__tracked__", never touch a wallet, and must be EXCLUDED
 // from personal-spend aggregations — YOUR share enters spending via the "owe"
@@ -748,14 +748,6 @@ function SettleM({ split: sp, remaining: rm, onConfirm: oc, onClose: cl, wallets
 const CURRENCIES = ["INR", "USD", "EUR", "GBP", "AED", "SGD", "JPY", "AUD", "CAD", "CHF", "CNY", "HKD", "NZD", "MYR", "THB", "PHP", "IDR", "KRW", "TWD", "SAR", "KWD", "QAR", "BHD", "OMR", "EGP", "ZAR", "NGN", "SEK", "NOK", "DKK", "PLN", "TRY", "RUB", "PKR", "BDT", "LKR", "NPR", "MXN", "BRL", "ARS"];
 const CURRENCY_COUNTRIES = { INR: "India", USD: "United States", EUR: "Eurozone", GBP: "United Kingdom", AED: "UAE", SGD: "Singapore", JPY: "Japan", AUD: "Australia", CAD: "Canada", CHF: "Switzerland", CNY: "China", HKD: "Hong Kong", NZD: "New Zealand", MYR: "Malaysia", THB: "Thailand", PHP: "Philippines", IDR: "Indonesia", KRW: "South Korea", TWD: "Taiwan", SAR: "Saudi Arabia", KWD: "Kuwait", QAR: "Qatar", BHD: "Bahrain", OMR: "Oman", EGP: "Egypt", ZAR: "South Africa", NGN: "Nigeria", SEK: "Sweden", NOK: "Norway", DKK: "Denmark", PLN: "Poland", TRY: "Turkey", RUB: "Russia", PKR: "Pakistan", BDT: "Bangladesh", LKR: "Sri Lanka", NPR: "Nepal", MXN: "Mexico", BRL: "Brazil", ARS: "Argentina" };
 
-// Extract the most useful keyword from a note for autoRule storage.
-// Skips generic words, prefers first meaningful token (usually merchant/brand).
-function extractKeyword(note) {
-  const skip = new Set(["paid","for","at","the","to","from","in","on","a","an","rs","inr","and","or","by","with","via","of","per","my","via","recharge","payment","pay","bill"]);
-  const words = note.toLowerCase().replace(/[₹,]/g, " ").split(/\s+/).filter(w => w.length > 2 && !skip.has(w) && !/^\d+$/.test(w));
-  return words[0] || note.toLowerCase().trim().slice(0, 20);
-}
-
 function VoiceAdd({ onParsed, accent = "var(--neg)", compact = false }) {
   const [listening, setListening] = useState(false);
   const [error, setError] = useState(null);
@@ -1309,7 +1301,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
             {isExp && <button onClick={extractItems} disabled={itemsLoading} title="Split into line items — from a receipt, or from your note + amount if none is attached" style={{ flexShrink: 0, width: 44, height: 44, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", cursor: itemsLoading ? "default" : "pointer", border: `1.5px solid ${alpha(tc, 0.5)}`, background: alpha(tc, 0.1), color: tc, opacity: itemsLoading ? 0.6 : 1 }}>{itemsLoading ? <span style={{ width: 15, height: 15, border: `2px solid ${alpha(tc, 0.35)}`, borderTopColor: tc, borderRadius: "50%", animation: "nmSpin .7s linear infinite", display: "inline-block" }} /> : <Robot size={17} weight="regular" />}</button>}
           </div>
           <div style={{ marginBottom: 8 }}>
-            <input value={note} onChange={e => { const v = e.target.value; sNote(v); sAiCatSug(null); if (aiDebounceRef.current) clearTimeout(aiDebounceRef.current); if (type === "expense") { const kw = v.toLowerCase().trim(); const m = autoRules.find(r => kw.includes(r.keyword.toLowerCase())); const p = m ? null : predictCat(catModel, { note: v, walletId: wid, amount: parseAmount(amt) }, { validCategoryIds: catIdSet }); if (m) { fillCat(m.categoryId, { categoryId: m.categoryId, source: "rule", token: m.keyword }); } else if (p && p.categoryId && p.confidence >= CONFIDENT_ENOUGH) { fillCat(p.categoryId, { categoryId: p.categoryId, source: p.source, token: p.why[0]?.token || null }); } else if ((sAutoCat(null), v.trim().length >= 3)) { aiDebounceRef.current = setTimeout(async () => { sAiCatLoading(true); try { const r = await fetch("/api/ai-categorize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ note: v.trim(), categories: cats.map(c => ({ id: c.id, name: c.name })) }) }); const d = await r.json(); if (r.ok && d.categoryId) sAiCatSug({ ...d, keyword: extractKeyword(v) }); } catch { /* silent */ } finally { sAiCatLoading(false); } }, 800); } } }} placeholder="Add a note…" style={{ ...is, height: 44, padding: "0 12px" }} />
+            <input value={note} onChange={e => { const v = e.target.value; sNote(v); sAiCatSug(null); if (aiDebounceRef.current) clearTimeout(aiDebounceRef.current); if (type === "expense") { const kw = v.toLowerCase().trim(); const m = autoRules.find(r => kw.includes(r.keyword.toLowerCase())); const p = m ? null : predictCat(catModel, { note: v, walletId: wid, amount: parseAmount(amt) }, { validCategoryIds: catIdSet }); if (m) { fillCat(m.categoryId, { categoryId: m.categoryId, source: "rule", token: m.keyword }); } else if (p && p.categoryId && p.confidence >= CONFIDENT_ENOUGH) { fillCat(p.categoryId, { categoryId: p.categoryId, source: p.source, token: p.why[0]?.token || null }); } else if ((sAutoCat(null), v.trim().length >= 3)) { aiDebounceRef.current = setTimeout(async () => { sAiCatLoading(true); try { const r = await fetch("/api/ai-categorize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ note: v.trim(), categories: cats.map(c => ({ id: c.id, name: c.name })) }) }); const d = await r.json(); if (r.ok && d.categoryId) sAiCatSug({ ...d }); } catch { /* silent */ } finally { sAiCatLoading(false); } }, 800); } } }} placeholder="Add a note…" style={{ ...is, height: 44, padding: "0 12px" }} />
           </div>
           {/* Says WHY, so an auto-filled category never reads as the app guessing at
               you. It is not interactive — tapping any category chip retires it. */}

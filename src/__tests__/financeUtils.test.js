@@ -14,6 +14,7 @@ import {
   historySortCompare,
   itemTimestamp,
   suggestAddDefaults,
+  formatMoney,
 } from '../financeUtils.js';
 
 // ---------------------------------------------------------------------------
@@ -555,5 +556,52 @@ describe('suggestAddDefaults', () => {
     const rows = [e('2026-07-13', 'ghost_cat', 'ghost_wallet'), e('2026-07-12', 'food', 'bank')];
     const r = suggestAddDefaults(rows, { now: NOW, validCategoryIds: new Set(['food']), validWalletIds: new Set(['bank']) });
     expect(r).toEqual({ categoryId: 'food', walletId: 'bank' });
+  });
+});
+
+describe('formatMoney — one shape for money everywhere', () => {
+  it('renders whole rupees without decimals', () => {
+    expect(formatMoney(1500)).toBe('₹1,500');
+    expect(formatMoney(0)).toBe('₹0');
+    expect(formatMoney(80)).toBe('₹80');
+  });
+
+  it('renders a fractional amount with exactly two', () => {
+    // The bug: 670.56 sat next to 572.2 in the same card, because
+    // toLocaleString with no options prints whatever the number happens to have.
+    expect(formatMoney(670.56)).toBe('₹670.56');
+    expect(formatMoney(572.2)).toBe('₹572.20');
+    expect(formatMoney(1234.5)).toBe('₹1,234.50');
+  });
+
+  it('never shows a fraction of a paisa', () => {
+    expect(formatMoney(1234.567)).toBe('₹1,234.57');
+    expect(formatMoney(0.1 + 0.2)).toBe('₹0.30');
+  });
+
+  it('treats rounding dust as a whole rupee', () => {
+    // distributeAmount residue must not turn ₹1,500 into ₹1,500.00.
+    expect(formatMoney(1500.001)).toBe('₹1,500');
+    expect(formatMoney(99.999)).toBe('₹100');
+  });
+
+  it('keeps the Indian grouping', () => {
+    expect(formatMoney(1234567)).toBe('₹12,34,567');
+  });
+
+  it('puts the currency symbol first, which fmtSigned relies on', () => {
+    // IOUWallet's fmtSigned does fmt(Math.abs(v)).slice(1) to swap in its own
+    // +/− prefix; that only works while the symbol leads.
+    expect(formatMoney(45.5).slice(1)).toBe('45.50');
+  });
+
+  it('survives junk', () => {
+    expect(formatMoney(null)).toBe('₹0');
+    expect(formatMoney(undefined)).toBe('₹0');
+    expect(formatMoney('nonsense')).toBe('₹0');
+  });
+
+  it('accepts a different symbol', () => {
+    expect(formatMoney(12.5, '$')).toBe('$12.50');
   });
 });
