@@ -19,10 +19,10 @@ import { redactTransactions, redact } from "./redactor";
 import {
   roundMoney, localDateKey, getRecurringDueDate, isRecurringDueToday,
   recurringDaysOverdue, distributeAmount, expenseShareMap, historySortCompare,
-  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, settlementsCash, cashMatchesExpectation, isSuspiciousExcess, settleWritesIncoming, formatMoney, pendingIouNet, untrackedGroupDebts, goalProgress, balanceTrail, runwayInfo,
+  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, recencyScores, settlementNetAmount, settlementsCash, cashMatchesExpectation, isSuspiciousExcess, settleWritesIncoming, formatMoney, pendingIouNet, untrackedGroupDebts, goalProgress, balanceTrail, runwayInfo,
 } from "./financeUtils";
 import { monotonePathD, smoothSeries } from "./financeUtils";
-import { CAT_MODEL_VERSION, CONFIDENT_ENOUGH, emptyModel, learn as learnCat, predict as predictCat, buildFromHistory, seedFromRules, modelSize } from "./categoryModel";
+import { CAT_MODEL_VERSION, CONFIDENT_ENOUGH, SAVE_FILL_MIN, WEIGHT_PICK, WEIGHT_ACCEPTED, emptyModel, learn as learnCat, rankCategories, buildFromHistory, seedFromRules, modelSize } from "./categoryModel";
 import { withAlpha, tint } from "./tint";
 import { parseAmount, parseVoiceTx, parseBankCsv, parseUpiStatement, htmlStatementToText } from "./txParsers";
 import { rankPeople, hasExactPerson, highlightParts, peopleFromSplits, sameName } from "./peopleSearch";
@@ -777,33 +777,58 @@ function VoiceAdd({ onParsed, accent = "var(--neg)", compact = false }) {
 
 function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], onQuickLog = null, autoRules = [], catModel = null, onLearnCategory = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false, splitPeople = [], onAddSplits = () => {}, defaults = {} }) {
   const _AD = (() => { try { return JSON.parse(sessionStorage.getItem("nomad-add-draft") || "{}"); } catch { return {}; } })();
-  const [type, sType] = useState(_AD.type || "expense"), [amt, sAmt] = useState(_AD.amt || "0"), [catId, sCat] = useState(_AD.catId || defaults.categoryId || cats[0]?.id || ""), [srcId, sSrc] = useState(isrc[0]?.id || ""), [wid, sW] = useState(_AD.wid || defaults.walletId || "bank"), [iwid, sIW] = useState("bank"), [tFrom, sTF] = useState("bank"), [tTo, sTT] = useState("upi_lite"), [date, sDate] = useState(_AD.date || localDateKey()), [note, sNote] = useState(_AD.note || ""), [fixed, sFixed] = useState(false);
-  // Smart defaults can land AFTER mount (history loads async, so a cold start
-  // straight onto the Add tab computes them from an empty list). Adopt a late
-  // suggestion only while the field still holds the auto-picked value — the
-  // moment the user (or a draft/chip/voice parse) changes it, hands off for good.
-  const autoSel = useRef({ cat: _AD.catId ? null : (defaults.categoryId || cats[0]?.id || ""), wid: _AD.wid ? null : (defaults.walletId || "bank") });
-  // What the learned model last filled in, and why. `filledCat` is the correction
-  // signal: if the category you SAVE differs from what we put there, that is you
-  // disagreeing, and it is worth far more than an ordinary example.
+  const [type, sType] = useState(_AD.type || "expense"), [amt, sAmt] = useState(_AD.amt || "0"), [catId, sCat] = useState(_AD.catId || ""), [srcId, sSrc] = useState(isrc[0]?.id || ""), [wid, sW] = useState(_AD.wid || defaults.walletId || "bank"), [iwid, sIW] = useState("bank"), [tFrom, sTF] = useState("bank"), [tTo, sTT] = useState("upi_lite"), [date, sDate] = useState(_AD.date || localDateKey()), [note, sNote] = useState(_AD.note || ""), [fixed, sFixed] = useState(false);
+  // The smart WALLET default can land AFTER mount (history loads async, so a cold
+  // start straight onto the Add tab computes it from an empty list). Adopt a late
+  // suggestion only while the field still holds the auto-picked value — the moment
+  // the user (or a draft/chip/voice parse) changes it, hands off for good. There
+  // is no category equivalent any more; see below.
+  const autoSel = useRef({ wid: _AD.wid ? null : (defaults.walletId || "bank") });
+  // THE CATEGORY FIELD STARTS EMPTY, AND THAT IS THE POINT.
+  //
+  // It used to open on `defaults.categoryId || cats[0].id` — a guess that looks
+  // exactly like a decision. You could not tell whether the app had worked
+  // something out or had simply landed on the first chip, so every single add
+  // carried a verification step, which is the "why do I keep having to click"
+  // this replaces. An empty field is honest about what is known, makes "did the
+  // user actually choose?" answerable, and stops the worst learning bug in the
+  // old loop: a default left untouched was recorded as a positive example, so
+  // the model trained on categories nobody had ever picked.
+  //
+  // `catTouched` is that answer: true once the choice is the user's (a chip, a
+  // quick-add pattern, a voice/receipt parse), false while it is still ours.
+  const catTouched = useRef(!!_AD.catId);
+  // What we last filled in, and why. `filledCat` is the correction signal: if the
+  // category you SAVE differs from what we put there, that is you disagreeing,
+  // and it is worth far more than an ordinary example.
   const [autoCat, sAutoCat] = useState(null);
   const filledCat = useRef(null);
   const catIdSet = useMemo(() => new Set(cats.map(c => c.id)), [cats]);
-  // Fill the category ONLY while the field still holds an auto-picked value —
-  // the same handoff rule the smart defaults follow. The old rule matcher called
-  // sCat() unconditionally, so typing a note stomped a category you had just
-  // chosen by hand.
+  // Fill the category ONLY while it is still ours to fill.
   const fillCat = (cid, meta) => {
-    const a = autoSel.current;
-    if (!cid || a.cat === null || catId !== a.cat) return false;
-    a.cat = cid; filledCat.current = cid; sCat(cid); sAutoCat(meta || null);
+    if (!cid || catTouched.current || !catIdSet.has(cid)) return false;
+    filledCat.current = cid; sCat(cid); sAutoCat(meta || null);
     return true;
   };
+  // The user (or a source carrying its own category — a quick-add pattern, a
+  // parsed receipt, a voice line) taking the field over, for good.
+  const ownCat = (cid) => { catTouched.current = true; sCat(cid); sAutoCat(null); };
   useEffect(() => {
     const a = autoSel.current;
-    if (a.cat !== null && defaults.categoryId && catId === a.cat && defaults.categoryId !== catId) { a.cat = defaults.categoryId; sCat(defaults.categoryId); }
     if (a.wid !== null && defaults.walletId && wid === a.wid && defaults.walletId !== wid) { a.wid = defaults.walletId; sW(defaults.walletId); }
-  }, [defaults.categoryId, defaults.walletId, catId, wid]);
+  }, [defaults.walletId, wid]);
+  // ONE ranking behind everything: what to fill in, what the explainer says, and
+  // which chips come first. Re-runs on the amount and wallet too, not just the
+  // note — the old wiring lived inside the note field's onChange, so switching
+  // to Cash or typing ₹15,000 after the note never revised the guess.
+  const catRanked = useMemo(() => type === "expense" ? rankCategories(catModel, { note, walletId: wid, amount: parseAmount(amt) }, { validCategoryIds: catIdSet, prior: defaults.categoryScores }) : [], [type, catModel, note, wid, amt, catIdSet, defaults.categoryScores]);
+  const catRankIndex = useMemo(() => { const mp = new Map(); catRanked.forEach((r, i) => mp.set(r.categoryId, i)); return mp; }, [catRanked]);
+  // Blocked-save flash on the category row (see submit).
+  const [catFlash, sCatFlash] = useState(false);
+  const catBlockRef = useRef(null);
+  const catFlashTimer = useRef(null);
+  const catFrozenOrder = useRef(null);
+  useEffect(() => () => clearTimeout(catFlashTimer.current), []);
 
   // "Split with friends": selected friend names + the new-name input. Friends'
   // equal shares become "owed" IOUs alongside the expense at submit time.
@@ -827,7 +852,6 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
   const [fxExpanded, setFxExpanded] = useState(false), [fxSearch, setFxSearch] = useState("");
   const receiptPickerRef = useRef(null);
   const [submitting, setSubmitting] = useState(false);
-  const [aiCatSug, sAiCatSug] = useState(null); // {categoryId, confidence, keyword} | null
   const [aiCatLoading, sAiCatLoading] = useState(false);
   const [ocrLoading, sOcrLoading] = useState(false);
   const [itemsPreview, sItemsPreview] = useState(null); // {merchant, total, items[]} | null
@@ -835,14 +859,16 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
   // splitPreview state removed — the AI category-split feature (single
   // expense → multi-category guess) was noisy. Receipt-items flow replaced it.
   // Fuzzy-match AI's free-text category hint (e.g. "Groceries", "Food") to a
-  // local category id. Falls back to current expense category, then first.
+  // local category id, or NULL when nothing matches. It used to fall back to
+  // cats[0] — harmless while the form always carried a default, wrong now that an
+  // empty category means "nobody has decided yet": a receipt whose category hint
+  // matched nothing would have silently claimed the first chip.
   const matchCatHint = (hint) => {
     const h = String(hint || "").toLowerCase().trim();
-    if (!h) return catId || cats[0]?.id;
+    if (!h) return null;
     const direct = cats.find(c => c.name.toLowerCase() === h);
     if (direct) return direct.id;
-    const fuzzy = cats.find(c => c.name.toLowerCase().includes(h) || h.includes(c.name.toLowerCase()));
-    return fuzzy?.id || catId || cats[0]?.id;
+    return cats.find(c => c.name.toLowerCase().includes(h) || h.includes(c.name.toLowerCase()))?.id || null;
   };
   // Map a free-text payment-method hint from a receipt/UPI screenshot (e.g.
   // "UPI Lite", "GPay", "Credit Card", "Cash") to one of the user's wallet ids.
@@ -876,7 +902,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
         if (!r.ok) throw new Error(d.error || "Split failed");
         const items = (Array.isArray(d.items) ? d.items : []).filter(it => Number(it.amount) > 0);
         if (!items.length) { showT("Couldn't split that note into items", "info"); return; }
-        sItemsPreview({ merchant: d.merchant || "", total, currency: "INR", items: items.map(it => ({ ...it, categoryId: matchCatHint(it.category) })), confidence: d.confidence || "medium" });
+        sItemsPreview({ merchant: d.merchant || "", total, currency: "INR", items: items.map(it => ({ ...it, categoryId: matchCatHint(it.category) || catId || cats[0]?.id })), confidence: d.confidence || "medium" });
       } catch (e) {
         showT(e.message || "Split error", "error");
       } finally {
@@ -909,7 +935,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       if (merged.items.length === 0) { showT(failures.length ? failures[0] : "No line items found", failures.length ? "error" : "info"); return; }
       // Pre-resolve each item to a real categoryId so the preview can render an
       // editable select bound to a stable id (rather than the free-text AI hint).
-      merged.items = merged.items.map(it => ({ ...it, categoryId: matchCatHint(it.category) }));
+      merged.items = merged.items.map(it => ({ ...it, categoryId: matchCatHint(it.category) || catId || cats[0]?.id }));
       sItemsPreview(merged);
       if (failures.length) showT(`Scanned ${results.length - failures.length}/${results.length} receipts — ${failures.length} failed`, "info");
     } catch (e) {
@@ -950,7 +976,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       if (itemsPreview.merchant) noteParts.push(itemsPreview.merchant);
       if (it.name) noteParts.push(it.name);
       const itemNote = noteParts.join(" · ").slice(0, 120);
-      const cid = it.categoryId || matchCatHint(it.category) || catId;
+      const cid = it.categoryId || matchCatHint(it.category) || catId || cats[0]?.id;
       const ok = oE({ id: uid(), amount, categoryId: cid, walletId: wid, date, note: itemNote, ...(gid ? { groupId: gid } : {}) }, { balanceDelta }) !== false;
       if (ok) { added++; addedTotal = roundMoney(addedTotal + amount); balanceDelta = roundMoney(balanceDelta - amount); }
     });
@@ -970,6 +996,44 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
     receiptPickerRef.current?.clear();
   };
   const aiDebounceRef = useRef(null);
+  // LIVE RESOLVE. Runs on every input that could change the answer — note, amount
+  // and wallet — for as long as the category is still ours. Three outcomes:
+  //   an explicit Settings rule            → fill, always (a hard override)
+  //   the learned model, CONFIDENT_ENOUGH  → fill, with the reason on screen
+  //   neither                              → leave it EMPTY and ask the AI
+  //                                          (cold start) after a beat
+  // The empty case is not a failure state any more: submit resolves it, and the
+  // picker is already ordered best-first, so it costs one tap and no scanning.
+  useEffect(() => {
+    clearTimeout(aiDebounceRef.current);
+    if (type !== "expense" || catTouched.current) return;
+    const kw = note.toLowerCase().trim();
+    const rule = autoRules.find(r => r.keyword && kw.includes(r.keyword.toLowerCase()) && catIdSet.has(r.categoryId));
+    if (rule) { fillCat(rule.categoryId, { categoryId: rule.categoryId, source: "rule", token: rule.keyword }); return; }
+    const top = catRanked[0];
+    if (top && top.confidence >= CONFIDENT_ENOUGH) { fillCat(top.categoryId, { categoryId: top.categoryId, source: top.source, token: top.why[0]?.token || null }); return; }
+    // Nothing convincing. Release an earlier fill rather than leaving a guess
+    // made from a note that has since been edited away.
+    if (filledCat.current) { filledCat.current = null; sCat(""); }
+    sAutoCat(null);
+    if (kw.length < 3) return;
+    aiDebounceRef.current = setTimeout(async () => {
+      sAiCatLoading(true);
+      try {
+        const r = await fetch("/api/ai-categorize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ note: note.trim(), categories: cats.map(c => ({ id: c.id, name: c.name })) }) });
+        const d = await r.json();
+        // Applied, not offered. The old chip needed a ✓ tap to accept — one more
+        // click for an answer the user could see was right, and refusing it was
+        // the only way to say "no" to something that had not touched anything.
+        // Now it fills the field like any other source, says where it came from,
+        // and a chip tap overrides it; it is learned at the light ACCEPTED weight
+        // either way, since a guess you merely tolerated is not a decision.
+        if (r.ok && d.categoryId && catIdSet.has(d.categoryId)) { fillCat(d.categoryId, { categoryId: d.categoryId, source: "ai", token: null }); }
+      } catch { /* silent — the local model and the picker both still work */ }
+      finally { sAiCatLoading(false); }
+    }, 800);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type, note, catRanked, autoRules, catIdSet, cats]);
   const scanReceipt = async () => {
     if (ocrLoading) return;
     if (!receiptPickerRef.current?.hasAny) { showT("Add a receipt first", "error"); return; }
@@ -1018,7 +1082,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       if (merchant) sNote(merchant + (results.length > 1 ? ` (${results.length} receipts)` : ""));
       if (earliestDate) sDate(earliestDate);
       let setCat = null, setWal = null;
-      if (catHint) { const cid = matchCatHint(catHint); if (cid) { sCat(cid); setCat = cats.find(c => c.id === cid)?.name || null; } }
+      if (catHint) { const cid = matchCatHint(catHint); if (cid) { ownCat(cid); setCat = cats.find(c => c.id === cid)?.name || null; } }
       if (payHint) { const wid2 = matchWalletHint(payHint); if (wid2) { sW(wid2); setWal = aw.find(w => w.id === wid2)?.name || null; } }
       const okCount = results.length - failures.length;
       const extras = [setCat && `→ ${setCat}`, setWal && `· ${setWal}`].filter(Boolean).join(" ");
@@ -1048,6 +1112,31 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       showT(fxFetching ? "Still fetching the exchange rate — try again in a second" : "Couldn't get the exchange rate — check your connection or switch to INR", "error");
       return;
     }
+    // THE SAFETY NET. The category can legitimately still be empty here — that is
+    // the whole design — so submit is where it gets decided, with more context
+    // than any earlier moment had (final note, final amount, final wallet).
+    //
+    // The bar is SAVE_FILL_MIN, far below the one for filling the form while you
+    // type, because the alternative here is not "wait for better evidence", it is
+    // "refuse to save". A 30%-confident guess named in the toast and fixable from
+    // History beats an error message that costs a round trip. Below even that we
+    // stop and ask — a pure recency prior ("you spend on Food a lot") is scaled so
+    // it can never clear this bar, because it is not evidence about THIS expense.
+    let useCat = catId, autoFiled = null;
+    if (type === "expense" && !useCat) {
+      const guessAmt = fxCur.trim().toUpperCase() !== "INR" && fxRate > 0 ? roundMoney(a * fxRate) : a;
+      const top = rankCategories(catModel, { note, walletId: wid, amount: guessAmt }, { validCategoryIds: catIdSet, prior: defaults.categoryScores })[0];
+      if (top && top.confidence >= SAVE_FILL_MIN) { useCat = top.categoryId; autoFiled = top; }
+      else {
+        showT(note.trim() ? "Pick a category — that note is new to us" : "Pick a category", "error");
+        sCatFlash(true);
+        clearTimeout(catFlashTimer.current);
+        catFlashTimer.current = setTimeout(() => sCatFlash(false), 2600);
+        catBlockRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+    }
+    sCatFlash(false);
     setSubmitting(true);
     try {
       // Upload receipts only at submit time — fixes premature Cloudinary uploads
@@ -1077,12 +1166,12 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       if (type === "expense") {
         const txId = uid();
         if (isFX) saveCurrencyMeta(txId, fxCur, a, fxRate);
-        txOk = oE({ id: txId, amount: inrAmt, categoryId: catId, date, note: fixed ? markFixedNote(note) : note, walletId: wid, recurring: fixed || undefined, ...(rUrl ? { receipt_url: rUrl } : {}) }) !== false;
+        txOk = oE({ id: txId, amount: inrAmt, categoryId: useCat, date, note: fixed ? markFixedNote(note) : note, walletId: wid, recurring: fixed || undefined, ...(rUrl ? { receipt_url: rUrl } : {}) }, autoFiled ? { extra: `filed under ${cats.find(c => c.id === useCat)?.name || useCat}` } : {}) !== false;
         if (txOk && splitOn && splitSel.length > 0) {
           // Equal shares across you + friends; you keep shares[0] so any odd
           // paise from rounding lands on you, never on a friend's IOU.
           const shares = distributeAmount(inrAmt, splitSel.length + 1);
-          onAddSplits(splitSel.map((nm, i) => ({ id: uid(), name: nm, amount: shares[i + 1], direction: "owed", settled: false, eventId: null, groupId: null, note: note.trim() || cats.find(c => c.id === catId)?.name || "Split", categoryId: catId, date, createdAt: new Date().toISOString() })));
+          onAddSplits(splitSel.map((nm, i) => ({ id: uid(), name: nm, amount: shares[i + 1], direction: "owed", settled: false, eventId: null, groupId: null, note: note.trim() || cats.find(c => c.id === useCat)?.name || "Split", categoryId: useCat, date, createdAt: new Date().toISOString() })));
         }
       } else if (type === "income") {
         const txId = uid();
@@ -1097,11 +1186,18 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       // for more. Learn the RAW note (not the fixed-marker version) so the
       // tokens match what will be typed next time.
       if (type === "expense") {
-        onLearnCategory({ note, categoryId: catId, walletId: wid, amount: inrAmt, ...(filledCat.current && filledCat.current !== catId ? { wrongCategoryId: filledCat.current } : {}) });
-        // Re-arm auto-fill for the NEXT entry: catId survives a save, so without
-        // this a single manual pick would switch auto-categorization off for the
-        // rest of the session.
-        filledCat.current = null; autoSel.current.cat = catId; sAutoCat(null);
+        // Not every example is worth the same. Tapping a chip is you deciding;
+        // letting our fill stand — or never touching the field at all — is only
+        // you not objecting, and must weigh less, or the model trains on its own
+        // output and bootstraps a guess into a certainty ordinary evidence cannot
+        // move. (The old loop could not tell these apart at all: it learned the
+        // untouched DEFAULT category at full weight on every save, so notes were
+        // being taught to a category nobody had ever chosen.)
+        const weight = catTouched.current ? WEIGHT_PICK : WEIGHT_ACCEPTED;
+        onLearnCategory({ note, categoryId: useCat, walletId: wid, amount: inrAmt, weight, ...(filledCat.current && filledCat.current !== useCat ? { wrongCategoryId: filledCat.current } : {}) });
+        // Re-arm for the NEXT entry — and clear the field, since a category left
+        // over from the last save is the pre-selected default all over again.
+        filledCat.current = null; catTouched.current = false; sCat(""); sAutoCat(null); catFrozenOrder.current = null;
       }
       receiptPickerRef.current?.clear();
       sAmt("0");
@@ -1118,7 +1214,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
   return <div style={{ padding: "0 0 20px" }}>
     {(() => { const SI = { expense: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><polyline points="19 12 12 19 5 12" /></svg>, income: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></svg>, transfer: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9" /><line x1="3" y1="5" x2="21" y2="5" /><polyline points="7 23 3 19 7 15" /><line x1="21" y1="19" x2="3" y2="19" /></svg>, recurring: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><polyline points="7 23 3 19 7 15" /><path d="M21 13v2a4 4 0 0 1-4 4H3" /></svg> }; return <div style={{ display: "flex", background: "var(--card)", borderRadius: 12, padding: 4, border: "1px solid var(--border)", marginBottom: 20, gap: 2 }}>{[{ id: "expense", label: "Expense" }, { id: "income", label: "Income" }, { id: "transfer", label: "Transfer" }, { id: "recurring", label: "Recurring" }].map(t => <button key={t.id} onClick={() => { hapticSelection(); sType(t.id); }} style={{ flex: 1, padding: "10px 4px", border: "none", borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", gap: 4, lineHeight: 1, background: type === t.id ? (t.id === "expense" ? "var(--neg)" : t.id === "income" ? "var(--pos)" : t.id === "transfer" ? "var(--acc)" : "var(--acc2)") : "transparent", color: type === t.id ? "#fff" : "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.15s" }}>{SI[t.id]}{t.label}</button>)}</div>; })()}
     {type !== "recurring" && (() => {
-      const applyParsed = r => { if (r.amount) sAmt(String(r.amount)); if (r.note) sNote(r.note); if (r.walletId) { if (type === "expense") sW(r.walletId); else if (!isUpiLite(aw.find(w => w.id === r.walletId) || {})) sIW(r.walletId); } if (r.categoryId) { if (type === "expense") sCat(r.categoryId); else sSrc(r.categoryId); } };
+      const applyParsed = r => { if (r.amount) sAmt(String(r.amount)); if (r.note) sNote(r.note); if (r.walletId) { if (type === "expense") sW(r.walletId); else if (!isUpiLite(aw.find(w => w.id === r.walletId) || {})) sIW(r.walletId); } if (r.categoryId) { if (type === "expense") ownCat(r.categoryId); else sSrc(r.categoryId); } };
       const handleVoice = async t => { const local = parseVoiceTx(t, { wallets: aw, categories: type === "expense" ? cats : isrc }); applyParsed(local); if (local.amount && local.categoryId && local.walletId) { showT(`Heard: ₹${local.amount} ${local.note || ""}`, "info"); return; } try { const r = await fetch("/api/ai-analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "voice-parse", transcript: t, wallets: aw.map(w => ({ id: w.id, name: w.name })), categories: (type === "expense" ? cats : isrc).map(c => ({ id: c.id, name: c.name })) }) }); const data = await r.json(); if (r.ok && data.amount) { applyParsed(data); showT(`AI: ₹${data.amount} ${data.note || ""}`, "info"); } else if (!local.amount) { showT(data?.error || "Couldn't parse — try \"300 coffee bank\"", "error"); } } catch { if (!local.amount) showT("Couldn't parse — try \"300 coffee bank\"", "error"); } };
       // Tint a colour. Hex goes down the rgba() path; ANYTHING ELSE (a CSS var,
       // an rgb()/hsl() string) goes through color-mix, because the hex parse
@@ -1147,8 +1243,22 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       const selW = isExp ? wid : iwid;
       const setSelW = isExp ? sW : sIW;
       const selCatId = isExp ? catId : srcId;
-      const setSelCat = isExp ? (id => { sCat(id); sAutoCat(null); }) : sSrc;
-      const catList = isExp ? [...cats, ...(cats.find(c => c.id === "other") ? [] : [DC.find(c => c.id === "other")])].filter(Boolean) : isrc;
+      const setSelCat = isExp ? ownCat : sSrc;
+      const allCats = isExp ? [...cats, ...(cats.find(c => c.id === "other") ? [] : [DC.find(c => c.id === "other")])].filter(Boolean) : isrc;
+      // With no pre-selected category, how long it takes to FIND the right chip
+      // is the whole cost of choosing — so the wall is ordered best-first from the
+      // same ranking that decides auto-fill (recency alone when the note says
+      // nothing, which still beats the fixed order). It re-ranks only while the
+      // field is empty and FREEZES on the order you were looking at the moment you
+      // picked: chips that reshuffle under a finger mid-tap are worse than any
+      // ordering. A save empties the field and the next entry re-ranks fresh.
+      const catList = (() => {
+        if (!isExp) return allCats;
+        if (selCatId && catFrozenOrder.current) return catFrozenOrder.current;
+        const ordered = [...allCats].sort((a, b) => (catRankIndex.has(a.id) ? catRankIndex.get(a.id) : 999) - (catRankIndex.has(b.id) ? catRankIndex.get(b.id) : 999));
+        catFrozenOrder.current = ordered;
+        return ordered;
+      })();
 
       // Quick add = ONE TAP LOGS IT. These patterns are things already logged
       // twice or more in the last 60 days, so the amount, category, wallet and
@@ -1157,7 +1267,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       // logging them. Tap writes the expense (with Undo in the toast, because a
       // tap that spends money has to be reversible in the same gesture); HOLD
       // still fills the form for the times you want to tweak one first.
-      const qaFill = (p, i) => { sAmt(String(p.amount)); sCat(p.categoryId); sW(p.walletId); if (p.note) sNote(p.note); clearTimeout(qaTimer.current); sQaHit({ i, mode: "filled" }); qaTimer.current = setTimeout(() => sQaHit(null), 1100); };
+      const qaFill = (p, i) => { sAmt(String(p.amount)); ownCat(p.categoryId); sW(p.walletId); if (p.note) sNote(p.note); clearTimeout(qaTimer.current); sQaHit({ i, mode: "filled" }); qaTimer.current = setTimeout(() => sQaHit(null), 1100); };
       const qaTap = (p, i) => { if (qaHold.current.held) { qaHold.current.held = false; return; } if (qaHit && qaHit.i === i) return; if (!onQuickLog) { hapticLight(); qaFill(p, i); return; } if (onQuickLog(p) === false) return; clearTimeout(qaTimer.current); sQaHit({ i, mode: "logged" }); qaTimer.current = setTimeout(() => sQaHit(null), 1400); };
       const qaHoldStart = (p, i) => { qaHold.current.held = false; clearTimeout(qaHold.current.t); qaHold.current.t = setTimeout(() => { qaHold.current.held = true; hapticMedium(); qaFill(p, i); }, 420); };
       const qaHoldEnd = () => clearTimeout(qaHold.current.t);
@@ -1214,8 +1324,10 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
 
           <div style={{ height: 1, background: "var(--border)", margin: "16px -18px" }} />
 
-          <div style={{ ...microLabel("var(--muted)"), marginBottom: 11 }}>{isExp ? "Category" : "Source"}</div>
+          <div ref={catBlockRef} style={{ ...(catFlash ? { boxShadow: "0 0 0 2px var(--neg)", borderRadius: 14, padding: 8, margin: -8, transition: "box-shadow 0.2s" } : {}) }}>
+          <div style={{ ...microLabel("var(--muted)"), marginBottom: 11, display: "flex", alignItems: "center", gap: 6 }}>{isExp ? "Category" : "Source"}{isExp && !selCatId && <span style={{ fontFamily: "var(--font-b)", fontSize: 9.5, letterSpacing: 0, textTransform: "none", color: catFlash ? "var(--neg)" : "var(--muted)", opacity: catFlash ? 1 : 0.8, fontWeight: catFlash ? 700 : 400 }}>{catFlash ? (note.trim() ? "— pick one, this note is new to us" : "— pick one to save") : "— filed from your note if you skip it"}</span>}</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>{catList.map(c => { const on = selCatId === c.id; return <button key={c.id} onClick={() => { hapticSelection(); setSelCat(c.id); }} style={{ padding: "8px 13px 8px 10px", borderRadius: 100, fontSize: 12.5, fontFamily: "var(--font-h)", border: `1.5px solid ${on ? c.color : "var(--border)"}`, background: on ? alpha(c.color, 0.13) : "var(--bg)", color: on ? c.color : "var(--ts)", cursor: "pointer", fontWeight: on ? 800 : 600, display: "flex", alignItems: "center", gap: 6 }}><DI2 id={c.id} accent={c.neon || c.color} size={15} />{c.name}</button>; })}</div>
+          </div>
 
           {isExp && (() => {
             const SPL = "var(--acc)";
@@ -1301,12 +1413,11 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
             {isExp && <button onClick={extractItems} disabled={itemsLoading} title="Split into line items — from a receipt, or from your note + amount if none is attached" style={{ flexShrink: 0, width: 44, height: 44, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", cursor: itemsLoading ? "default" : "pointer", border: `1.5px solid ${alpha(tc, 0.5)}`, background: alpha(tc, 0.1), color: tc, opacity: itemsLoading ? 0.6 : 1 }}>{itemsLoading ? <span style={{ width: 15, height: 15, border: `2px solid ${alpha(tc, 0.35)}`, borderTopColor: tc, borderRadius: "50%", animation: "nmSpin .7s linear infinite", display: "inline-block" }} /> : <Robot size={17} weight="regular" />}</button>}
           </div>
           <div style={{ marginBottom: 8 }}>
-            <input value={note} onChange={e => { const v = e.target.value; sNote(v); sAiCatSug(null); if (aiDebounceRef.current) clearTimeout(aiDebounceRef.current); if (type === "expense") { const kw = v.toLowerCase().trim(); const m = autoRules.find(r => kw.includes(r.keyword.toLowerCase())); const p = m ? null : predictCat(catModel, { note: v, walletId: wid, amount: parseAmount(amt) }, { validCategoryIds: catIdSet }); if (m) { fillCat(m.categoryId, { categoryId: m.categoryId, source: "rule", token: m.keyword }); } else if (p && p.categoryId && p.confidence >= CONFIDENT_ENOUGH) { fillCat(p.categoryId, { categoryId: p.categoryId, source: p.source, token: p.why[0]?.token || null }); } else if ((sAutoCat(null), v.trim().length >= 3)) { aiDebounceRef.current = setTimeout(async () => { sAiCatLoading(true); try { const r = await fetch("/api/ai-categorize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ note: v.trim(), categories: cats.map(c => ({ id: c.id, name: c.name })) }) }); const d = await r.json(); if (r.ok && d.categoryId) sAiCatSug({ ...d }); } catch { /* silent */ } finally { sAiCatLoading(false); } }, 800); } } }} placeholder="Add a note…" style={{ ...is, height: 44, padding: "0 12px" }} />
+            <input value={note} onChange={e => sNote(e.target.value)} placeholder="Add a note…" style={{ ...is, height: 44, padding: "0 12px" }} />
           </div>
           {/* Says WHY, so an auto-filled category never reads as the app guessing at
               you. It is not interactive — tapping any category chip retires it. */}
-          {autoCat && !aiCatSug && type === "expense" && (() => { const c = cats.find(x => x.id === autoCat.categoryId); if (!c) return null; return <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, padding: "6px 9px", borderRadius: 10, background: alpha(c.color, 0.08) }}><Lightning size={11} weight="fill" color={c.color} /><span style={{ fontSize: 10.5, fontFamily: "var(--font-b)", color: "var(--muted)" }}>Set to <strong style={{ color: c.color, fontFamily: "var(--font-h)" }}>{c.name}</strong>{autoCat.token ? <> — you file “{autoCat.token}” here</> : autoCat.source === "context" ? <> — from how you usually log this</> : null}</span></div>; })()}
-          {aiCatSug && (() => { const c = cats.find(x => x.id === aiCatSug.categoryId); if (!c) return null; return <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, padding: "7px 9px", borderRadius: 12, background: alpha(c.color, 0.1), border: `1px solid ${alpha(c.color, 0.5)}` }}><Robot size={12} color={c.color} /><span style={{ flex: 1, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 700, color: "var(--text)" }}>Set category to <strong style={{ color: c.color }}>{c.name}</strong>?</span><span style={{ fontSize: 8.5, color: c.color, background: alpha(c.color, 0.16), padding: "2px 6px", borderRadius: 5, fontWeight: 800, textTransform: "uppercase" }}>{aiCatSug.confidence}</span><button onClick={() => { sCat(aiCatSug.categoryId); autoSel.current.cat = aiCatSug.categoryId; filledCat.current = aiCatSug.categoryId; sAutoCat(null); sAiCatSug(null); }} style={{ width: 26, height: 26, borderRadius: 7, border: "none", background: c.color, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", fontWeight: 800 }}>✓</button><button onClick={() => sAiCatSug(null)} style={{ width: 26, height: 26, borderRadius: 7, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 12, cursor: "pointer" }}>✕</button></div>; })()}
+          {autoCat && type === "expense" && (() => { const c = cats.find(x => x.id === autoCat.categoryId); if (!c) return null; const why = autoCat.source === "ai" ? <> — first time here, so this one is a guess</> : autoCat.token ? <> — you file “{autoCat.token}” here</> : autoCat.source === "context" ? <> — from the wallet and amount you usually use</> : <> — from this note and amount</>; return <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, padding: "6px 9px", borderRadius: 10, background: alpha(c.color, 0.08) }}>{autoCat.source === "ai" ? <Robot size={11} color={c.color} /> : <Lightning size={11} weight="fill" color={c.color} />}<span style={{ fontSize: 10.5, fontFamily: "var(--font-b)", color: "var(--muted)" }}>Set to <strong style={{ color: c.color, fontFamily: "var(--font-h)" }}>{c.name}</strong>{why} — tap any chip to change</span></div>; })()}
           {/* Removed: "Split across categories with AI" — AI's blind guess at how
               to split one expense across categories was noisy. Use the receipt-items
               flow (Robot icon next to Scan) instead — it splits a *real* receipt
@@ -2514,7 +2625,15 @@ export default function Nomad() {
   useEffect(() => { try { localStorage.setItem("nomad-auto-rules", JSON.stringify(autoRules)); } catch { /* quota */ } }, [autoRules]);
 
   const allM = useMemo(() => { const s = new Set(); ex.forEach(e => s.add(mk(e.date))); inc.forEach(i => s.add(mk(i.date))); return [...s].sort() }, [ex, inc]);
-  const addDefaults = useMemo(() => suggestAddDefaults(ex, { validCategoryIds: new Set(cats.map(c => c.id)), validWalletIds: new Set(wallets.map(w => w.id)) }), [ex, cats, wallets]);
+  // The Add form's starting point. NOTE the deliberate absence of a category:
+  // `categoryScores` is a ranking prior for the picker and for the model's weakest
+  // tier, never a pre-selection. Pre-filling a guessed category is what made every
+  // add feel like it needed checking, and it poisoned the learned model by
+  // recording untouched defaults as if they had been chosen.
+  const addDefaults = useMemo(() => {
+    const validCategoryIds = new Set(cats.map(c => c.id)), validWalletIds = new Set(wallets.map(w => w.id));
+    return { walletId: suggestAddDefaults(ex, { validCategoryIds, validWalletIds }).walletId, categoryScores: recencyScores(ex, { validCategoryIds }).categories };
+  }, [ex, cats, wallets]);
   const quickPatterns = useMemo(() => { const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 60); const cutStr = localDateKey(cutoff); const counts = {}; ex.filter(e => !e.deleted_at && !isTrackedExp(e) && (e.date || "") >= cutStr).forEach(e => { const k = `${e.amount}|${e.categoryId || ""}|${e.walletId || "upi_lite"}|${(e.note || "").slice(0, 30)}`; if (!counts[k]) counts[k] = { count: 0, amount: e.amount, categoryId: e.categoryId || "", walletId: e.walletId || "upi_lite", note: e.note || "" }; counts[k].count++; }); return Object.values(counts).filter(p => p.count >= 2).sort((a, b) => b.count - a.count).slice(0, 5); }, [ex]);
   // Everyone you've split with, most-recent-first, soft-deleted IOUs excluded —
   // the search pool behind the Add-form split picker AND the New-IOU name field.
@@ -2928,7 +3047,7 @@ export default function Nomad() {
   // (and store a stale balBefore). Callers thread the net effect of the
   // batch entries already accepted so each one sees the balance the previous
   // ones left behind — as if they'd been typed one at a time.
-  const addE = (data, { balanceDelta = 0, silent = false } = {}) => {
+  const addE = (data, { balanceDelta = 0, silent = false, extra = "" } = {}) => {
     const amt = roundMoney(data.amount);
     if (amt <= 0) { showT("Enter a valid amount", "error"); return false }
     if (amt > 10000000) { showT("Amount too large (max ₹1 crore)", "error"); return false }
@@ -2958,7 +3077,7 @@ export default function Nomad() {
     sbUpsert("expenses", [toSB(rec, COLS.expenses)]);
     dance();
     if (budgets[data.categoryId] > 0) { const cm = localDateKey().slice(0, 7); const prev = ex.filter(e => e.categoryId === data.categoryId && mk(e.date) === cm && !isTrackedExp(e)).reduce((s, e) => s + e.amount, 0); const tot = prev + amt; const lim = budgets[data.categoryId]; const cn = cats.find(c => c.id === data.categoryId)?.name || data.categoryId; if (tot >= lim) { showT(`${cn} budget exceeded! ${fmt(tot)} / ${fmt(lim)}`, "error"); sNotifs(pushNotifications([{ id: `budget-${data.categoryId}-${cm}`, kind: "budget", title: `${cn} budget exceeded`, body: `${fmt(tot)} spent of a ${fmt(lim)} limit this month. Tap to adjust.`, meta: { go: "budget" } }])); } else if (tot >= lim * 0.8) showT(`${cn} at ${Math.round(tot / lim * 100)}% of budget (${fmt(lim)})`, "info"); }
-    if (!silent) showT(online ? "Expense added" : "Expense saved offline", "success");
+    if (!silent) showT(`${online ? "Expense added" : "Expense saved offline"}${extra ? " · " + extra : ""}`, "success");
     return silent ? rec : true;
   };
   // One-tap logging for a quick-add pattern. These are things you have already

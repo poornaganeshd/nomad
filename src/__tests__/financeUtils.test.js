@@ -14,6 +14,7 @@ import {
   historySortCompare,
   itemTimestamp,
   suggestAddDefaults,
+  recencyScores,
   formatMoney,
 } from '../financeUtils.js';
 
@@ -502,6 +503,37 @@ describe('itemTimestamp', () => {
   it('prefers created_at over any id heuristic', () => {
     const t = Date.parse('2026-05-19T10:00:00Z');
     expect(itemTimestamp({ id: 'ffffffff-aaaa', created_at: '2026-05-19T10:00:00Z' })).toBe(t);
+  });
+});
+
+describe('recencyScores', () => {
+  const NOW = new Date(2026, 6, 14, 9); // Tue 2026-07-14
+  const e = (date, categoryId, walletId) => ({ id: date + categoryId, amount: 10, date, categoryId, walletId });
+
+  it('scores every category, not just the winner — the Add picker needs the ORDER', () => {
+    const rows = [e('2026-07-13', 'transport', 'cash'), e('2026-07-12', 'transport', 'cash'), e('2026-07-11', 'food', 'bank')];
+    const { categories, wallets } = recencyScores(rows, { now: NOW });
+    expect(Object.keys(categories).sort()).toEqual(['food', 'transport']);
+    expect(categories.transport).toBeGreaterThan(categories.food);
+    expect(wallets.cash).toBeGreaterThan(wallets.bank);
+  });
+
+  it('is empty rather than throwing when there is no history', () => {
+    expect(recencyScores([], { now: NOW })).toEqual({ categories: {}, wallets: {} });
+    expect(recencyScores(undefined, { now: NOW })).toEqual({ categories: {}, wallets: {} });
+  });
+
+  it('drops ids that are no longer valid, so a deleted category cannot rank', () => {
+    const rows = [e('2026-07-13', 'gone', 'cash'), e('2026-07-13', 'food', 'cash')];
+    const { categories } = recencyScores(rows, { now: NOW, validCategoryIds: new Set(['food']) });
+    expect(Object.keys(categories)).toEqual(['food']);
+  });
+
+  it('agrees with suggestAddDefaults about who wins', () => {
+    const rows = [e('2026-07-13', 'transport', 'cash'), e('2026-07-12', 'transport', 'cash'), e('2026-07-10', 'food', 'bank')];
+    const { categories } = recencyScores(rows, { now: NOW });
+    const top = Object.entries(categories).sort((a, b) => b[1] - a[1])[0][0];
+    expect(top).toBe(suggestAddDefaults(rows, { now: NOW }).categoryId);
   });
 });
 

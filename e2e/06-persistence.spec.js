@@ -67,6 +67,7 @@ test("added expense survives reload", async ({ page }) => {
   await gotoLocal(page, funded());
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.locator("input[placeholder='0']").first().fill("750");
+  await page.getByRole("button", { name: /Food & Drinks/ }).click();
   await page.getByRole("button", { name: "Add Expense" }).click();
   await expect.poll(async () => (await readBackup(page)).expenses?.length ?? 0).toBeGreaterThan(0);
 

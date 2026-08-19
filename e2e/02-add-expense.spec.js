@@ -7,6 +7,10 @@ test("add expense flow persists to local backup", async ({ page }) => {
   await page.getByRole("button", { name: "Add", exact: true }).click();
   // Expense is the default segment — fill amount and submit
   await page.locator("input[placeholder='0']").first().fill("500");
+  // The category field starts EMPTY and an empty ledger gives the model nothing
+  // to go on, so this expense has to be categorised by hand — see
+  // 22-category-resolution.spec.js for what happens when it does have something.
+  await page.getByRole("button", { name: /Food & Drinks/ }).click();
   // Submit button text gains a "· ₹500.00" suffix once an amount is entered, so
   // match by substring (it's the only "Add Expense" button on the add page).
   await page.getByRole("button", { name: "Add Expense" }).click();

@@ -131,6 +131,7 @@ test("split picker: chosen people drive the share preview and the saved IOUs", a
   await expect(page.getByText("₹300 ÷ 3 (you + 2) → each ₹100 · 2 IOUs on save")).toBeVisible();
   await expect(page.getByText("Splitting with · 3")).toBeVisible();
 
+  await page.getByRole("button", { name: /Food & Drinks/ }).click();
   await page.getByRole("button", { name: "Add Expense" }).click();
   await expect.poll(async () => {
     const { splits = [] } = await readBackup(page);

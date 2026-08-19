@@ -392,16 +392,20 @@ export const resolveRecCategory = (categoryId, lists = [], categoryName) => {
   return { id: categoryId, name: categoryName || categoryId, color: "#8A8A9A", neon: "#A0A0B0" };
 };
 
-// Smart Add-form defaults: the category/wallet you most plausibly log next,
-// from recency-weighted frequency over the last 120 days with a same-weekday
-// boost (expenses only store a day-precision `date`, so time-of-day is not
-// available). Candidates are restricted to ids in validCategoryIds /
-// validWalletIds when provided, so a deleted category can never be suggested.
-// Returns { categoryId, walletId } with nulls when there's no usable history.
-export const suggestAddDefaults = (expenses, { now = new Date(), validCategoryIds, validWalletIds } = {}) => {
+// Recency-weighted frequency over the last 120 days, with a same-weekday boost
+// (expenses only store a day-precision `date`, so time-of-day is not available).
+// Candidates are restricted to ids in validCategoryIds / validWalletIds when
+// provided, so a deleted category can never come back through here.
+//
+// Exported as scores rather than only a winner because the Add form needs the
+// whole ORDERING, not just the top pick: with no pre-selected category, "which
+// three chips go first" is what decides whether choosing costs a scan or a tap.
+// A prior this weak must never FILE a transaction on its own — it says what you
+// usually spend on, not what THIS one is — so categoryModel caps what it can do.
+export const recencyScores = (expenses, { now = new Date(), validCategoryIds, validWalletIds } = {}) => {
   const nowNoon = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12);
   const todayDow = nowNoon.getDay();
-  const catScore = {}, walScore = {};
+  const categories = {}, wallets = {};
   for (const e of expenses || []) {
     if (!e || e.deleted_at || !e.date) continue;
     const [y, m, d] = String(e.date).split("-").map(Number);
@@ -410,11 +414,23 @@ export const suggestAddDefaults = (expenses, { now = new Date(), validCategoryId
     const age = Math.round((nowNoon - when) / 86400000);
     if (age < 0 || age > 120) continue;
     const w = Math.pow(0.97, age) * (when.getDay() === todayDow ? 1.25 : 1);
-    if (e.categoryId && (!validCategoryIds || validCategoryIds.has(e.categoryId))) catScore[e.categoryId] = (catScore[e.categoryId] || 0) + w;
-    if (e.walletId && (!validWalletIds || validWalletIds.has(e.walletId))) walScore[e.walletId] = (walScore[e.walletId] || 0) + w;
+    if (e.categoryId && (!validCategoryIds || validCategoryIds.has(e.categoryId))) categories[e.categoryId] = (categories[e.categoryId] || 0) + w;
+    if (e.walletId && (!validWalletIds || validWalletIds.has(e.walletId))) wallets[e.walletId] = (wallets[e.walletId] || 0) + w;
   }
+  return { categories, wallets };
+};
+
+// Smart Add-form defaults: the wallet (and, for callers that still want it, the
+// category) you most plausibly log next. Returns { categoryId, walletId } with
+// nulls when there's no usable history.
+//
+// NOTE: the Add form no longer PRE-SELECTS categoryId from this — a guessed
+// category that looks identical to a chosen one is exactly what made every add
+// feel like it needed checking. It uses recencyScores for ordering instead.
+export const suggestAddDefaults = (expenses, opts = {}) => {
+  const { categories, wallets } = recencyScores(expenses, opts);
   const top = scores => { let best = null, bestW = 0; for (const [id, sc] of Object.entries(scores)) if (sc > bestW) { best = id; bestW = sc; } return best; };
-  return { categoryId: top(catScore), walletId: top(walScore) };
+  return { categoryId: top(categories), walletId: top(wallets) };
 };
 
 // Savings-goal progress: the single source for every place that renders a goal

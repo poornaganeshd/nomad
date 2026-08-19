@@ -59,8 +59,45 @@ export const MAX_TOKENS = 400;
 // the note is unknown — they must never outvote a real token match.
 const CONTEXT_CONFIDENCE_SCALE = 0.6;
 
-// Below this, we do not touch the user's category — we ask the AI (or stay put).
+// How much context is allowed to say when the note IS known: at most this share
+// of the note's own evidence mass, spread across the categories it favours. It
+// used to be nothing at all — context answered only on a total note miss — which
+// meant one generic token ("monthly", "order") that happens to lean one way
+// decided the answer while a ₹15,000 amount sat there being ignored. Capping it
+// keeps the old promise ("zomato" beats "you usually pay from Bank") while
+// letting context settle the cases where the note genuinely does not know.
+const CONTEXT_BLEND = 0.25;
+
+// A merchant string is rarely typed the same way twice — "swiggy",
+// "swiggyinstamart", "zomatogold". A token that is not known exactly still counts
+// if a known token is a prefix of it (or it of the known one), at a discount.
+// Both sides must be this long, or three-letter tokens match half the table.
+const PREFIX_MIN = 4;
+const PREFIX_WEIGHT = 0.6;
+
+// Below this, we do not touch the user's category while they type.
 export const CONFIDENT_ENOUGH = 0.55;
+
+// The save-time bar. Deliberately far lower than CONFIDENT_ENOUGH, because at
+// submit the alternative is not "wait for better evidence", it is "refuse to save
+// and make them pick". A 30%-confident guess that is stated in the toast and
+// changeable in one tap beats an error message; the same guess filled in silently
+// at mount — which is what the old default category was — does not.
+export const SAVE_FILL_MIN = 0.28;
+
+// What a learned example is worth. Tapping a category yourself is the real
+// signal. Letting ours stand is only confirmation, and must weigh less — or the
+// model trains on its own output and bootstraps a guess into a certainty that no
+// amount of ordinary evidence can move. (A correction is worth more still: see
+// CORRECTION_BOOST above.)
+export const WEIGHT_PICK = 1;
+export const WEIGHT_ACCEPTED = 0.35;
+
+// The recency prior ("what you usually spend on") only ever ORDERS the picker.
+// Scaled so that even a perfectly one-sided history stays under SAVE_FILL_MIN:
+// "you spend on Food a lot" is not evidence about THIS transaction, and must
+// never be the reason something got filed.
+const PRIOR_CONFIDENCE_SCALE = 0.22;
 
 const STOPWORDS = new Set([
   "paid", "for", "at", "the", "to", "from", "in", "on", "and", "or", "by", "with",
@@ -237,71 +274,108 @@ export const learn = (model, { note, categoryId, walletId, amount, weight = 1, w
 // twenty, even though both give a 100% share. 1 → 0.5, 3 → 0.75, 7 → 0.875.
 const massFactor = (top) => 1 - 1 / (1 + Math.max(0, top));
 
-const argmax = (scores, allowed) => {
-  let best = null, bestW = 0, total = 0;
-  for (const [cat, w] of Object.entries(scores)) {
-    if (allowed && !allowed.has(cat)) continue;
-    total += w;
-    if (w > bestW) { best = cat; bestW = w; }
+/** Note-token evidence, with a prefix fallback for merchant variants. */
+const noteEvidence = (m, note, allowed) => {
+  const scores = {};
+  const hits = [];
+  let mass = 0;
+  for (const t of tokenize(note)) {
+    const rows = [];
+    if (m.tokens[t]) rows.push([m.tokens[t], 1]);
+    else if (t.length >= PREFIX_MIN) {
+      for (const [k, row] of Object.entries(m.tokens)) {
+        if (k.length >= PREFIX_MIN && (k.startsWith(t) || t.startsWith(k))) rows.push([row, PREFIX_WEIGHT]);
+      }
+    }
+    let tokenBest = null, tokenBestW = 0;
+    for (const [row, factor] of rows) {
+      for (const [cat, w] of Object.entries(row)) {
+        if (allowed && !allowed.has(cat)) continue;
+        const v = w * factor;
+        scores[cat] = roundMoney((scores[cat] || 0) + v);
+        mass += v;
+        if (v > tokenBestW) { tokenBest = cat; tokenBestW = v; }
+      }
+    }
+    if (tokenBest) hits.push({ token: t, categoryId: tokenBest, weight: roundMoney(tokenBestW) });
   }
-  return { best, bestW, total };
+  return { scores, hits, mass: roundMoney(mass) };
+};
+
+const tableInto = (out, row, allowed, factor = 1) => {
+  let mass = 0;
+  for (const [cat, w] of Object.entries(row || {})) {
+    if (allowed && !allowed.has(cat)) continue;
+    const v = w * factor;
+    out[cat] = roundMoney((out[cat] || 0) + v);
+    mass += v;
+  }
+  return mass;
 };
 
 /**
- * Predict a category. Returns `{ categoryId, confidence, source, why }`, or a
- * null categoryId when the model has nothing useful to say — callers then fall
- * back to the AI (cold start) or to suggestAddDefaults' recency prior.
+ * Score EVERY category this model has an opinion about, best first.
  *
- * Note tokens decide it whenever ANY of them are known. Wallet and amount only
- * answer when the note is unknown or empty: a strong "zomato → Food" must never
- * be outvoted by "you usually pay Bank" — that inversion is how a context-aware
- * model starts feeling arbitrary.
+ * Returns `[{ categoryId, score, confidence, source, why }]`, empty when there is
+ * nothing to say. The Add form uses the whole list (to order the picker) and the
+ * head of it (to decide whether to fill anything in), so there is exactly one
+ * scorer behind both "what should this be?" and "which chips go first?".
+ *
+ * Three tiers, in strict precedence:
+ *   note    — a token you have used before. Context is blended in at a capped
+ *             weight so it can break a tie but never overturn a real match.
+ *   context — wallet + amount bucket, when no token is known. It answers; it does
+ *             not assert (CONTEXT_CONFIDENCE_SCALE).
+ *   prior   — recency-weighted habit, passed in by the caller. ORDERS only:
+ *             capped below the save-time bar so it can never file anything.
  */
-export const predict = (model, { note, walletId, amount } = {}, { validCategoryIds } = {}) => {
+export const rankCategories = (model, { note, walletId, amount } = {}, { validCategoryIds, prior } = {}) => {
   const m = model && model.v === CAT_MODEL_VERSION ? model : emptyModel();
   const allowed = validCategoryIds instanceof Set ? validCategoryIds : (Array.isArray(validCategoryIds) ? new Set(validCategoryIds) : null);
-  const empty = { categoryId: null, confidence: 0, source: null, why: [] };
 
-  const scores = {};
-  const hits = [];
-  for (const t of tokenize(note)) {
-    const row = m.tokens[t];
-    if (!row) continue;
-    let tokenBest = null, tokenBestW = 0;
-    for (const [cat, w] of Object.entries(row)) {
-      if (allowed && !allowed.has(cat)) continue;
-      scores[cat] = roundMoney((scores[cat] || 0) + w);
-      if (w > tokenBestW) { tokenBest = cat; tokenBestW = w; }
-    }
-    if (tokenBest) hits.push({ token: t, categoryId: tokenBest, weight: tokenBestW });
-  }
-  const noteHit = argmax(scores, allowed);
-  if (noteHit.best && noteHit.total > 0) {
-    const share = noteHit.bestW / noteHit.total;
-    return {
-      categoryId: noteHit.best,
-      confidence: Math.min(1, roundMoney(share * massFactor(noteHit.bestW))),
-      source: "note",
-      why: hits.filter(h => h.categoryId === noteHit.best).sort((a, b) => b.weight - a.weight).slice(0, 3),
-    };
-  }
-
-  // Nothing in the note is known — fall back to context.
+  const { scores: nScores, hits, mass: nMass } = noteEvidence(m, note, allowed);
   const ctx = {};
-  const add = (row) => { for (const [cat, w] of Object.entries(row || {})) { if (allowed && !allowed.has(cat)) continue; ctx[cat] = roundMoney((ctx[cat] || 0) + w); } };
-  if (walletId) add(m.wallets[walletId]);
+  let ctxMass = 0;
+  if (walletId && walletId !== "__tracked__") ctxMass += tableInto(ctx, m.wallets[walletId], allowed);
   const b = amountBucket(amount);
-  if (b) add(m.buckets[b]);
-  const ctxHit = argmax(ctx, allowed);
-  if (!ctxHit.best || ctxHit.total <= 0) return empty;
-  const share = ctxHit.bestW / ctxHit.total;
-  return {
-    categoryId: ctxHit.best,
-    confidence: Math.min(1, roundMoney(share * massFactor(ctxHit.bestW) * CONTEXT_CONFIDENCE_SCALE)),
-    source: "context",
-    why: [],
-  };
+  if (b) ctxMass += tableInto(ctx, m.buckets[b], allowed);
+
+  let combined, source;
+  if (nMass > 0) {
+    combined = { ...nScores };
+    // Renormalise context to a fixed fraction of the note's mass, so a wallet you
+    // have used 500 times cannot drown a merchant you have logged twice.
+    if (ctxMass > 0) tableInto(combined, ctx, allowed, (nMass * CONTEXT_BLEND) / ctxMass);
+    source = "note";
+  } else if (ctxMass > 0) {
+    combined = ctx;
+    source = "context";
+  } else {
+    combined = {};
+    if (!(tableInto(combined, prior, allowed) > 0)) return [];
+    source = "prior";
+  }
+
+  const scale = source === "note" ? 1 : source === "context" ? CONTEXT_CONFIDENCE_SCALE : PRIOR_CONFIDENCE_SCALE;
+  const total = Object.values(combined).reduce((t, w) => t + w, 0);
+  if (!(total > 0)) return [];
+  return Object.entries(combined)
+    .sort((x, y) => y[1] - x[1])
+    .map(([categoryId, score]) => ({
+      categoryId,
+      score: roundMoney(score),
+      confidence: Math.min(1, roundMoney((score / total) * massFactor(score) * scale)),
+      source,
+      why: source === "note" ? hits.filter(h => h.categoryId === categoryId).sort((x, y) => y.weight - x.weight).slice(0, 3) : [],
+    }));
 };
+
+/**
+ * Predict a category — the head of `rankCategories`, or a null categoryId when
+ * the model has nothing useful to say. Callers then fall back to the AI (cold
+ * start) or, at submit time, to asking the user outright.
+ */
+export const predict = (model, ctx = {}, opts = {}) => rankCategories(model, ctx, opts)[0] || { categoryId: null, confidence: 0, source: null, why: [] };
 
 /**
  * Build a model from expense history so the very first prediction is already
