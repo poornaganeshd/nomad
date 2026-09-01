@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, memo } from "react";
-import { roundMoney, localDateKey, defaultSettleWalletId, settlementNetAmount, isSuspiciousExcess, settleWritesIncoming } from "./financeUtils";
+import { roundMoney, localDateKey, defaultSettleWalletId, settlementNetAmount, isSuspiciousExcess, settleWritesIncoming, settlePaidInFull } from "./financeUtils";
 import { parseAmount } from "./txParsers";
 import { rankPeople, highlightParts, peopleFromSplits, sameName } from "./peopleSearch";
 import { tint } from "./tint";
@@ -192,18 +192,31 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
 
   // Settle modals shared by BOTH views (person detail + wallet home) — a single
   // definition so the net-settle routing can't drift between render sites.
+  //
+  // Both views return <>{page}{sheets}</> rather than nesting these inside the
+  // page div, and that placement is load-bearing for the confetti. React
+  // reconciles by position: while `sheets` sat at a different child index in the
+  // person tree than in the home tree, every switch between them UNMOUNTED and
+  // remounted <Confetti>, restarting a burst that was still in flight from the
+  // top (and, before the trigger learned to clear itself, replaying it forever).
+  // Hoisting it to the same index in both trees makes the instance survive the
+  // navigation, so the burst runs exactly once and ends on time.
   // Both sheets REFUSE TO CLOSE on a rejected settle (handler returned false):
   // the amount, date and wallet the user typed are the only way to act on the
   // error the handler just toasted ("not enough in Bank", "UPI Lite cannot
   // receive"), and closing threw them away.
   //
-  // `opts.closes` is set by whichever sheet ran the numbers — it is the only
-  // thing that knows whether this was a partial — so the confetti tracks "this
-  // IOU is cleared", not merely "cash moved". A burst over "₹240 paid, ₹60 still
-  // remaining" celebrated a debt that is still open.
+  // `opts.paidInFull` is set by whichever sheet ran the numbers — it is the only
+  // thing that knows whether this was a partial, and whether the shortfall was
+  // then written off — so the confetti tracks "this IOU was PAID", not merely
+  // "cash moved" or even "the row is closed". A burst over "₹240 paid, ₹60 still
+  // remaining" celebrated a debt that is still open; a burst over a write-off
+  // celebrated money that is never coming back, which is the same lie told the
+  // other way round. The gate is truthy-only (not `!== false`), so a settle path
+  // that forgets the flag stays quiet instead of throwing a party by default.
   const sheets = <>
-    {SettleModal && settleTgt && <SettleModal split={settleTgt} remaining={remOf(settleTgt)} wallets={wallets} onConfirm={(wid, amount, date, opts = {}) => { const r = onSettle(settleTgt.id, wid, amount, date, opts); if (r === false) return false; sSettleTgt(null); if (opts.closes !== false) sBurst(b => b + 1); return true; }} onClose={() => sSettleTgt(null)} />}
-    {netSheet && <NetSheet desc={netSheet} wallets={wallets} fmt={fmt} isUpiLite={isUpiLite} onConfirm={(wid, amt, opts = {}) => { const r = netSheet.all ? settleAllWith(netSheet.name, netSheet.groups, wid, amt, opts) : netSheet.eventId ? onSettleEventNet(netSheet.eventId, netSheet.name, wid, amt, opts) : onSettleNet(netSheet.name, wid, amt, null, opts); if (r !== false && opts.closes !== false) sBurst(b => b + 1); return r; }} onClose={() => sNetSheet(null)} />}
+    {SettleModal && settleTgt && <SettleModal split={settleTgt} remaining={remOf(settleTgt)} wallets={wallets} onConfirm={(wid, amount, date, opts = {}) => { const r = onSettle(settleTgt.id, wid, amount, date, opts); if (r === false) return false; sSettleTgt(null); if (opts.paidInFull) sBurst(b => b + 1); return true; }} onClose={() => sSettleTgt(null)} />}
+    {netSheet && <NetSheet desc={netSheet} wallets={wallets} fmt={fmt} isUpiLite={isUpiLite} onConfirm={(wid, amt, opts = {}) => { const r = netSheet.all ? settleAllWith(netSheet.name, netSheet.groups, wid, amt, opts) : netSheet.eventId ? onSettleEventNet(netSheet.eventId, netSheet.name, wid, amt, opts) : onSettleNet(netSheet.name, wid, amt, null, opts); if (r !== false && opts.paidInFull) sBurst(b => b + 1); return r; }} onClose={() => sNetSheet(null)} />}
     {burst > 0 && <Confetti key={burst} onDone={endBurst} />}
   </>;
 
@@ -293,7 +306,8 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
         </div>;
       })}
     </div>; };
-    return <div>
+    return <>
+      <div>
       <div onClick={() => { sView("home"); sCur(null); }} role="button" tabIndex={0} onKeyDown={kbd(() => { sView("home"); sCur(null); })} aria-label="Back to wallet" style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--muted)", fontSize: 12.5, fontWeight: 700, fontFamily: "var(--font-h)", cursor: "pointer", padding: "7px 12px", marginBottom: 8, borderRadius: 12, background: SURF, boxShadow: NEU_SM }}><CaretLeft size={14} weight="bold" /> Wallet</div>
       <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 16 }}>
         <div style={{ width: 50, height: 50, borderRadius: 16, background: ac, color: ink(ac), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 17, boxShadow: NEU_SM }}>{initials(cur)}</div>
@@ -313,8 +327,9 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
       {curSeg === "personal" && !genGroup && <div style={{ ...neuCard, textAlign: "center", padding: "22px 16px", color: "var(--muted)", fontSize: 12, fontWeight: 600, marginBottom: 14 }}>No personal IOUs with {cur} yet.</div>}
       {curSeg === "events" && evGroups.map(renderGroup)}
       <div style={{ display: curSeg === "personal" ? undefined : "none" }}>{!adding ? <button onClick={() => sAdding(true)} style={{ width: "100%", border: "none", borderRadius: RAD_SM, padding: 13, background: SURF, boxShadow: NEU_SM, color: "var(--ts)", fontFamily: "var(--font-h)", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginTop: 8, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6 }}><Plus size={15} weight="bold" /> Add IOU with {cur}</button> : <AddForm fixedName={cur} {...addFormProps} />}</div>
+      </div>
       {sheets}
-    </div>;
+    </>;
   }
 
   // ── HOME (neumorphic card wallet) ─────────────────────────────────────────
@@ -324,7 +339,8 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
   // shaped while the sheet is open.
   const bkRows = !netBk ? [] : people.map(name => ({ name, net: roundMoney(personMap[name].net), parts: Object.values(personMap[name].parts).map(p => ({ ...p, net: roundMoney(p.net) })).filter(p => Math.abs(p.net) > 0.005) })).filter(r => Math.abs(r.net) > 0.005).sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
 
-  return <div>
+  return <>
+    <div>
     <div style={{ display: "flex", alignItems: "stretch", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
       <div onClick={() => sNetBk(true)} role="button" tabIndex={0} onKeyDown={kbd(() => sNetBk(true))} aria-label="Show net breakdown" style={{ ...neuCard, padding: "9px 15px", display: "inline-flex", flexDirection: "column", justifyContent: "center", cursor: "pointer" }}><span style={{ fontSize: 9, color: "var(--muted)", fontWeight: 700, letterSpacing: ".8px", textTransform: "uppercase" }}>Net · tap</span><b style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 20, letterSpacing: "-.6px", fontVariantNumeric: "tabular-nums", color: near0 ? "var(--muted)" : net >= 0 ? MINT : CORAL }}>{near0 ? "₹0" : (net >= 0 ? "+" : "−") + fmt(Math.abs(net)).slice(1)}</b></div>
       <div style={{ ...neuCard, padding: "9px 15px", display: "flex", alignItems: "center", gap: 14, fontSize: 12, fontWeight: 700, fontFamily: "var(--font-h)", fontVariantNumeric: "tabular-nums" }}><span style={{ color: MINT, display: "inline-flex", alignItems: "center", gap: 3 }}><ArrowUp size={14} weight="bold" /> {fmt(owedTot)}</span><span style={{ color: CORAL, display: "inline-flex", alignItems: "center", gap: 3 }}><ArrowDown size={14} weight="bold" /> {fmt(oweTot)}</span></div>
@@ -341,10 +357,11 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
 
     {settledPeople.length > 0 && <details style={{ marginTop: 18 }}><summary style={{ fontSize: 11.5, color: "var(--muted)", cursor: "pointer", fontFamily: "var(--font-h)", fontWeight: 700 }}><CheckCircle size={12} weight="fill" style={{ verticalAlign: "-2px", marginRight: 4 }} />Settled up ({settledPeople.length})</summary><div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 9 }}>{settledPeople.map(name => <div key={name} onClick={() => openPerson(name)} role="button" tabIndex={0} onKeyDown={kbd(() => openPerson(name))} aria-label={`Open ${name}, settled`} style={{ display: "flex", alignItems: "center", gap: 11, padding: "11px 14px", ...neuCard, opacity: 0.72, cursor: "pointer" }}><div style={{ width: 32, height: 32, borderRadius: 11, background: avatarColor(name), color: ink(avatarColor(name)), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 12, boxShadow: NEU_SM }}>{initials(name)}</div><span style={{ flex: 1, fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--ts)" }}>{name}</span><span style={{ fontSize: 11, color: MINT, fontFamily: "var(--font-h)", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 3 }}><CheckCircle size={12} weight="fill" /> settled</span><button onClick={e => { e.stopPropagation(); openMorph(name, e.currentTarget.getBoundingClientRect()); }} aria-label={`New IOU with ${name}`} title="New IOU" style={{ width: 30, height: 30, border: "none", borderRadius: 10, boxShadow: NEU_SM, background: SURF, color: "var(--ts)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><Plus size={14} weight="bold" /></button></div>)}</div></details>}
 
-    {sheets}
     {morph && <MorphCompose rect={morph.rect} name={morph.name} categories={categories} uid={uid} onAdd={onAdd} onError={onError} suggestions={allPeople} onClose={() => sMorph(null)} />}
     {netBk && <NetBreakdown rows={bkRows} net={net} owedTot={owedTot} oweTot={oweTot} fmt={fmt} onOpenPerson={name => { sNetBk(false); openPerson(name); }} onClose={() => sNetBk(false)} />}
-  </div>;
+    </div>
+    {sheets}
+  </>;
 }
 
 // ── card-morph quick-add (module-level; grows from a rect to full-screen) ──
@@ -537,8 +554,17 @@ function NetSheet({ desc, wallets, fmt, isUpiLite, onConfirm, onClose }) {
   // the only way to close a person who is never going to pay — before this the
   // write-off toggle needed a payment above zero to appear at all, so writing
   // off ₹300 meant either paying a token paisa or skipping each IOU by hand.
-  const zeroed = Number.isFinite(entered) && roundMoney(entered) === 0;
+  // The `absNet` guard is what keeps that from swallowing a net of ZERO, which
+  // has nothing to write off at all — see `nothingDue` just below.
+  const zeroed = Number.isFinite(entered) && roundMoney(entered) === 0 && absNet > 0.005;
   const writeOffAll = zeroed && forgive;
+  // Two IOUs that cancel each other exactly. The person still has open rows to
+  // close, but no cash is involved either way — so there is no amount to enter,
+  // no wallet to move it through, and nothing to write off. The sheet used to
+  // show all three anyway and, with "0" prefilled in the amount, insisted on a
+  // write-off toggle before it would confirm: the only way to close a person you
+  // were square with was to file both sides as forgiven debt.
+  const nothingDue = absNet <= 0.005;
   // Overpay (entered > net) is honoured for general/whole-person settles: the
   // wallet takes the real cash and the surplus offsets the write-off ledger.
   // Event-scoped settles stay capped at the net — their amount must line up
@@ -561,7 +587,7 @@ function NetSheet({ desc, wallets, fmt, isUpiLite, onConfirm, onClose }) {
   // derive the IOU set independently; passing this across is what lets the
   // handler refuse instead of silently moving a different amount.
   const confirmAmt = zeroed ? 0 : roundMoney(partial || over ? roundMoney(entered) : absNet);
-  const accent = pos ? MINT : CORAL;
+  const accent = pos || nothingDue ? MINT : CORAL;
   return <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(20,18,30,.5)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
     <div onClick={e => e.stopPropagation()} style={{ background: SURF, borderRadius: "24px 24px 0 0", width: "100%", maxWidth: 430, boxShadow: NEU_RAISED, overflow: "hidden" }}>
       <div style={{ background: accent, color: ink(accent), padding: "16px 20px" }}>
@@ -569,9 +595,13 @@ function NetSheet({ desc, wallets, fmt, isUpiLite, onConfirm, onClose }) {
         <div style={{ fontSize: 11.5, fontWeight: 600, opacity: .82, marginTop: 2 }}>{desc?.all ? `Everything across ${desc.count} sources — settled per source, event ledgers stay intact.` : desc?.label ? `Event · ${desc.label} — nets this event's IOUs.` : "Nets every general IOU — owe and owed cancel."}</div>
       </div>
       <div style={{ padding: 20 }}>
-        <div style={{ textAlign: "center", marginBottom: 16 }}><div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700 }}>{pos ? `Collect from ${name}` : `Pay ${name}`}</div><div style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 36, letterSpacing: "-1.2px", color: accent, margin: "4px 0", fontVariantNumeric: "tabular-nums" }}>{fmt(absNet)}</div></div>
-        <div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: ".5px", marginBottom: 7, textTransform: "uppercase" }}>Amount{partial ? " (partial)" : over ? " (includes extra)" : ""}</div>
-        <input type="number" inputMode="decimal" value={amt} onChange={e => { sAmt(e.target.value); sArmed(false); }} style={{ ...inpN, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 18 }} />
+        <div style={{ textAlign: "center", marginBottom: 16 }}><div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700 }}>{nothingDue ? `All square with ${name}` : pos ? `Collect from ${name}` : `Pay ${name}`}</div><div style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 36, letterSpacing: "-1.2px", color: accent, margin: "4px 0", fontVariantNumeric: "tabular-nums" }}>{fmt(absNet)}</div></div>
+        {nothingDue
+          ? <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", textAlign: "center", margin: "-6px 0 16px", lineHeight: 1.45 }}>What you owe and what you are owed cancel out. Confirming closes every open IOU with {name} — no money moves.</div>
+          : <>
+            <div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: ".5px", marginBottom: 7, textTransform: "uppercase" }}>Amount{partial ? " (partial)" : over ? " (includes extra)" : ""}</div>
+            <input type="number" inputMode="decimal" value={amt} onChange={e => { sAmt(e.target.value); sArmed(false); }} style={{ ...inpN, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 18 }} />
+          </>}
         {over && <div style={{ fontSize: 10.5, fontFamily: "var(--font-h)", fontWeight: 700, color: AMBER, margin: "-6px 0 10px" }}>{fmt(extra)} over the {fmt(absNet)} net — extra goes to the wallet and offsets write-offs</div>}
         {(partial || zeroed) && <button onClick={() => sForgive(f => !f)} aria-pressed={forgive} style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, textAlign: "left", border: "none", borderRadius: 14, padding: "11px 13px", margin: "-4px 0 14px", cursor: "pointer", background: SURF, boxShadow: forgive ? NEU_INSET : NEU_SM, transition: "box-shadow .15s" }}>
           <span style={{ width: 20, height: 20, borderRadius: 7, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: forgive ? AMBER : "transparent", boxShadow: forgive ? "none" : NEU_INSET }}>{forgive && <CheckCircle size={14} weight="fill" color={ink(AMBER)} />}</span>
@@ -580,16 +610,16 @@ function NetSheet({ desc, wallets, fmt, isUpiLite, onConfirm, onClose }) {
             <span style={{ display: "block", fontSize: 10.5, fontWeight: 600, color: "var(--muted)", marginTop: 1 }}>{zeroed ? `Nothing changes hands — clears ${name} and logs all of it as a write-off` : `Full and final — clears ${name} and logs the rest as a write-off`}</span>
           </span>
         </button>}
-        {!zeroed && <div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: ".5px", marginBottom: 8, textTransform: "uppercase" }}>{pos ? "Receive into" : "Pay from"}</div>}
+        {!zeroed && !nothingDue && <div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: ".5px", marginBottom: 8, textTransform: "uppercase" }}>{pos ? "Receive into" : "Pay from"}</div>}
         {/* No wallet to pick when nothing moves — showing one invited the reading
             that a write-off debits an account. It does not: write-offs are
             non-cash and never touch a balance. */}
-        <div style={{ display: zeroed ? "none" : "flex", gap: 9, marginBottom: 18 }}>{opts.map(w => { const on = effWid === w.id; return <button key={w.id} onClick={() => sWid(w.id)} style={{ flex: 1, padding: "11px 5px", borderRadius: 14, display: "flex", flexDirection: "column", alignItems: "center", gap: 5, cursor: "pointer", border: "none", boxShadow: on ? NEU_INSET : NEU_SM, background: on ? tint(w.color, "30") : SURF, transition: "box-shadow .15s, background .15s" }}><span style={{ width: 14, height: 14, borderRadius: 5, background: w.color }} /><span style={{ fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 700, color: on ? "var(--text)" : "var(--muted)" }}>{w.name}</span></button>; })}</div>
+        <div style={{ display: zeroed || nothingDue ? "none" : "flex", gap: 9, marginBottom: 18 }}>{opts.map(w => { const on = effWid === w.id; return <button key={w.id} onClick={() => sWid(w.id)} style={{ flex: 1, padding: "11px 5px", borderRadius: 14, display: "flex", flexDirection: "column", alignItems: "center", gap: 5, cursor: "pointer", border: "none", boxShadow: on ? NEU_INSET : NEU_SM, background: on ? tint(w.color, "30") : SURF, transition: "box-shadow .15s, background .15s" }}><span style={{ width: 14, height: 14, borderRadius: 5, background: w.color }} /><span style={{ fontSize: 9.5, fontFamily: "var(--font-h)", fontWeight: 700, color: on ? "var(--text)" : "var(--muted)" }}>{w.name}</span></button>; })}</div>
         <div style={{ display: "flex", gap: 11 }}>
           <button onClick={onClose} style={{ flex: 1, padding: 13, border: "none", borderRadius: 14, background: SURF, boxShadow: NEU_SM, color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
           {/* A zeroed amount is inert until the write-off is explicitly ticked —
               a tap that wipes a debt must never be one keystroke away. */}
-          <button disabled={zeroed && !forgive} onClick={ev => { if (ev.currentTarget.disabled) return; if (bigOver && !armed) { sArmed(true); return; } ev.currentTarget.disabled = true; const ok = onConfirm(effWid, writeOffAll ? "0" : (partial || over ? amt : ""), { forgiveRemainder: (partial || zeroed) && forgive, closes: !partial || forgive, expectCash: n < 0 ? -confirmAmt : confirmAmt }); if (ok !== false) onClose(); else { sArmed(false); ev.currentTarget.disabled = false; } }} style={{ flex: 2, padding: 13, border: "none", borderRadius: 14, boxShadow: NEU_SM, background: zeroed && !forgive ? SURF : bigOver && armed ? AMBER : writeOffAll ? AMBER : accent, color: zeroed && !forgive ? "var(--muted)" : ink(bigOver && armed || writeOffAll ? AMBER : accent), fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 800, cursor: zeroed && !forgive ? "not-allowed" : "pointer" }}>{zeroed && !forgive ? "Enter an amount, or tick write-off" : writeOffAll ? `Write off ${fmt(absNet)} & close` : bigOver && armed ? `Tap again — ${fmt(extra)} extra is intentional` : `${pos ? "Collect" : "Pay"} ${fmt(confirmAmt)}${partial && forgive ? " & close" : " & settle"}`}</button>
+          <button disabled={zeroed && !forgive} onClick={ev => { if (ev.currentTarget.disabled) return; if (bigOver && !armed) { sArmed(true); return; } ev.currentTarget.disabled = true; const ok = onConfirm(effWid, writeOffAll ? "0" : (partial || over ? amt : ""), { forgiveRemainder: (partial || zeroed) && forgive, paidInFull: settlePaidInFull({ partial, wroteOff: (partial || zeroed) && forgive }), expectCash: n < 0 ? -confirmAmt : confirmAmt }); if (ok !== false) onClose(); else { sArmed(false); ev.currentTarget.disabled = false; } }} style={{ flex: 2, padding: 13, border: "none", borderRadius: 14, boxShadow: NEU_SM, background: zeroed && !forgive ? SURF : bigOver && armed ? AMBER : writeOffAll ? AMBER : accent, color: zeroed && !forgive ? "var(--muted)" : ink(bigOver && armed || writeOffAll ? AMBER : accent), fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 800, cursor: zeroed && !forgive ? "not-allowed" : "pointer" }}>{zeroed && !forgive ? "Enter an amount, or tick write-off" : nothingDue ? "Settle up — nothing changes hands" : writeOffAll ? `Write off ${fmt(absNet)} & close` : bigOver && armed ? `Tap again — ${fmt(extra)} extra is intentional` : `${pos ? "Collect" : "Pay"} ${fmt(confirmAmt)}${partial && forgive ? " & close" : " & settle"}`}</button>
         </div>
       </div>
     </div>
@@ -602,13 +632,12 @@ function NetSheet({ desc, wallets, fmt, isUpiLite, onConfirm, onClose }) {
 // screen readers.
 //
 // IT MUST CLEAR ITS OWN TRIGGER (`onDone` → sBurst(0)), and that is not tidiness:
-// the trigger used to stay set for the rest of the session, and `sheets` sits at
-// a DIFFERENT child index in the home tree than in the person tree, so React
-// unmounted and remounted this component on every navigation between them. One
-// settle meant a confetti burst on every subsequent back-tap and every person
-// you opened — fireworks with no event behind them. The dangling mount also left
-// a fixed full-screen overlay and 18 `will-change` spans (each its own compositor
-// layer) live in the DOM forever.
+// the trigger used to stay set for the rest of the session, so one settle meant a
+// confetti burst on every subsequent back-tap and every person you opened —
+// fireworks with no event behind them. The dangling mount also left a fixed
+// full-screen overlay and 18 `will-change` spans (each its own compositor layer)
+// live in the DOM forever. (`sheets` is rendered from the SAME position in both
+// view trees for the other half of this — see the comment there.)
 //
 // The longest particle runs 900+500ms; the timer covers the slowest one so the
 // unmount can never cut an animation short.

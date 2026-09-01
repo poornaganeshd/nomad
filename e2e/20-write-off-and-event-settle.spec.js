@@ -225,3 +225,35 @@ test("settling from that card moves exactly what the row promised", async ({ pag
   expect(Math.round(cash * 100) / 100).toBe(80);
   expect(backup.splits.filter((s) => s.name === "A" && !s.settled)).toHaveLength(0);
 });
+
+test("a person you are square with settles without writing anything off", async ({ page }) => {
+  // ₹500 owed to you in an event, ₹500 owed by you in general: the net is zero,
+  // so "Settle everything ₹0" is the only net settle on offer. It prefilled the
+  // amount with "0", which read as a full write-off — the confirm stayed
+  // DISABLED until you ticked one, and ticking it filed both sides as forgiven
+  // debt. Being square is not a loss, and it has to be closable in one tap.
+  await gotoLocal(page, {
+    events: [groupEvent()],
+    expenses: [groupExpense()],
+    splits: [groupIou(), owe("e2e-gen", 500)],
+  });
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.getByRole("button", { name: "IOU · Splits", exact: true }).click();
+  await page.getByRole("button", { name: /Open Rakesh/ }).click();
+  await page.getByRole("button", { name: /Settle everything/ }).click();
+
+  // Nothing to enter, nowhere to move it, nothing to forgive.
+  await expect(page.getByText(/All square with Rakesh/)).toBeVisible();
+  await expect(page.getByRole("button", { name: /Write off/ })).toHaveCount(0);
+  const confirm = page.getByRole("button", { name: /nothing changes hands/ });
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
+
+  await expect.poll(async () => (await readBackup(page)).splits?.filter((s) => s.settled).length ?? 0).toBe(2);
+  const backup = await readBackup(page);
+  // Settled, NOT written off — these debts were paid, by cancelling out.
+  expect(backup.splits.some((s) => s.skipped)).toBe(false);
+
+  await page.getByRole("button", { name: "Home", exact: true }).click();
+  await expect(page.getByText("Write-offs")).toHaveCount(0);
+});

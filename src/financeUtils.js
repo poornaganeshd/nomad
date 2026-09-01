@@ -367,6 +367,20 @@ export const untrackedGroupDebts = (expenses, allParts) => {
 export const settleWritesIncoming = ({ net = 0, hasOwedItems = false, partial = false } = {}) =>
   roundMoney(Number(net) || 0) > 0.005 || (!partial && !!hasOwedItems);
 
+// Was this settle CLEARED BY MONEY? — the single answer behind the settle
+// celebration, so the two sheets that run the numbers (the per-IOU modal and
+// the net sheet) can't drift on what counts as a win.
+//
+// Closing an IOU and being paid for it are not the same event. A write-off
+// closes the row too — a partial accepted as "full and final", or an amount of
+// exactly 0 that clears the whole debt — but it closes it by giving the money
+// up, and firing confetti over money you just lost is the same mistake as
+// firing it over "₹240 paid, ₹60 still remaining": the burst says something
+// happened that didn't. Only a settle that leaves nothing unpaid and forgives
+// nothing qualifies.
+export const settlePaidInFull = ({ partial = false, wroteOff = false } = {}) =>
+  !partial && !wroteOff;
+
 // Fat-finger guard for overpaid settles. A small tip-sized surplus (₹12 against
 // ₹11.66) sails through; a surplus that's large in absolute terms (> ₹50) or
 // relative to the amount due (> 20%) is more likely a typo (120 for 12), so the

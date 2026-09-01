@@ -7,6 +7,7 @@ import {
   settlementNetAmount,
   isSuspiciousExcess,
   settleWritesIncoming,
+  settlePaidInFull,
 } from '../financeUtils.js';
 
 // Regression "wall" for the class of bugs that kept recurring in App.jsx:
@@ -178,5 +179,38 @@ describe('settleWritesIncoming — the one rule for offering/accepting UPI Lite'
 
   it('defaults to "no incoming" with nothing passed', () => {
     expect(settleWritesIncoming()).toBe(false);
+  });
+});
+
+describe('settlePaidInFull — the one rule for celebrating a settle', () => {
+  it('a settle that clears the whole amount is paid in full', () => {
+    expect(settlePaidInFull({ partial: false, wroteOff: false })).toBe(true);
+  });
+
+  it('an overpay is still paid in full — the change came back on top', () => {
+    // The sheets report an overpay as `partial: false`; nothing was forgiven.
+    expect(settlePaidInFull({ partial: false, wroteOff: false })).toBe(true);
+  });
+
+  it('a partial that leaves the IOU open is not', () => {
+    expect(settlePaidInFull({ partial: true, wroteOff: false })).toBe(false);
+  });
+
+  // The bug: `closes: !partial || forgive` conflated "the row is closed" with
+  // "you got your money". Accepting ₹240 of ₹300 as full and final CLOSES the
+  // IOU, but ₹60 was given up — and the wallet threw confetti over it.
+  it('a partial accepted as full and final is a write-off, not a win', () => {
+    expect(settlePaidInFull({ partial: true, wroteOff: true })).toBe(false);
+  });
+
+  // Amount 0 + the write-off toggle: nothing changes hands and the whole debt
+  // is forgiven. `partial` is false there (0 is not a valid payment), so the
+  // old rule read it as a clean settle and fired the biggest burst of all.
+  it('a FULL write-off is never celebrated', () => {
+    expect(settlePaidInFull({ partial: false, wroteOff: true })).toBe(false);
+  });
+
+  it('defaults to "paid in full" with nothing passed', () => {
+    expect(settlePaidInFull()).toBe(true);
   });
 });
