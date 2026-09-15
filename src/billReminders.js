@@ -89,14 +89,18 @@ export function buildReminders(recurring, splits, todayStr, getRecurringDueDateF
 
   (recurring || []).filter(r => r.active && !snoozedPast(r)).forEach(r => {
     const key = "rec-" + r.id;
+    // Income is not a chore: "Salary is due" reads as something YOU owe. It is
+    // also never a "warn" — nothing is at risk if it lands a day late.
+    const inc = r.type === "income";
     if (isRecurringDueTodayFn(r, todayStr)) {
-      reminders.push({ id: key, msg: `${r.name} is due`, type: "warn" });
+      reminders.push({ id: key, msg: inc ? `${r.name} expected today` : `${r.name} is due`, type: inc ? "info" : "warn" });
       return;
     }
     const upcoming = getRecurringDueDateFn(r, in3Str);
     if (upcoming && upcoming > todayStr && upcoming <= in3Str && isNotHandled(r, upcoming)) {
       const days = Math.round((new Date(upcoming + "T00:00:00") - new Date(todayStr + "T00:00:00")) / 86400000);
-      reminders.push({ id: key, msg: `${r.name} due in ${days} day${days !== 1 ? "s" : ""}`, type: "info" });
+      const unit = `${days} day${days !== 1 ? "s" : ""}`;
+      reminders.push({ id: key, msg: inc ? `${r.name} expected in ${unit}` : `${r.name} due in ${unit}`, type: "info" });
     }
   });
 

@@ -72,3 +72,23 @@ export function matchesQuery(row, query) {
     (t) => hay.some((h) => h.includes(t)) || amountMatchesToken(amount, t)
   );
 }
+
+/**
+ * Same token rules, but for a row that carries SEVERAL amounts — an event.
+ *
+ * `matchesQuery` takes one amount, which is right for a transaction and wrong
+ * for an event: "goa 5000" should find the trip whose hotel was ₹5000, and the
+ * trip's own total is a different number from every expense inside it. Each
+ * token still has to match something (AND), it just gets more places to match.
+ */
+export function matchesMulti(row, query) {
+  const tokens = tokenizeQuery(query);
+  if (!tokens.length) return true;
+  const hay = (Array.isArray(row?.text) ? row.text : [])
+    .filter(Boolean)
+    .map((s) => String(s).toLowerCase());
+  const amounts = (Array.isArray(row?.amounts) ? row.amounts : []).map(Number).filter(Number.isFinite);
+  return tokens.every(
+    (t) => hay.some((h) => h.includes(t)) || amounts.some((a) => amountMatchesToken(a, t))
+  );
+}
