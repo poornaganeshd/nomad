@@ -27,6 +27,8 @@ export interface RecurringRow {
   active?: boolean;
   lastPaidDate?: string | null;
   lastSkippedDate?: string | null;
+  /** "income" = money arriving; absent/anything else = a bill. */
+  type?: string | null;
 }
 export interface SplitRow {
   id: string;
@@ -171,7 +173,10 @@ export function buildBillDigest(
       const overdue = due && due < todayStr
         ? Math.floor((dateOnly(todayStr).getTime() - dateOnly(due).getTime()) / 86400000)
         : 0;
-      dueToday.push(`• ${r.name} — ${inr(r.amount)}${overdue > 0 ? ` (${overdue} day${overdue !== 1 ? "s" : ""} overdue)` : " due today"}`);
+      // A recurring INCOME is money arriving — it is never "overdue", and a
+      // digest that says so reads as a chore the user has failed at.
+      const inc = r.type === "income";
+      dueToday.push(`• ${r.name} — ${inr(r.amount)}${overdue > 0 ? (inc ? ` (${overdue} day${overdue !== 1 ? "s" : ""} late)` : ` (${overdue} day${overdue !== 1 ? "s" : ""} overdue)`) : (inc ? " expected today" : " due today")}`);
       return;
     }
     const up = getRecurringDueDate(r, in3Str);

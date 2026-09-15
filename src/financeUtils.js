@@ -314,6 +314,235 @@ export const pendingIouNet = (splits, settlements) => {
   }, 0));
 };
 
+// What ONE row does to each wallet, as { walletId: signedAmount }.
+//
+// This decision was written out three separate times — the `wBal` accumulator,
+// the wallet ledger modal's `wD`, and the bank-reconcile `wDelta` — each with
+// its own copy of the defaults ("expense with no wallet means upi_lite",
+// "income means bank") and of the settlement sign rule. That is the drift this
+// codebase keeps getting bitten by, and an edit screen has to agree with it
+// exactly: it validates a change by removing the row's OLD effect and applying
+// its NEW one, so if this disagrees with wBal by so much as a default, the
+// check passes on a balance the app does not actually have.
+//
+// Settlements use the FULL amount, like wBal — an overpay really does leave the
+// wallet; `excess` is a split-ledger concept, not a cash one.
+export const walletDeltas = (item) => {
+  if (!item) return {};
+  const amt = Number(item.amount) || 0;
+  if (item.type === "expense") return { [item.walletId || "upi_lite"]: -amt };
+  if (item.type === "income") return { [item.walletId || "bank"]: amt };
+  if (item.type === "transfer") {
+    const out = {};
+    if (item.fromWallet) out[item.fromWallet] = -amt;
+    if (item.toWallet) out[item.toWallet] = roundMoney((out[item.toWallet] || 0) + amt);
+    return out;
+  }
+  if (item.type === "settlement") return item.walletId ? { [item.walletId]: item.direction === "owed" ? amt : -amt } : {};
+  return {};
+};
+
+// Balances after swapping `before` for `after` — the question an edit has to
+// answer before it writes. Only the wallets either version touches appear.
+export const projectedBalances = (balances, before, after) => {
+  const out = {};
+  const apply = (deltas, sign) => {
+    Object.entries(deltas).forEach(([wid, d]) => {
+      if (!(wid in out)) out[wid] = roundMoney(Number(balances?.[wid]) || 0);
+      out[wid] = roundMoney(out[wid] + sign * d);
+    });
+  };
+  apply(walletDeltas(before), -1);
+  apply(walletDeltas(after), 1);
+  return out;
+};
+
+// The first wallet an edit would push negative, or null when it is affordable.
+// "__tracked__" is a placeholder for a group expense someone else paid — it is
+// not a real wallet and has no balance to overdraw.
+export const overdrawnBy = (balances, before, after, wallets = []) => {
+  const projected = projectedBalances(balances, before, after);
+  for (const [wid, bal] of Object.entries(projected)) {
+    if (wid === "__tracked__") continue;
+    if (bal < -0.005) return { walletId: wid, shortBy: roundMoney(-bal), name: (wallets.find(w => w.id === wid) || {}).name || wid };
+  }
+  return null;
+};
+
+// Split an amount by WEIGHTS — percentages, share counts, anything relative.
+//
+// `distributeAmount` only answers "equal", which covers one of the ways people
+// actually split a bill. Three flatmates where one has the big room, a dinner
+// where two people shared a dish, a trip where someone came for half of it —
+// all of those are weighted, and typing exact rupee amounts for them means
+// doing the arithmetic yourself, which is the job the app is for.
+//
+// Largest-remainder (Hare quota), in PAISA, so the parts always sum to exactly
+// the amount. Naive rounding of each weight independently leaves a few paisa
+// unaccounted for, and in this app that residue is not cosmetic: it becomes an
+// IOU nobody can ever settle, because the split records and the expense
+// disagree by a paisa forever. The leftover paisa go to the largest remainders,
+// ties broken by position, so the result is deterministic.
+export const distributeByWeights = (amount, weights) => {
+  const ws = (weights || []).map((w) => { const n = Number(w); return Number.isFinite(n) && n > 0 ? n : 0; });
+  const total = ws.reduce((t, w) => t + w, 0);
+  const cents = Math.round((Number(amount) || 0) * 100);
+  if (!ws.length) return [];
+  if (total <= 0 || cents <= 0) return ws.map(() => 0);
+  const exact = ws.map((w) => (cents * w) / total);
+  const floors = exact.map((v) => Math.floor(v));
+  let left = cents - floors.reduce((t, v) => t + v, 0);
+  const order = exact
+    .map((v, i) => ({ i, rem: v - Math.floor(v) }))
+    .sort((a, b) => (b.rem - a.rem) || (a.i - b.i));
+  const out = floors.slice();
+  for (let k = 0; k < order.length && left > 0; k++, left--) out[order[k].i] += 1;
+  return out.map((c) => c / 100);
+};
+
+// The weight each head carries, for one of the split modes. "You" is always
+// index 0 — the same convention expenseShareMap and netSpent use, and what
+// decides who absorbs the remainder paisa on an equal split.
+//
+// In PERCENT mode your own share is whatever is left of 100, so the number you
+// never have to type is your own; that also makes an over-100 entry impossible
+// to submit rather than silently rescaling everyone.
+export const splitWeights = (mode, { mine = 1, others = [] } = {}) => {
+  const num = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; };
+  const o = others.map(num);
+  if (mode === "percent") {
+    const used = o.reduce((t, v) => t + v, 0);
+    return [Math.max(0, roundMoney(100 - used)), ...o];
+  }
+  if (mode === "shares") return [num(mine), ...o];
+  return [1, ...o.map(() => 1)]; // equal
+};
+
+// Is this split submittable, and if not, why? The message is the whole point —
+// "Add up to 100%" tells you what to do; a greyed-out button does not.
+export const splitIssue = (mode, { total = 0, mine = 1, others = [] } = {}) => {
+  const num = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; };
+  const o = others.map(num);
+  const sum = o.reduce((t, v) => t + v, 0);
+  if (!(total > 0)) return "Enter the bill total";
+  if (!o.length) return "Add at least one person";
+  if (mode === "percent") {
+    if (sum <= 0) return "Enter each person's %";
+    if (sum > 100.0001) return `That is ${roundMoney(sum)}% — over 100%`;
+    return null;
+  }
+  if (mode === "shares") {
+    if (sum + num(mine) <= 0) return "Give someone at least one share";
+    return null;
+  }
+  return null;
+};
+
+// ── BUDGETS ─────────────────────────────────────────────────────────────────
+// Budgets used to be one number per category, hard-wired to the calendar month.
+// That covers one shape of budgeting and silently fails the others: a weekly
+// grocery allowance, an annual insurance pot, and the single question most
+// people actually ask — "what am I allowed to spend in total this month?" —
+// were all unanswerable.
+//
+// The stored shape is UNCHANGED (`budgets` stays { categoryId: number }) so a
+// device running an older build keeps reading it; everything new lives in a
+// sibling `budgetCfg` in the same user_prefs blob, and an older client simply
+// ignores a key it does not know.
+export const BUDGET_PERIODS = ["weekly", "monthly", "yearly"];
+export const DEFAULT_BUDGET_CFG = { period: "monthly", total: 0, rollover: false };
+
+// Budget period → the window vocabulary catWindow already speaks, so "this
+// period" and "the period before it" are derived by ONE dated-window function
+// rather than a second set of month-arithmetic that can drift from it.
+const BUDGET_RANGE = { weekly: "week", monthly: "month", yearly: "year" };
+
+export const normalizeBudgetCfg = (cfg) => {
+  const c = (cfg && typeof cfg === "object") ? cfg : {};
+  const total = Number(c.total);
+  return {
+    period: BUDGET_PERIODS.includes(c.period) ? c.period : DEFAULT_BUDGET_CFG.period,
+    total: Number.isFinite(total) && total > 0 ? roundMoney(total) : 0,
+    rollover: !!c.rollover,
+  };
+};
+
+export const budgetPeriodLabel = (period) =>
+  ({ weekly: "This week", monthly: "This month", yearly: "This year" }[period] || "This month");
+
+/**
+ * What has been spent per category inside `[fromKey, toKey)`.
+ *
+ * Settlements you PAID OUT are spending too — the money left a wallet and it
+ * belongs to the split's category — which is why the original inline memo
+ * counted them, and why this has to as well or a budget quietly under-reports
+ * every group meal you settled.
+ */
+export const spendByCategory = (expenses, settlements, splits, fromKey, toKey) => {
+  const out = {};
+  const add = (cid, amt) => { if (!cid) return; out[cid] = roundMoney((out[cid] || 0) + amt); };
+  const inWindow = (d) => typeof d === "string" && d >= fromKey && d < toKey;
+  (expenses || []).forEach((e) => {
+    if (!e || e.deleted_at || e.walletId === "__tracked__") return; // someone else paid
+    if (inWindow(e.date)) add(e.categoryId, Number(e.amount) || 0);
+  });
+  const splitCat = new Map((splits || []).map((s) => [s.id, s.categoryId]));
+  (settlements || []).forEach((s) => {
+    if (!s || s.direction !== "owe" || !inWindow(s.date)) return;
+    add(s.categoryId || splitCat.get(s.splitId), settlementNetAmount(s));
+  });
+  return out;
+};
+
+/**
+ * Every budget line for the CURRENT period, plus the overall cap when one is set.
+ *
+ * Rollover carries what you did NOT spend last period into this one, capped at
+ * one period's worth. The cap is the point: without it a category you ignored
+ * for eight months hands you an allowance eight times its size, which is not a
+ * budget any more. It looks back exactly ONE period, so the number stays
+ * explainable ("₹400 unspent last month") and needs no stored state — it is
+ * re-derived from the ledger every time, and so can never go stale.
+ *
+ * Returns { lines, total } where `total` is null when no overall cap is set.
+ */
+export const computeBudgets = ({ budgets = {}, cfg, expenses = [], settlements = [], splits = [], categories = [], today = localDateKey() } = {}) => {
+  const c = normalizeBudgetCfg(cfg);
+  const rangeKey = BUDGET_RANGE[c.period];
+  const now = new Date(`${today}T12:00:00`);
+  const cur = catWindow(rangeKey, 0, now);
+  const prev = catWindow(rangeKey, 1, now);
+  const key = (d) => localDateKey(d);
+  const curSpend = spendByCategory(expenses, settlements, splits, key(cur.start), key(cur.end));
+  const prevSpend = c.rollover ? spendByCategory(expenses, settlements, splits, key(prev.start), key(prev.end)) : {};
+
+  const lines = Object.entries(budgets)
+    .filter(([, lim]) => Number(lim) > 0)
+    .map(([cid, rawLim]) => {
+      const base = roundMoney(Number(rawLim));
+      // Unspent last period, never more than one period's budget.
+      const carry = c.rollover ? Math.min(base, Math.max(0, roundMoney(base - (prevSpend[cid] || 0)))) : 0;
+      const lim = roundMoney(base + carry);
+      const spent = roundMoney(curSpend[cid] || 0);
+      const cat = (categories || []).find((x) => x && x.id === cid) || { id: cid, name: cid, color: "#8A8A9A", neon: "#A0A0B0" };
+      return { cid, cat, base, carry, lim, spent, pct: lim > 0 ? Math.min(100, Math.round((spent / lim) * 100)) : 0, over: spent >= lim };
+    })
+    .sort((a, b) => b.pct - a.pct);
+
+  let total = null;
+  if (c.total > 0) {
+    // The overall cap counts ALL spending in the window, not just the part that
+    // happens to sit under a per-category budget — otherwise "I'm allowed
+    // ₹30,000 this month" answers a different question than it appears to.
+    const spent = roundMoney(Object.values(curSpend).reduce((t, v) => t + v, 0));
+    const prevTotal = c.rollover ? roundMoney(Object.values(prevSpend).reduce((t, v) => t + v, 0)) : 0;
+    const carry = c.rollover ? Math.min(c.total, Math.max(0, roundMoney(c.total - prevTotal))) : 0;
+    const lim = roundMoney(c.total + carry);
+    total = { base: c.total, carry, lim, spent, pct: lim > 0 ? Math.min(100, Math.round((spent / lim) * 100)) : 0, over: spent >= lim, left: roundMoney(lim - spent) };
+  }
+  return { lines, total, period: c.period, rollover: c.rollover, from: key(cur.start), to: key(cur.end) };
+};
+
 // Restore "was this field auto-picked?" from a saved Add-form draft.
 //
 // The Add form only replaces a value it chose itself; the moment YOU pick
@@ -475,6 +704,13 @@ export const isSuspiciousExcess = (excess, due) => {
 // the expense categories — looking them up against expense categories showed a
 // raw id like "ott"/"other_rec". Pass the lists in priority order. Single source
 // of truth for every place that renders a recurring category.
+// A recurring row is a BILL unless it says otherwise. Rows written before
+// recurring income existed carry no `type` at all, so "missing" has to mean
+// expense everywhere — never default it at the write site, or old rows and new
+// rows disagree about what they are.
+export const recKind = (r) => ((r && r.type) === "income" ? "income" : "expense");
+export const isRecIncome = (r) => recKind(r) === "income";
+
 export const resolveRecCategory = (categoryId, lists = [], categoryName) => {
   for (const list of lists) {
     const hit = (list || []).find(c => c && c.id === categoryId);

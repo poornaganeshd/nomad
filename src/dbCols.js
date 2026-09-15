@@ -14,6 +14,9 @@ export const COLS = {
   // the row with skipped defaulting to FALSE — every written-off IOU comes back
   // as outstanding and the write-off ledger empties.
   splits:      ["id", "name", "amount", "direction", "settled", "skipped", "eventId", "groupId", "note", "categoryId", "date"],
-  recurring:   ["id", "name", "amount", "categoryId", "categoryName", "walletId", "frequency", "dayOfMonth", "intervalDays", "yearMonth", "yearDay", "startDate", "active", "lastPaidDate", "lastSkippedDate"],
+  // `type` is "expense" (a bill) or "income" (salary, rent received, a payout).
+  // Absent on every row written before recurring income existed, which is why
+  // every read treats a missing value as "expense" rather than defaulting here.
+  recurring:   ["id", "name", "amount", "categoryId", "categoryName", "walletId", "frequency", "dayOfMonth", "intervalDays", "yearMonth", "yearDay", "startDate", "active", "lastPaidDate", "lastSkippedDate", "type"],
   events:      ["id", "name", "emoji", "date", "status", "type", "participants"],
 };

@@ -264,6 +264,11 @@ END $$;
 ALTER TABLE expenses ADD COLUMN IF NOT EXISTS "paidBy"      TEXT;
 ALTER TABLE splits   ADD COLUMN IF NOT EXISTS note          TEXT;
 ALTER TABLE splits   ADD COLUMN IF NOT EXISTS deleted_at    TIMESTAMPTZ DEFAULT NULL;
+
+-- Recurring rows can now be INCOME (salary, rent received, a payout), not only
+-- bills. NULL means a row written before this existed; every read folds NULL to
+-- "expense", so the column needs no backfill and old clients keep working.
+ALTER TABLE recurring ADD COLUMN IF NOT EXISTS type TEXT;
 ALTER TABLE splits   ADD COLUMN IF NOT EXISTS skipped       BOOLEAN DEFAULT FALSE;
 ALTER TABLE splits   ADD COLUMN IF NOT EXISTS date          TEXT;
 ALTER TABLE events   ADD COLUMN IF NOT EXISTS type          TEXT DEFAULT 'solo';

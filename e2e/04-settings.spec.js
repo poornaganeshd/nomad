@@ -10,7 +10,11 @@ test("settings tab shows core controls", async ({ page }) => {
   await gotoLocal(page, seeded);
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(page.getByText("Dark Mode", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Download CSV", exact: true })).toBeVisible();
+  // Export is three formats now: a spreadsheet and a printable statement for a
+  // chosen period, and the flat all-time CSV that used to be the only option.
+  await expect(page.getByRole("button", { name: "Spreadsheet", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Statement / PDF", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Plain CSV (all time)", exact: true })).toBeVisible();
 });
 
 test("dark mode toggle flips persisted theme", async ({ page }) => {
