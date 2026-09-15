@@ -221,3 +221,44 @@ describe('buildReminders vs checkBillReminders', () => {
     expect(() => buildReminders(null, [oweSplit], '2024-04-15', noDue, notDueToday)).not.toThrow();
   });
 });
+
+// Snooze used to live in exactly one place — the JSX that renders the
+// dashboard's due-bill cards — so tapping Snooze silenced one of the three
+// surfaces that state the same claim. The notification centre went on saying
+// the bill was due (and its row deep-linked to a dashboard list the bill was no
+// longer in), and the once-a-day push digest still counted it.
+describe('snoozed bills', () => {
+  const rec = [{ id: 'r1', name: 'Rent', active: true, frequency: 'monthly', dayOfMonth: 15, startDate: '2026-01-15', lastPaidDate: null, lastSkippedDate: null }];
+  const today = '2026-09-15';
+
+  it('drops a bill snoozed past today', () => {
+    const out = buildReminders(rec, [], today, noDue, isDueToday, [], { r1: '2026-09-16' });
+    expect(out).toEqual([]);
+  });
+
+  it('brings it back once the snooze expires', () => {
+    const out = buildReminders(rec, [], today, noDue, isDueToday, [], { r1: '2026-09-15' });
+    expect(out.map(r => r.id)).toEqual(['rec-r1']);
+  });
+
+  it('ignores a snooze for a different bill', () => {
+    const out = buildReminders(rec, [], today, noDue, isDueToday, [], { other: '2026-12-01' });
+    expect(out.map(r => r.id)).toEqual(['rec-r1']);
+  });
+
+  it('never silences an IOU — only recurring bills can be snoozed', () => {
+    const splits = [{ id: 's1', name: 'Rakesh', amount: 300, direction: 'owe' }];
+    const out = buildReminders(rec, splits, today, noDue, isDueToday, [], { r1: '2026-09-16' });
+    expect(out.map(r => r.id)).toEqual(['owe-rakesh']);
+  });
+
+  it('checkBillReminders honours it too, so no push fires for a snoozed bill', () => {
+    const out = checkBillReminders(rec, [], today, noDue, isDueToday, [], { r1: '2026-09-16' });
+    expect(out).toEqual([]);
+  });
+
+  it('defaults to no snooze when the argument is omitted', () => {
+    const out = buildReminders(rec, [], today, noDue, isDueToday, []);
+    expect(out.map(r => r.id)).toEqual(['rec-r1']);
+  });
+});

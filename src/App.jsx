@@ -2140,6 +2140,15 @@ export default function Nomad() {
   const [trendPeriod, sTrendPeriod] = useState("month");
   const [recCats, sRecCats] = useState(RC);
   const [tab, sTab] = useState(() => { try { return new URLSearchParams(window.location.search).has("add") ? "add" : "dashboard"; } catch { return "dashboard"; } }), [ex, sEx] = useState([]), [inc, sInc] = useState([]), [tr, sTr] = useState([]), [stl, sStl] = useState([]), [cats, sCats] = useState(DC), [isrc, sIsrc] = useState(DI), [sp, sSp] = useState([]), [evs, sEvs] = useState([]), [rec, sRec] = useState([]), [fm, sFm] = useState(localDateKey().slice(0, 7)), [loaded, sL] = useState(false), [ld, sLd] = useState(false), [dm, sDm] = useState(false), [toasts, sToasts] = useState([]), [nn, sNN] = useState(""), [ne2, sNE2] = useState("📁"), [nc, sNC] = useState("#E07A5F"), [mt, sMt] = useState("expense"), [clr, sClr] = useState(false), [nukeTxt, sNukeTxt] = useState(""), [addSeg, sAddSeg] = useState("log"), [calW, sCalW] = useState(null), [recountW, sRecountW] = useState(null), [ledgerW, sLedgerW] = useState(null), [wsb, sWsb] = useState({});
+  // Snoozed bills: { recurringId: "YYYY-MM-DD" }. Held in STATE, not read from
+  // localStorage at each render, so every surface that states "this bill is
+  // due" — the dashboard card, the notification centre and the push digest —
+  // reacts to a snooze from the same value. It used to be parsed inline inside
+  // the dashboard's due-bill block and nowhere else.
+  const [recSnooze, sRecSnooze] = useState(() => { try { return JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); } catch { return {}; } });
+  const snoozeBill = useCallback((id, untilKey) => {
+    sRecSnooze(prev => { const next = { ...prev, [id]: untilKey }; try { localStorage.setItem("nomad-rec-snooze", JSON.stringify(next)); } catch { /* quota */ } return next; });
+  }, []);
   const [pendingSync, sPendingSync] = useState(getPendingSyncCount());
   const [deadLetterCount, sDeadLetterCount] = useState(getDeadLetterCount());
   const [calLog, sCalLog] = useState(() => { try { return JSON.parse(localStorage.getItem("nomad-cal-log") || "[]"); } catch { return []; } });
@@ -2431,7 +2440,7 @@ export default function Nomad() {
   useEffect(() => {
     if (!loaded) return;
     const todayStr = localDateKey();
-    const reminders = checkBillReminders(rec, sp, todayStr, getRecurringDueDate, isRecurringDueToday, stl);
+    const reminders = checkBillReminders(rec, sp, todayStr, getRecurringDueDate, isRecurringDueToday, stl, recSnooze);
     if (reminders.length === 0) return;
     // Durable copy FIRST — the toast is a 4-second glance, the notification
     // centre is where you go back to read what you missed. Ids are day-scoped
@@ -2465,7 +2474,7 @@ export default function Nomad() {
         reg.showNotification(digestTitle, { body: digestBody, icon: "/icon-192.png", badge: "/icon-192.png", tag: "nomad-reminders" }).catch(() => { });
       }).catch(() => { });
     }
-  }, [loaded, rec, sp, stl]);
+  }, [loaded, rec, sp, stl, recSnooze]);
 
   useEffect(() => {
     const handleOnline = () => { sOnline(true); flushSyncQueue().catch(() => { }); };
@@ -2560,7 +2569,9 @@ export default function Nomad() {
         const spM  = mergeRemote({ table: "splits",    remote: dbSp,           local: localBackup.splits,     ...deps, remoteDeletedIds: delIds(delSp) });
         const recM = mergeRemote({ table: "recurring", remote: dbRec,          local: localBackup.recurring,  ...deps, remoteDeletedIds: delIds(delRec) });
         const evsM = mergeRemote({ table: "events",    remote: normalizedEvs,  local: localBackup.events,     ...deps, remoteDeletedIds: delIds(delEvs) });
-        const stlM = mergeRemote({ table: "settlements", remote: dbStl,         local: localBackup.settlements, ...deps });
+        // hardDeleted: settlements are the one table sbDeleteRow hard-deletes, so
+        // the server keeps no tombstone and a row missing remotely is ambiguous.
+        const stlM = mergeRemote({ table: "settlements", remote: dbStl,         local: localBackup.settlements, ...deps, hardDeleted: true });
         // Apply via FUNCTIONAL updates merged against the LIVE state unioned
         // with the backup — never the backup alone. The Promise.all above can
         // take seconds; anything the user logs in that window exists only in
@@ -2569,12 +2580,12 @@ export default function Nomad() {
         // exM.next directly would wipe those rows from state, and the next
         // debounced backup would then persist the wiped state — entries
         // silently vanish exactly when several are logged in quick succession.
-        const applyMerge = (setter, table, remote, backupRows, deletedIds) =>
-          setter(prev => mergeRemote({ table, remote, local: unionById(prev, backupRows), ...deps, remoteDeletedIds: deletedIds }).next);
+        const applyMerge = (setter, table, remote, backupRows, deletedIds, opts = {}) =>
+          setter(prev => mergeRemote({ table, remote, local: unionById(prev, backupRows), ...deps, remoteDeletedIds: deletedIds, ...opts }).next);
         applyMerge(sEx,  "expenses",   dbEx,          localBackup.expenses,    delIds(delEx));
         applyMerge(sInc, "incomes",    dbInc,         localBackup.incomes,     delIds(delInc));
         applyMerge(sTr,  "transfers",  dbTr,          localBackup.transfers,   delIds(delTr));
-        applyMerge(sStl, "settlements", dbStl,        localBackup.settlements, undefined);
+        applyMerge(sStl, "settlements", dbStl,        localBackup.settlements, undefined, { hardDeleted: true });
         applyMerge(sSp,  "splits",     dbSp,          localBackup.splits,      delIds(delSp));
         applyMerge(sRec, "recurring",  dbRec,         localBackup.recurring,   delIds(delRec));
         applyMerge(sEvs, "events",     normalizedEvs, localBackup.events,      delIds(delEvs));
@@ -2590,6 +2601,9 @@ export default function Nomad() {
         heal("splits",    COLS.splits,    spM.orphans);
         heal("recurring", COLS.recurring, recM.orphans);
         heal("events",    COLS.events,    evsM.orphans);
+        // Settlement orphans are only the ones that never reached Supabase (no
+        // DB-owned created_at) — see mergeRemote's hardDeleted branch. Healing
+        // the rest re-uploaded settlements another device had deleted.
         heal("settlements", COLS.settlements, stlM.orphans);
         // Same race guard for wallet start balances: a recalibration whose
         // wallet_balances upsert is still queued (offline / 5xx-retry) must not
@@ -2856,13 +2870,13 @@ export default function Nomad() {
     // Full reminder objects, not just ids — so an entry that's still true but
     // now says a different number (₹300 → ₹60 after a partial settle) gets
     // rewritten rather than left quoting money you've already paid.
-    const live = buildReminders(rec, sp, todayStr, getRecurringDueDate, isRecurringDueToday, stl)
+    const live = buildReminders(rec, sp, todayStr, getRecurringDueDate, isRecurringDueToday, stl, recSnooze)
       .map(r => notifFromReminder(r, todayStr));
     const cm = todayStr.slice(0, 7);
     budgetStatus.forEach(b => { if (b.spent >= b.lim) live.push({ id: `budget-${b.cid}-${cm}` }); });
     if (deadLetterCount > 0) live.push({ id: `sync-dead-${todayStr}` });
     sNotifs(reconcileNotifications(live));
-  }, [loaded, rec, sp, stl, budgetStatus, deadLetterCount]);
+  }, [loaded, rec, sp, stl, budgetStatus, deadLetterCount, recSnooze]);
 
 
   // Settlements that the user PAID OUT count as real spending, categorized by
@@ -3443,7 +3457,13 @@ export default function Nomad() {
     if (buf.type === "expense") {
       sEx(p => [buf.exp, ...p]);
       sbUpsert("expenses", [{ ...toSB(buf.exp, COLS.expenses), deleted_at: null }]);
-      if (buf.splits?.length) { sSp(p => [...p, ...buf.splits]); sbUpsert("splits", buf.splits.map(s => toSB(s, COLS.splits))); }
+      // `deleted_at: null` is not optional here. sbDelete("splits", …) is a SOFT
+      // delete, and sbGet filters splits on deleted_at IS NULL — so re-upserting
+      // the row without clearing the flag restored it on screen and left it
+      // deleted on the server. The 60s background pull then dropped the IOUs
+      // again, a minute after Undo appeared to have brought them back. The event
+      // and split undo branches below always cleared it; this one did not.
+      if (buf.splits?.length) { sSp(p => [...p, ...buf.splits]); sbUpsert("splits", buf.splits.map(s => ({ ...toSB(s, COLS.splits), deleted_at: null }))); }
       if (buf.settlements?.length) { sStl(p => [...p, ...buf.settlements]); sbUpsert("settlements", buf.settlements.map(s => toSB(s, COLS.settlements))); }
     } else if (buf.type === "income") { sInc(p => [buf.exp, ...p]); sbUpsert("incomes", [{ ...toSB(buf.exp, COLS.incomes), deleted_at: null }]); }
     else if (buf.type === "transfer") { sTr(p => [buf.exp, ...p]); sbUpsert("transfers", [{ ...toSB(buf.exp, COLS.transfers), deleted_at: null }]); }
@@ -4277,13 +4297,16 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
             where you stand is about to change. Nothing else here is time-critical,
             so nothing else earns the top slot. */}
         {(() => {
-          const tod = new Date(), todS = localDateKey(tod), snoozed = (() => { try { return JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); } catch { return {}; } })(), due = rec.filter(r => isRecurringDueToday(r, todS) && !(snoozed[r.id] && snoozed[r.id] > todS));
+          // Snooze comes from recSnooze (state), the same value buildReminders and
+          // checkBillReminders read — this block used to parse localStorage itself,
+          // which is how a snoozed bill vanished here and stayed "due" everywhere else.
+          const tod = new Date(), todS = localDateKey(tod), due = rec.filter(r => isRecurringDueToday(r, todS) && !(recSnooze[r.id] && recSnooze[r.id] > todS));
           // Pay a due bill from the chosen wallet (the per-cycle override). The
           // bill's saved walletId is untouched, so next month it pre-selects the
           // same default again. addE returns false on a cap/validation block —
           // keep the picker open so the user can pick another wallet.
           const payDue = (r, walletId) => { const ok = addE({ amount: r.amount, categoryId: r.categoryId, walletId, date: todS, note: r.name + " (recurring)", recurring: true }); if (ok === false) return; const updated = { ...r, lastPaidDate: todS, lastSkippedDate: null }; sRec(p => p.map(x => x.id === r.id ? updated : x)); sbUpsert("recurring", [toSB(updated, COLS.recurring)], null, getVersion("recurring", r.id) ? { "If-Unmodified-Since": getVersion("recurring", r.id) } : {}); showT(`${r.name} paid from ${wallets.find(w => w.id === walletId)?.name || "wallet"} — ${fmt(r.amount)}`, "success"); sPayRec(null); sPayRecWal(null); };
-          return due.length > 0 && <div style={{ marginTop: 6, marginBottom: 16 }}>{due.map(r => { const cat = resolveRecCategory(r.categoryId, [RC, recCats], r.categoryName); const wal = wallets.find(w => w.id === r.walletId) || { name: r.walletId }; const picking = payRec === r.id; const selWal = payRecWal || r.walletId; return <div key={r.id} style={{ ...cc, borderLeft: "3px solid var(--neg)", borderRadius: 14, padding: "14px 16px", marginBottom: 8 }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}><Warning size={16} color="var(--neg)" weight="fill" /><div style={{ flex: 1 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{(() => { const od = recurringDaysOverdue(r, todS); return <>{r.name} {od > 0 ? "overdue" : "due today"} — {fmt(r.amount)}{od > 0 ? <span style={{ marginLeft: 6, padding: "2px 6px", borderRadius: 4, background: "var(--danger)", color: "#fff", fontSize: 10, fontWeight: 600 }}>{od}d overdue</span> : null}</>; })()}</div><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{wal.name} → {cat.name}</div></div></div>{picking ? <div><div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: "0.5px", marginBottom: 6 }}>PAID FROM</div><div style={{ display: "flex", gap: 6, marginBottom: 8 }}>{wallets.map(w => { const on = selWal === w.id; return <button key={w.id} onClick={() => sPayRecWal(w.id)} style={{ flex: 1, padding: "8px 4px", borderRadius: 9, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, border: `2px solid ${on ? w.color : "var(--border)"}`, background: on ? tint(w.color, "15") : "var(--card)", cursor: "pointer" }}><DI2 id={w.id} accent={w.neon || w.color} size={15} /><span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: on ? 700 : 500, color: on ? w.color : "var(--muted)" }}>{w.name}</span></button>; })}</div>{isUpiLite(wallets.find(w => w.id === selWal) || {}) && <div style={{ fontSize: 10, color: "#00B4D8", fontFamily: "var(--font-h)", fontWeight: 600, marginBottom: 8 }}>UPI Lite · ₹5000 cap — blocked if short, just pick another.</div>}<div style={{ display: "flex", gap: 6 }}><button onClick={(ev) => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; payDue(r, selWal); ev.currentTarget.disabled = false; }} style={{ flex: 2, padding: "8px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>✓ Confirm paid</button><button onClick={() => { sPayRec(null); sPayRecWal(null); }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Cancel</button></div></div> : <div style={{ display: "flex", gap: 6 }}><button onClick={() => { sPayRec(r.id); sPayRecWal(r.walletId); }} style={{ flex: 1, padding: "8px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>✓ Paid</button><button onClick={(ev) => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; const updated = { ...r, lastSkippedDate: todS }; sRec(p => p.map(x => x.id === r.id ? updated : x)); sbUpsert("recurring", [toSB(updated, COLS.recurring)], null, getVersion("recurring", r.id) ? { "If-Unmodified-Since": getVersion("recurring", r.id) } : {}); showT("Skipped for this cycle", "info") }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Skip</button><button onClick={() => { const snoozeUntil = localDateKey(new Date(Date.now() + 864e5)); const snoozed = JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); snoozed[r.id] = snoozeUntil; localStorage.setItem("nomad-rec-snooze", JSON.stringify(snoozed)); sRec(p => [...p]); showT("Snoozed until tomorrow", "info") }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Snooze</button></div>}</div> })}</div>
+          return due.length > 0 && <div style={{ marginTop: 6, marginBottom: 16 }}>{due.map(r => { const cat = resolveRecCategory(r.categoryId, [RC, recCats], r.categoryName); const wal = wallets.find(w => w.id === r.walletId) || { name: r.walletId }; const picking = payRec === r.id; const selWal = payRecWal || r.walletId; return <div key={r.id} style={{ ...cc, borderLeft: "3px solid var(--neg)", borderRadius: 14, padding: "14px 16px", marginBottom: 8 }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}><Warning size={16} color="var(--neg)" weight="fill" /><div style={{ flex: 1 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{(() => { const od = recurringDaysOverdue(r, todS); return <>{r.name} {od > 0 ? "overdue" : "due today"} — {fmt(r.amount)}{od > 0 ? <span style={{ marginLeft: 6, padding: "2px 6px", borderRadius: 4, background: "var(--danger)", color: "#fff", fontSize: 10, fontWeight: 600 }}>{od}d overdue</span> : null}</>; })()}</div><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{wal.name} → {cat.name}</div></div></div>{picking ? <div><div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: "0.5px", marginBottom: 6 }}>PAID FROM</div><div style={{ display: "flex", gap: 6, marginBottom: 8 }}>{wallets.map(w => { const on = selWal === w.id; return <button key={w.id} onClick={() => sPayRecWal(w.id)} style={{ flex: 1, padding: "8px 4px", borderRadius: 9, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, border: `2px solid ${on ? w.color : "var(--border)"}`, background: on ? tint(w.color, "15") : "var(--card)", cursor: "pointer" }}><DI2 id={w.id} accent={w.neon || w.color} size={15} /><span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: on ? 700 : 500, color: on ? w.color : "var(--muted)" }}>{w.name}</span></button>; })}</div>{isUpiLite(wallets.find(w => w.id === selWal) || {}) && <div style={{ fontSize: 10, color: "#00B4D8", fontFamily: "var(--font-h)", fontWeight: 600, marginBottom: 8 }}>UPI Lite · ₹5000 cap — blocked if short, just pick another.</div>}<div style={{ display: "flex", gap: 6 }}><button onClick={(ev) => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; payDue(r, selWal); ev.currentTarget.disabled = false; }} style={{ flex: 2, padding: "8px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>✓ Confirm paid</button><button onClick={() => { sPayRec(null); sPayRecWal(null); }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Cancel</button></div></div> : <div style={{ display: "flex", gap: 6 }}><button onClick={() => { sPayRec(r.id); sPayRecWal(r.walletId); }} style={{ flex: 1, padding: "8px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>✓ Paid</button><button onClick={(ev) => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; const updated = { ...r, lastSkippedDate: todS }; sRec(p => p.map(x => x.id === r.id ? updated : x)); sbUpsert("recurring", [toSB(updated, COLS.recurring)], null, getVersion("recurring", r.id) ? { "If-Unmodified-Since": getVersion("recurring", r.id) } : {}); showT("Skipped for this cycle", "info") }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Skip</button><button onClick={() => { snoozeBill(r.id, localDateKey(new Date(Date.now() + 864e5))); showT("Snoozed until tomorrow", "info") }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Snooze</button></div>}</div> })}</div>
         })()}
         <TerrainHero trail={balTrail} balance={mBal} income={tI} expense={tE} runway={runway} />
         <div style={{ fontFamily: "var(--font-m)", fontSize: 9, letterSpacing: "0.26em", textTransform: "uppercase", color: "var(--muted)", margin: "12px 0 8px", textAlign: "left" }}>What you carry</div>
