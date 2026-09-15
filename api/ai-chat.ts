@@ -38,7 +38,7 @@
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { callText, AiProviderError, configuredProviderCount } from "./_ai-provider.js";
+import { callText, AiProviderError, configuredProviderCount, summarizeProviderErrors } from "./_ai-provider.js";
 
 // Grounded mode: the client already ran a deterministic query over its full
 // ledger and computed every figure. The model's only job is to phrase it. This
@@ -105,9 +105,22 @@ interface ChatContext {
 }
 
 // Keep the prompt inside a sane token budget: rows are ~45 chars each, so
-// 500 expense rows ≈ 22 KB ≈ 6k tokens — well within every provider's window.
+// 500 expense rows ≈ 22 KB ≈ 6k tokens — well within every provider's WINDOW.
+//
+// A window is not the binding constraint, though: free provider tiers meter
+// TOKENS PER MINUTE, and a 6k-token prompt burns a whole minute's allowance in
+// one question. Two questions in a row then return 429 from every provider at
+// once, which surfaced as "All AI providers failed" on a chat that had worked a
+// moment earlier. So the dump is a ceiling, not a target — the grounded path
+// (src/chatQuery.js) sends no rows at all, questions that need no lookup send
+// none either, and RETRY_* below is the fallback when even this is too much.
 const MAX_EXPENSE_ROWS = 500;
 const MAX_INCOME_ROWS  = 200;
+// Second attempt after a total failure: enough rows to answer most questions,
+// small enough to fit a throttled minute. Answering from 120 rows beats not
+// answering at all, and the coverage line still tells the model what it has.
+const RETRY_EXPENSE_ROWS = 120;
+const RETRY_INCOME_ROWS  = 40;
 
 const rupee = (n: number) => `₹${Math.round(n)}`;
 // Row fields land in a pipe-separated, newline-terminated table; a note (or a
@@ -210,21 +223,50 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(400).json({ error: "question must be a non-empty string." });
   }
 
-  const prompt = buildPrompt(question, context);
+  const system = isGrounded(context) ? GROUNDED_SYSTEM_PROMPT : SYSTEM_PROMPT;
+  // 1024 tokens truncates a 15-line transaction listing mid-table; 1600 covers
+  // the largest allowed answer with headroom. The 500-row prompt also needs
+  // more than the default 15s generation budget — but stay at 20s/attempt so a
+  // 3-provider waterfall still fits Vercel's 60s cap.
+  const startedAt = Date.now();
+  const ask = (p: string, timeoutMs = 20_000) => callText(p, system, { maxTokens: 1600, timeoutMs });
+  // Only the raw-dump path has anything to shed; the grounded path is already
+  // a few hundred bytes, so retrying it smaller would change nothing.
+  const canShrink = !isGrounded(context) && (context.expenses || []).length > RETRY_EXPENSE_ROWS;
 
+  let firstErr: AiProviderError | null = null;
   try {
-    // 1024 tokens truncates a 15-line transaction listing mid-table; 1600
-    // covers the largest allowed answer with headroom. The 500-row prompt
-    // also needs more than the default 15s generation budget — but stay at
-    // 20s/attempt so a 3-provider waterfall still fits Vercel's 60s cap.
-    const raw = await callText(prompt, isGrounded(context) ? GROUNDED_SYSTEM_PROMPT : SYSTEM_PROMPT, { maxTokens: 1600, timeoutMs: 20_000 });
-    return res.status(200).json({ answer: raw.trim() });
-
+    return res.status(200).json({ answer: (await ask(buildPrompt(question, context))).trim() });
   } catch (err) {
-    if (err instanceof AiProviderError) {
-      return res.status(502).json({ error: "All AI providers failed. Try again later.", details: err.providerErrors });
+    if (!(err instanceof AiProviderError)) {
+      console.error("[ai-chat] Unexpected error:", err);
+      return res.status(500).json({ error: "Internal server error." });
     }
-    console.error("[ai-chat] Unexpected error:", err);
-    return res.status(500).json({ error: "Internal server error." });
+    firstErr = err;
   }
+
+  // Every provider refused the full prompt. Before giving up, try once with a
+  // much smaller ledger: the single most common cause is the prompt's size
+  // (a per-minute token allowance, a smaller context window on one provider),
+  // and a shorter question is answerable when the long one is not.
+  // …but only while there is room left in the request. A rate-limited waterfall
+  // fails in milliseconds, so the retry is nearly free in the case it exists
+  // for; a waterfall that TIMED OUT has already spent most of the function's
+  // 60s budget, and a second full pass would be killed mid-flight and lose the
+  // error message with it.
+  if (canShrink && Date.now() - startedAt < 25_000) {
+    try {
+      const trimmed = { ...context, expenses: (context.expenses || []).slice(0, RETRY_EXPENSE_ROWS), incomes: (context.incomes || []).slice(0, RETRY_INCOME_ROWS) };
+      const answer = (await ask(buildPrompt(question, trimmed), 15_000)).trim();
+      console.warn("[ai-chat] full prompt failed, answered from a trimmed ledger:", summarizeProviderErrors(firstErr.providerErrors));
+      return res.status(200).json({ answer, trimmed: true });
+    } catch (err2) {
+      if (err2 instanceof AiProviderError) firstErr = err2;
+    }
+  }
+
+  // Say WHY. "Try again later" is the right advice for a rate limit and useless
+  // advice for a rejected key, and the bubble looked identical either way.
+  const why = summarizeProviderErrors(firstErr.providerErrors);
+  return res.status(502).json({ error: why ? `AI unavailable — ${why}.` : "All AI providers failed. Try again later.", details: firstErr.providerErrors });
 }

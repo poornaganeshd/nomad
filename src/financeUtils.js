@@ -314,6 +314,97 @@ export const pendingIouNet = (splits, settlements) => {
   }, 0));
 };
 
+// Restore "was this field auto-picked?" from a saved Add-form draft.
+//
+// The Add form only replaces a value it chose itself; the moment YOU pick
+// something, that field is yours and no later suggestion touches it. The flag
+// that says which is which has to survive the session draft, because AddPage is
+// conditionally rendered — leaving the Add tab and coming back is a remount.
+//
+// It used to be inferred from "does the draft have a value?", which is always
+// yes: the draft effect writes on every render, so a category lands in
+// sessionStorage the instant the tab first paints, untouched. Autocategorize
+// was therefore live exactly once per session — on the first visit — and dead
+// afterwards, with no signal to the user that anything had changed.
+//
+// `flag` is the persisted auto value (null = the user owns the field);
+// `undefined` means a draft written before the flag existed, which falls back
+// to the old conservative reading.
+export const draftAutoPick = (flag, draftValue, fallback) =>
+  (flag !== undefined ? flag : (draftValue ? null : fallback));
+
+// Window bounds for a range viewed `offset` periods back (0 = the live one).
+// The end is clamped to tomorrow, which is what makes offset 0 month-TO-DATE
+// while every past window is the full period.
+export const catWindow = (range, offset, today) => {
+  const y = today.getFullYear(), m = today.getMonth(), d = today.getDate();
+  const tomorrow = new Date(y, m, d + 1);
+  let start, end, prevStart;
+  if (range === "week") { const ws = new Date(y, m, d - today.getDay() - 7 * offset); start = ws; end = new Date(ws.getFullYear(), ws.getMonth(), ws.getDate() + 7); prevStart = new Date(ws.getFullYear(), ws.getMonth(), ws.getDate() - 7); }
+  else if (range === "month") { start = new Date(y, m - offset, 1); end = new Date(y, m - offset + 1, 1); prevStart = new Date(y, m - offset - 1, 1); }
+  else if (range === "3m") { start = new Date(y, m - 2 - 3 * offset, 1); end = new Date(y, m + 1 - 3 * offset, 1); prevStart = new Date(y, m - 5 - 3 * offset, 1); }
+  else { start = new Date(y - offset, 0, 1); end = new Date(y - offset + 1, 0, 1); prevStart = new Date(y - offset - 1, 0, 1); }
+  if (end > tomorrow) end = tomorrow;
+  return { start, end, prevStart, prevEnd: start };
+};
+
+const CAT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// What window am I looking at? Named, not "3 back" — a stepper whose label is a
+// relative count makes you do the arithmetic the app already did.
+export const catWindowLabel = (range, offset, win, today) => {
+  if (offset === 0) return { week: "This week", month: "This month", "3m": "Last 3 months", year: "This year" }[range];
+  const s = win.start, e = new Date(win.end.getFullYear(), win.end.getMonth(), win.end.getDate() - 1);
+  const yr = n => (n === today.getFullYear() ? "" : ` ${n}`);
+  if (range === "week") return offset === 1 ? "Last week" : `Week of ${s.getDate()} ${CAT_MONTHS[s.getMonth()]}${yr(s.getFullYear())}`;
+  if (range === "month") return `${CAT_MONTHS[s.getMonth()]} ${s.getFullYear()}`;
+  if (range === "3m") return `${CAT_MONTHS[s.getMonth()]}–${CAT_MONTHS[e.getMonth()]} ${e.getFullYear()}`;
+  return String(s.getFullYear());
+};
+
+// Which expense keys count as "this event's group expenses"?
+//
+// An expense-derived IOU is linked to its expense by `groupId`, but the three
+// creation paths spell that link two different ways: the event Add-expense form
+// sets `groupId` to the EXPENSE'S OWN id, while the Bill-split sheet mints a
+// fresh `uid()` and stamps it on both the expense and its IOUs. Scoping on
+// expense ids alone therefore threw every bill-split IOU out of the event
+// ledger — the wallet still offered "Settle up" (it only checked that a groupId
+// existed) and `settleEventNet` then answered "No pending IOUs with X in this
+// event" on a row that was plainly sitting right above the button.
+//
+// So the scope is BOTH keys of every live expense in the event. Every consumer
+// — the BALANCES card, the settle sheets, the wallet's canNet gate and the
+// handler itself — must derive its IOU set from this one function, or the
+// button and the handler start disagreeing again.
+export const eventExpenseKeyMap = (expenses) => {
+  const m = new Map();
+  (expenses || []).forEach((e) => {
+    if (!e || e.deleted_at || e.eventId == null) return;
+    let keys = m.get(e.eventId);
+    if (!keys) { keys = new Set(); m.set(e.eventId, keys); }
+    if (e.id != null) keys.add(e.id);
+    if (e.groupId != null) keys.add(e.groupId);
+  });
+  return m;
+};
+
+// One event's keys. Same rule as the map — callers that need every event at
+// once (the IOU wallet re-renders on every background pull) memoize the map
+// instead, but neither may keep its own copy of the rule.
+export const eventExpenseKeys = (expenses, eventId) => eventExpenseKeyMap(expenses).get(eventId) || new Set();
+
+// The expense-derived IOUs of one event — optionally narrowed to one person.
+// Manually-added event IOUs (no groupId, or a groupId no live expense claims)
+// are deliberately excluded: they have their own per-row Settle button, and
+// settleEventNet does not touch them.
+export const eventExpenseIous = (splits, keys, eventId, name = null) => {
+  const nameLc = name == null ? null : String(name).toLowerCase();
+  return (splits || []).filter((s) =>
+    s && !s.deleted_at && s.eventId === eventId && s.groupId != null && keys.has(s.groupId) &&
+    (nameLc === null || String(s.name || "").toLowerCase() === nameLc));
+};
+
 // Debts a group expense creates between two OTHER participants — the ones NOMAD
 // does not record. It tracks IOUs only between You and each participant
 // (`makeExpIOUs`: when someone else pays, only YOUR share becomes a debt to

@@ -13,10 +13,20 @@
 //
 // Same-gesture dedupe: the global tick flags the current event dispatch, and
 // tap-tier calls that run later in the SAME dispatch (all the legacy inline
-// hapticSelection calls) are swallowed, so one tap = exactly one tick. The flag
-// resets on a 0ms timeout — after the dispatch completes — so two genuinely
-// separate taps always both buzz, no matter how fast (a fixed Date.now() window
-// here would eat fast keypad taps; don't reintroduce one on the tap tier).
+// hapticSelection calls) are swallowed, so one tap = exactly one tick.
+//
+// THE FLAG IS CLEARED BY THE NEXT CLICK, NOT BY A TIMER. It used to reset on a
+// setTimeout(…, 0), which is a task queued behind whatever the click handler
+// kicked off — and in this app that is a re-render of a 3k-line monolith. On a
+// phone that render can hold the main thread for hundreds of milliseconds, so
+// the reset had not run yet when the next tap arrived, the flag was still set,
+// and that tap silently produced NO buzz. That is the whole of "haptics work
+// sometimes": every tap that lands during a slow render after another tap is
+// eaten. Clearing at the top of each real click dispatch is timing-independent
+// — the tick fires first in the capture phase, so one tap is still exactly one
+// tick — and the timer stays only as a backstop for tap-tier calls that arrive
+// without a click of their own. Don't put a fixed Date.now() window on the tap
+// tier either; that eats fast keypad taps, which is how this started.
 //
 // Pattern vocabulary — follows common mobile UX conventions so the *kind* of
 // feedback matches the *kind* of event:
@@ -39,6 +49,7 @@ const KEY = "nomad-haptics";
 
 let enabled = (() => { try { return localStorage.getItem(KEY) !== "off"; } catch { return true; } })();
 let gestureTicked = false; // current event dispatch already produced a tap tick
+let resetTimer = null;     // backstop clear for tap ticks that arrive without a click
 let lastOutcome = 0;
 
 export const hapticsEnabled = () => enabled;
@@ -55,7 +66,11 @@ const vibrate = (pattern) => { try { navigator?.vibrate?.(pattern); } catch { /*
 const tapBuzz = (pattern) => {
   if (!enabled || gestureTicked) return;
   gestureTicked = true;
-  setTimeout(() => { gestureTicked = false; }, 0);
+  // Backstop only — the authoritative reset is at the top of the next click
+  // dispatch (see attachGlobalHaptics). This clears the flag for tap-tier calls
+  // that never get one, e.g. a programmatic hapticLight() outside any gesture.
+  if (resetTimer) clearTimeout(resetTimer);
+  resetTimer = setTimeout(() => { gestureTicked = false; resetTimer = null; }, 0);
   vibrate(pattern);
 };
 
@@ -90,9 +105,17 @@ const TEXT_ENTRY = "input, textarea"; // focusing a field shouldn't tick (the OS
 // Walk up from the tap target looking for something interactive. Real controls
 // match INTERACTIVE; the app's many clickable <div> cards are caught by their
 // computed `cursor: pointer`. Text-entry fields end the walk with "not a tap".
+//
+// The depth cap is generous on purpose. At 12 it was a silent miss: App.jsx
+// nests inline-styled wrappers deeply, so a tap landing on a leaf span inside a
+// card inside a section inside a sheet could run out of walk before reaching
+// the `cursor: pointer` ancestor that makes it a button — and that whole
+// surface then felt like haptics were broken. The loop is cheap (it stops at
+// the first match, which for a real <button> is the first or second step).
+const MAX_WALK = 30;
 const findInteractive = (start) => {
   let el = start instanceof Element ? start : null;
-  for (let i = 0; el && el !== document.documentElement && i < 12; i++, el = el.parentElement) {
+  for (let i = 0; el && el !== document.documentElement && i < MAX_WALK; i++, el = el.parentElement) {
     if (el.matches(TEXT_ENTRY) && !el.matches(INTERACTIVE)) return null;
     if (el.matches(INTERACTIVE)) return el;
     try { if (getComputedStyle(el).cursor === "pointer") return el; } catch { /* detached node */ }
@@ -110,6 +133,11 @@ let attachedTo = null;
 export const attachGlobalHaptics = (doc = typeof document !== "undefined" ? document : null) => {
   if (!doc || attachedTo === doc) return () => {};
   const onClick = (e) => {
+    // Every real click dispatch opens a NEW gesture. Clearing here — rather
+    // than waiting for the previous tick's setTimeout(0), which a long React
+    // render can starve well past the next tap — is what makes a fast sequence
+    // of taps buzz every time instead of intermittently.
+    gestureTicked = false;
     const el = findInteractive(e.target);
     if (!el || el.disabled) return;
     hapticSelection();

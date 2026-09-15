@@ -1,12 +1,12 @@
 import { useState, useEffect, useMemo, useRef, useCallback, memo, Fragment, lazy, Suspense } from "react";
-import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning, Wallet, Target, Lightning, Envelope, Sparkle, Lightbulb, ClipboardText, Timer, HandWaving, Robot, Receipt, FilePdf, Trash, Moon, Sun, Scales, Gear, PushPin, Hash, Microphone, CheckCircle, ArrowsLeftRight, CaretLeft, Users, ArrowRight, ArrowUpRight, ArrowDownLeft, ShareNetwork, Compass, Paperclip, PaperPlaneTilt, CopySimple, Bell, BellSimple, BellRinging, PawPrint, Shield, CalendarCheck, HandCoins, CloudWarning, ChartLineUp } from "@phosphor-icons/react";
+import { FilmSlate, ForkKnife, Airplane, GameController, ShoppingCart, MusicNote, Trophy, Confetti, BookOpen, Briefcase, Warning, Wallet, Target, Lightning, Envelope, Sparkle, Lightbulb, ClipboardText, Timer, HandWaving, Robot, Receipt, FilePdf, Trash, Moon, Sun, Scales, Gear, PushPin, Hash, Microphone, CheckCircle, ArrowsLeftRight, CaretLeft, CaretRight, Users, ArrowRight, ArrowUpRight, ArrowDownLeft, ShareNetwork, Compass, Paperclip, PaperPlaneTilt, CopySimple, Bell, BellSimple, BellRinging, PawPrint, Shield, CalendarCheck, HandCoins, CloudWarning, ChartLineUp } from "@phosphor-icons/react";
 import { IconCheck, IconHistory, IconChevronRight, IconChevronLeft, IconSend, IconAlertTriangle, IconX, IconClock, IconArrowDown, IconArrowUp, IconPlus, IconPlayerSkipForward, IconPencil, IconSearch } from "@tabler/icons-react";
 import { flushSyncQueue, getPendingSyncCount, getPendingSyncSummary, getDeadLetterCount, clearDeadLetter, sendSupabaseRequest, subscribePendingSync, subscribeSyncDrops, isPendingDelete, isPendingUpsert, hasPendingDedupeKey } from "./offlineSync";
 import { checkBillReminders, buildReminders } from "./billReminders";
 import { NOTIFY_KINDS, getNotifications, pushNotifications, markAllRead, dismissNotification, clearNotifications, reconcileNotifications, unreadCount, relTime } from "./notifications";
 import { getNtfyConfig, saveNtfyConfig, isNtfyConfigured, publishNtfy } from "./ntfy";
 import { isPushSupported, getCurrentSubscription, subscribeDevice, unsubscribeDevice, sendTestPush } from "./webpush";
-import { computeStreak, loadStreakStore, saveStreakStore } from "./streak";
+import { computeStreak, loadStreakStore, saveStreakStore, MILESTONES, FREEZE_CAP } from "./streak";
 import { getExchangeRate, saveCurrencyMeta, getCurrencyMeta, getRateMeta } from "./currencyConverter";
 import { hapticForToast, hapticLight, hapticMedium, hapticSelection, hapticsEnabled, setHapticsEnabled } from "./haptics";
 import ReceiptPicker from "./ReceiptPicker";
@@ -19,7 +19,7 @@ import { redactTransactions, redact } from "./redactor";
 import {
   roundMoney, localDateKey, getRecurringDueDate, isRecurringDueToday,
   recurringDaysOverdue, distributeAmount, expenseShareMap, historySortCompare,
-  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, settlementsCash, cashMatchesExpectation, isSuspiciousExcess, settleWritesIncoming, formatMoney, pendingIouNet, untrackedGroupDebts, goalProgress, balanceTrail, runwayInfo,
+  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, settlementsCash, cashMatchesExpectation, isSuspiciousExcess, settleWritesIncoming, formatMoney, pendingIouNet, eventExpenseKeys, eventExpenseIous, catWindow, catWindowLabel, draftAutoPick, untrackedGroupDebts, goalProgress, balanceTrail, runwayInfo,
 } from "./financeUtils";
 import { monotonePathD, smoothSeries } from "./financeUtils";
 import { CAT_MODEL_VERSION, CONFIDENT_ENOUGH, emptyModel, learn as learnCat, predict as predictCat, buildFromHistory, seedFromRules, modelSize } from "./categoryModel";
@@ -519,17 +519,20 @@ function SpendingBreakdown({ expenses, categories, period, onPeriodChange, forma
 // and change-vs-previous-period pinned in the donut centre.
 function CategoryBreakdown({ expenses, categories, formatCurrency }) {
   const [range, sRange] = useState("month");
+  const [offset, sOffset] = useState(0);
   const [selCid, sSelCid] = useState(null);
-  const { rows, total, prevLabel } = useMemo(() => {
+  // The oldest expense on record — the floor the stepper cannot walk past, so
+  // "back" never leads into a run of empty periods with no way to tell whether
+  // you have reached the start of your history or just a quiet month.
+  const oldestKey = useMemo(() => (expenses || []).reduce((a, e) => (e?.date && (!a || e.date < a) ? e.date : a), null), [expenses]);
+  const { rows, total, prevLabel, label, canBack } = useMemo(() => {
     const today = new Date();
-    const y = today.getFullYear(), m = today.getMonth(), d = today.getDate();
     const key = dt => localDateKey(dt);
-    let curStart, prevStart, prevEnd, prevLabel;
-    if (range === "week") { const ws = new Date(y, m, d - today.getDay()); curStart = ws; prevStart = new Date(ws.getFullYear(), ws.getMonth(), ws.getDate() - 7); prevEnd = ws; prevLabel = "vs last week"; }
-    else if (range === "month") { curStart = new Date(y, m, 1); prevStart = new Date(y, m - 1, 1); prevEnd = curStart; prevLabel = "vs last month"; }
-    else if (range === "3m") { curStart = new Date(y, m - 2, 1); prevStart = new Date(y, m - 5, 1); prevEnd = curStart; prevLabel = "vs prior 3 mo"; }
-    else { curStart = new Date(y, 0, 1); prevStart = new Date(y - 1, 0, 1); prevEnd = curStart; prevLabel = "vs last year"; }
-    const curStartKey = key(curStart), curEndKey = key(new Date(y, m, d + 1)), prevStartKey = key(prevStart), prevEndKey = key(prevEnd);
+    const win = catWindow(range, offset, today);
+    const prevLabel = offset === 0
+      ? { week: "vs last week", month: "vs last month", "3m": "vs prior 3 mo", year: "vs last year" }[range]
+      : { week: "vs prev week", month: "vs prev month", "3m": "vs prior 3 mo", year: "vs prev year" }[range];
+    const curStartKey = key(win.start), curEndKey = key(win.end), prevStartKey = key(win.prevStart), prevEndKey = key(win.prevEnd);
     const cur = {}, prev = {};
     let total = 0;
     (expenses || []).forEach(e => {
@@ -543,8 +546,8 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
       const prevAmt = prev[cid] || 0;
       return { cid, cat, amt, pct: total > 0 ? Math.round(amt / total * 100) : 0, delta: prevAmt > 0 ? Math.round((amt - prevAmt) / prevAmt * 100) : null, isNew: prevAmt === 0 && amt > 0 };
     });
-    return { rows, total, prevLabel };
-  }, [expenses, categories, range]);
+    return { rows, total, prevLabel, label: catWindowLabel(range, offset, win, today), canBack: !!oldestKey && oldestKey < curStartKey };
+  }, [expenses, categories, range, offset, oldestKey]);
   const sel = selCid ? rows.find(r => r.cid === selCid) : null;
   const accent = "#F4A261";
   const toggleCat = cid => { hapticSelection(); sSelCid(c => (c === cid ? null : cid)); };
@@ -556,12 +559,23 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
         <div style={{ display: "flex", gap: 2, background: "rgba(244,162,97,0.12)", borderRadius: 20, padding: 3 }}>
           {[["week", "Week"], ["month", "Month"], ["3m", "3M"], ["year", "Year"]].map(([v, lbl]) => {
             const active = range === v;
-            return <button key={v} onClick={() => { hapticSelection(); sRange(v); sSelCid(null); }} style={{ padding: "5px 10px", borderRadius: 16, border: "none", whiteSpace: "nowrap", background: active ? accent : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? "#fff" : "rgba(244,162,97,0.85)", cursor: "pointer", transition: "all 0.15s" }}>{lbl}</button>;
+            return <button key={v} onClick={() => { hapticSelection(); sRange(v); sOffset(0); sSelCid(null); }} style={{ padding: "5px 10px", borderRadius: 16, border: "none", whiteSpace: "nowrap", background: active ? accent : "transparent", fontSize: 11, fontFamily: "var(--font-h)", fontWeight: active ? 700 : 400, color: active ? "#fff" : "rgba(244,162,97,0.85)", cursor: "pointer", transition: "all 0.15s" }}>{lbl}</button>;
           })}
         </div>
       </div>
+      {/* Period stepper. Every range here used to be anchored to today, so the
+          donut could only ever answer "this month" — August was unreachable
+          from the one card whose whole job is where the money went. The label
+          names the window rather than counting periods back, and the arrows
+          stop at the oldest expense on record so walking back cannot run off
+          into blank history. */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, marginBottom: 12 }}>
+        <button onClick={() => { if (!canBack) return; sOffset(o => o + 1); sSelCid(null); }} disabled={!canBack} aria-label="Earlier period" style={{ width: 28, height: 28, borderRadius: 9, border: "none", background: "var(--bg)", color: canBack ? accent : "var(--border)", cursor: canBack ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><CaretLeft size={13} weight="bold" /></button>
+        <span style={{ minWidth: 118, textAlign: "center", fontFamily: "var(--font-h)", fontSize: 11.5, fontWeight: 700, color: offset === 0 ? "var(--muted)" : "var(--text)", letterSpacing: "0.02em" }}>{label}</span>
+        <button onClick={() => { if (!offset) return; sOffset(o => Math.max(0, o - 1)); sSelCid(null); }} disabled={!offset} aria-label="Later period" style={{ width: 28, height: 28, borderRadius: 9, border: "none", background: "var(--bg)", color: offset ? accent : "var(--border)", cursor: offset ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><CaretRight size={13} weight="bold" /></button>
+      </div>
       {!rows.length ? (
-        <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: "28px 0 8px", fontFamily: "var(--font-b)" }}>No expenses in this period</p>
+        <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: "22px 0 8px", fontFamily: "var(--font-b)" }}>Nothing logged in {offset === 0 ? "this period" : label}</p>
       ) : (
         <>
           <div style={{ position: "relative", width: 208, height: 208, margin: "2px auto 6px" }}>
@@ -612,6 +626,132 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
 // beneath it, burn-rate runway, and In/Out/Kept triad. Blueprint-styled but
 // themed entirely through NOMAD's CSS vars so light and dark mode both work;
 // numerals use --font-m (Martian Mono).
+// ── STREAK SHEET ────────────────────────────────────────────────────────────
+// The trail you've left, not a scoreboard. NOMAD's whole visual language is
+// terrain and ground covered (the hero's ridgeline, "days of ground ahead",
+// the lion's paw prints), so the streak reads as a TRAIL: a ring that closes as
+// you approach the next marker, then four weeks of ground behind you.
+//
+// What the previous version got wrong, and what each piece here answers:
+//   • A bare 7-wide grid of 28 cells that started on whatever weekday was 27
+//     days ago, so the columns meant NOTHING — Tuesdays sat under Fridays. The
+//     grid is now weekday-aligned with real S/M/T/W/T/F/S headers and leading
+//     blanks, which is the only way a month grid is readable at a glance.
+//   • A single flat progress bar to the next milestone, with no sense of the
+//     journey. It is now a milestone LADDER: every marker on the trail, the
+//     ones behind you filled, the next one live with its countdown.
+//   • "Shields 0/2" as text. Held forgiveness is now shown as SLOTS — filled
+//     and empty — so "what do I have in reserve" is answerable without reading.
+//   • Nothing distinguished TODAY in the calendar, on the one screen whose
+//     entire question is "did I log today". Today now carries a ring.
+//   • Longest/shields were a whisper line under the number. They are stat tiles
+//     with the same weight as everything else on the sheet.
+//
+// The at-risk state is a real design state, not a colour swap: the ring goes
+// dashed and unfilled, the number desaturates, and the action to fix it is the
+// widest, highest-contrast thing on the sheet.
+const RING = 132, RING_R = 56, RING_C = 2 * Math.PI * RING_R;
+const DOW = ["S", "M", "T", "W", "T", "F", "S"];
+// Noon anchor — house convention for every date read in this codebase (DST).
+const dowOf = (key) => { const [y, m, d] = String(key).split("-").map(Number); return new Date(y, m - 1, d, 12).getDay(); };
+
+function StreakSheet({ info, onNoSpend, onClose, dm }) {
+  useLockBodyScroll();
+  const { current, longest, todayLogged, atRisk, freezesHeld, nextMilestone, calendar } = info;
+  const live = !atRisk;
+  const hot = "var(--warn)";
+  const dim = dm ? "#4B5563" : "#D1CDC4";
+  const ringColor = live ? hot : dim;
+  // Progress toward the next marker. At a milestone exactly (nextMilestone is
+  // the one AFTER it) the ring reads from the previous marker, so crossing 7
+  // doesn't snap the ring back to near-empty.
+  const prevMark = [0, ...MILESTONES].filter(m => m <= current).pop() ?? 0;
+  const span = nextMilestone ? nextMilestone - prevMark : 1;
+  const pct = nextMilestone ? Math.max(0, Math.min(1, (current - prevMark) / span)) : 1;
+  const toGo = nextMilestone ? nextMilestone - current : 0;
+  const logged28 = calendar.filter(c => c.state === "active" || c.state === "frozen").length;
+  // Weekday-align the 28-day window: pad the leading blanks so every column is
+  // one weekday. Without this the grid is 7-wide by coincidence only.
+  const lead = calendar.length ? dowOf(calendar[0].date) : 0;
+  const cells = [...Array.from({ length: lead }, (_, i) => ({ pad: true, key: `p${i}` })), ...calendar.map(c => ({ ...c, key: c.date }))];
+  while (cells.length % 7 !== 0) cells.push({ pad: true, key: `t${cells.length}` });
+  const todayKey = calendar.length ? calendar[calendar.length - 1].date : null;
+  const tile = { flex: 1, minWidth: 0, background: "var(--bg)", borderRadius: 14, padding: "10px 8px", textAlign: "center" };
+  const tileCap = { fontFamily: "var(--font-m)", fontSize: 8, letterSpacing: "0.16em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 4 };
+  const tileVal = { fontFamily: "var(--font-m)", fontSize: 17, fontWeight: 600, color: "var(--text)", fontVariantNumeric: "tabular-nums", lineHeight: 1.1, display: "flex", alignItems: "center", justifyContent: "center", gap: 3, minHeight: 19 };
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} style={{ position: "fixed", inset: 0, background: "rgba(44,40,32,0.45)", zIndex: 60, display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+      <div style={{ background: "var(--card)", borderRadius: "24px 24px 0 0", maxWidth: 430, width: "100%", margin: "0 auto", padding: "14px 20px calc(20px + env(safe-area-inset-bottom))", maxHeight: "88%", overflowY: "auto" }}>
+        <div style={{ width: 36, height: 4, borderRadius: 2, background: "var(--border)", margin: "0 auto 12px" }} />
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+          <div style={{ fontFamily: "var(--font-m)", fontSize: 9, fontWeight: 600, color: "var(--muted)", letterSpacing: "0.22em", textTransform: "uppercase" }}>Your trail</div>
+          <button onClick={onClose} aria-label="Close" style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--bg)", border: "none", cursor: "pointer", fontSize: 14, color: "var(--muted)" }}>✕</button>
+        </div>
+
+        {/* Trail ring — progress to the next marker, streak count at its centre. */}
+        <div style={{ display: "flex", justifyContent: "center", margin: "2px 0 10px" }}>
+          <div style={{ position: "relative", width: RING, height: RING }}>
+            <svg width={RING} height={RING} viewBox={`0 0 ${RING} ${RING}`} style={{ transform: "rotate(-90deg)", display: "block" }} aria-hidden="true">
+              <circle cx={RING / 2} cy={RING / 2} r={RING_R} fill="none" stroke="var(--border)" strokeWidth="9" strokeDasharray={live ? undefined : "3 7"} strokeLinecap="round" />
+              {live && <circle cx={RING / 2} cy={RING / 2} r={RING_R} fill="none" stroke={ringColor} strokeWidth="9" strokeLinecap="round" strokeDasharray={`${(RING_C * pct).toFixed(1)} ${RING_C.toFixed(1)}`} style={{ transition: "stroke-dasharray 0.5s ease" }} />}
+            </svg>
+            <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+              <PawPrint size={20} weight="fill" color={ringColor} />
+              <div style={{ fontFamily: "var(--font-m)", fontSize: 38, fontWeight: 600, letterSpacing: "-0.05em", color: live ? "var(--text)" : "var(--muted)", lineHeight: 1, marginTop: 1, fontVariantNumeric: "tabular-nums" }}>{current}</div>
+              <div style={{ fontFamily: "var(--font-m)", fontSize: 8, letterSpacing: "0.18em", textTransform: "uppercase", color: "var(--muted)", marginTop: 3 }}>{current === 1 ? "day" : "days"}</div>
+            </div>
+          </div>
+        </div>
+        <div style={{ textAlign: "center", fontFamily: "var(--font-h)", fontSize: 12.5, fontWeight: 600, color: atRisk ? hot : "var(--muted)", marginBottom: 14 }}>{todayLogged ? "Today is on the trail ✓" : atRisk ? "Today is still unlogged" : "Log anything today to start the trail"}</div>
+
+        {!todayLogged && <button onClick={onNoSpend} style={{ width: "100%", padding: "13px", border: "none", borderRadius: 14, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, cursor: "pointer", marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}><PawPrint size={15} weight="fill" />Nothing spent today — mark it</button>}
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <div style={tile}><div style={tileCap}>Longest</div><div style={tileVal}>{longest}</div></div>
+          <div style={tile}><div style={tileCap}>Shields</div><div style={tileVal}>{Array.from({ length: FREEZE_CAP }, (_, i) => <Shield key={i} size={15} weight={i < freezesHeld ? "fill" : "regular"} color={i < freezesHeld ? "var(--acc)" : "var(--border)"} />)}</div></div>
+          <div style={tile}><div style={tileCap}>Logged / 28</div><div style={tileVal}>{logged28}</div></div>
+        </div>
+
+        {/* Milestone ladder — the markers behind you, and the next one live. */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7 }}>
+            <span style={{ fontFamily: "var(--font-m)", fontSize: 8.5, letterSpacing: "0.16em", textTransform: "uppercase", color: "var(--muted)" }}>Markers</span>
+            {nextMilestone ? <span style={{ fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, color: hot }}>{toGo} {toGo === 1 ? "day" : "days"} to {nextMilestone}</span> : <span style={{ fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, color: "var(--gold)" }}>Every marker passed</span>}
+          </div>
+          <div style={{ display: "flex", gap: 5, overflowX: "auto", scrollbarWidth: "none", paddingBottom: 2 }}>
+            {MILESTONES.map(m => {
+              const done = current >= m, next = m === nextMilestone;
+              return <span key={m} style={{ flexShrink: 0, minWidth: 40, textAlign: "center", padding: "6px 9px", borderRadius: 11, fontFamily: "var(--font-m)", fontSize: 11, fontWeight: 600, fontVariantNumeric: "tabular-nums", background: done ? withAlpha(hot, 0.16) : next ? "transparent" : "var(--bg)", border: next ? `1.5px dashed ${hot}` : "1.5px solid transparent", color: done ? hot : next ? hot : "var(--muted)" }}>{m}</span>;
+            })}
+          </div>
+        </div>
+
+        {/* Four weeks of ground behind you — weekday-aligned, today ringed. */}
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontFamily: "var(--font-m)", fontSize: 8.5, letterSpacing: "0.16em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 7 }}>Last 4 weeks</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 4 }}>
+            {DOW.map((d, i) => <div key={i} style={{ textAlign: "center", fontFamily: "var(--font-m)", fontSize: 8, color: "var(--muted)", opacity: 0.7 }}>{d}</div>)}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
+            {cells.map(c => {
+              if (c.pad) return <div key={c.key} style={{ aspectRatio: "1" }} />;
+              const isToday = c.date === todayKey;
+              const bg = c.state === "active" ? hot : c.state === "frozen" ? "var(--acc)" : "var(--bg)";
+              const fg = c.state === "active" ? (dm ? "#2B2113" : "#7A5A00") : c.state === "frozen" ? "#fff" : "var(--muted)";
+              return <div key={c.key} title={`${c.date} — ${c.state}`} style={{ aspectRatio: "1", borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-m)", fontSize: 9, fontWeight: 600, fontVariantNumeric: "tabular-nums", background: bg, color: fg, border: c.state === "missed" ? "1px dashed var(--border)" : "1px solid transparent", outline: isToday ? `2px solid ${hot}` : "none", outlineOffset: 1.5, opacity: c.state === "missed" ? 0.75 : 1 }}>{c.state === "frozen" ? <Shield size={11} weight="fill" color="#fff" /> : Number(c.date.slice(8))}</div>;
+            })}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 9 }}>
+            {[["Logged", hot, false], ["Shielded", "var(--acc)", false], ["Missed", "var(--bg)", true]].map(([lbl, col, dash]) => <span key={lbl} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: "var(--font-h)", fontSize: 10, color: "var(--muted)" }}><span style={{ width: 9, height: 9, borderRadius: 3, background: col, border: dash ? "1px dashed var(--border)" : "none" }} />{lbl}</span>)}
+          </div>
+        </div>
+
+        <p style={{ fontSize: 10.5, color: "var(--muted)", fontFamily: "var(--font-b)", lineHeight: 1.55, margin: 0 }}>Any log keeps the day — expense, income, transfer, settlement, or a "no spend" mark. Every 7 straight days earns a shield (max {FREEZE_CAP}); a shield quietly covers a day you miss. Backfilling a missed day's transactions repairs it retroactively.</p>
+      </div>
+    </div>
+  );
+}
+
 function TerrainHero({ trail, balance, income, expense, runway: r }) {
   const n = trail.length;
   // The DRAWN ridgeline is lightly eased (endpoints pinned, so it still starts at
@@ -775,14 +915,31 @@ function VoiceAdd({ onParsed, accent = "var(--neg)", compact = false }) {
   return <div style={{ marginBottom: 14 }}><button onClick={listening ? stop : start} style={{ width: "100%", padding: "10px 14px", border: `1.5px dashed ${listening ? "var(--neg)" : accent}`, borderRadius: 10, background: listening ? "#E07A5F12" : "var(--card)", color: listening ? "var(--neg)" : accent, fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}><Microphone size={14} weight={listening ? "fill" : "regular"} />{listening ? "Listening… tap to stop" : "Voice add — say e.g. \"300 coffee bank\""}</button>{error && <div style={{ fontSize: 11, color: "var(--neg)", marginTop: 4, fontFamily: "var(--font-h)" }}>{error}</div>}</div>;
 }
 
-function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], onQuickLog = null, autoRules = [], catModel = null, onLearnCategory = () => {}, wallets: aw = WALLETS, cloudinaryEnabled = false, splitPeople = [], onAddSplits = () => {}, defaults = {} }) {
+function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, onAddExpense: oE, onAddIncome: oI, onAddTransfer: oT, onAddRec: oR, onError: showT = () => {}, patterns = [], onQuickLog = null, autoRules = [], catModel = null, wallets: aw = WALLETS, cloudinaryEnabled = false, splitPeople = [], onAddSplits = () => {}, defaults = {} }) {
   const _AD = (() => { try { return JSON.parse(sessionStorage.getItem("nomad-add-draft") || "{}"); } catch { return {}; } })();
   const [type, sType] = useState(_AD.type || "expense"), [amt, sAmt] = useState(_AD.amt || "0"), [catId, sCat] = useState(_AD.catId || defaults.categoryId || cats[0]?.id || ""), [srcId, sSrc] = useState(isrc[0]?.id || ""), [wid, sW] = useState(_AD.wid || defaults.walletId || "bank"), [iwid, sIW] = useState("bank"), [tFrom, sTF] = useState("bank"), [tTo, sTT] = useState("upi_lite"), [date, sDate] = useState(_AD.date || localDateKey()), [note, sNote] = useState(_AD.note || ""), [fixed, sFixed] = useState(false);
   // Smart defaults can land AFTER mount (history loads async, so a cold start
   // straight onto the Add tab computes them from an empty list). Adopt a late
   // suggestion only while the field still holds the auto-picked value — the
   // moment the user (or a draft/chip/voice parse) changes it, hands off for good.
-  const autoSel = useRef({ cat: _AD.catId ? null : (defaults.categoryId || cats[0]?.id || ""), wid: _AD.wid ? null : (defaults.walletId || "bank") });
+  // `autoSel` tracks the value each field was AUTO-given, so a later suggestion
+  // may replace it while a value you chose yourself is never touched. A null
+  // means "handed off — the user owns this field now".
+  //
+  // The draft has to carry that flag, and this is where autocategorization was
+  // dying. The restored draft was read as "the user picked this category",
+  // because the only signal available was that `_AD.catId` existed — but the
+  // draft effect below writes on EVERY render, so a catId lands in
+  // sessionStorage the instant the Add tab first paints, untouched. Leave the
+  // tab and come back (AddPage is conditionally rendered, so that is a remount)
+  // and autocategorize was switched off for the rest of the session: type
+  // "zomato", nothing happens, no way to tell why. The flag is now persisted
+  // beside the value, so only a real pick hands off. Older drafts, which have
+  // no flag, keep the old conservative reading.
+  const autoSel = useRef({
+    cat: draftAutoPick(_AD.aCat, _AD.catId, defaults.categoryId || cats[0]?.id || ""),
+    wid: draftAutoPick(_AD.aWid, _AD.wid, defaults.walletId || "bank"),
+  });
   // What the learned model last filled in, and why. `filledCat` is the correction
   // signal: if the category you SAVE differs from what we put there, that is you
   // disagreeing, and it is worth far more than an ordinary example.
@@ -1034,7 +1191,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
   // for the current type's wallet/category context and become stale otherwise.
   useEffect(() => { sItemsPreview(null); sFixed(false); sSplitOn(false); sSplitSel([]); sSplitNew(""); sSplitAll(false); }, [type]);
   useEffect(() => { const c = fxCur.trim().toUpperCase(); if (c.length !== 3 || c === "INR") { setFxRate(null); setFxDate(null); return; } setFxFetching(true); getExchangeRate(c, date).then(r => { setFxRate(r); setFxDate(getRateMeta(c, date)?.date || null); setFxFetching(false); }).catch(() => { setFxRate(null); setFxDate(null); setFxFetching(false); }); }, [fxCur, date]);
-  useEffect(() => { try { sessionStorage.setItem("nomad-add-draft", JSON.stringify({ type, amt, catId, wid, date, note })); } catch { /* ignore storage errors */ } }, [type, amt, catId, wid, date, note]);
+  useEffect(() => { try { sessionStorage.setItem("nomad-add-draft", JSON.stringify({ type, amt, catId, wid, date, note, aCat: autoSel.current.cat, aWid: autoSel.current.wid })); } catch { /* ignore storage errors */ } }, [type, amt, catId, wid, date, note]);
   const tc = type === "expense" ? "#E07A5F" : type === "income" ? "#6BAA75" : type === "transfer" ? "#7B8CDE" : "#A78BFA";
   const submit = async () => {
     if (submitting) return;
@@ -1077,7 +1234,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       if (type === "expense") {
         const txId = uid();
         if (isFX) saveCurrencyMeta(txId, fxCur, a, fxRate);
-        txOk = oE({ id: txId, amount: inrAmt, categoryId: catId, date, note: fixed ? markFixedNote(note) : note, walletId: wid, recurring: fixed || undefined, ...(rUrl ? { receipt_url: rUrl } : {}) }) !== false;
+        txOk = oE({ id: txId, amount: inrAmt, categoryId: catId, date, note: fixed ? markFixedNote(note) : note, walletId: wid, recurring: fixed || undefined, ...(rUrl ? { receipt_url: rUrl } : {}) }, { wrongCategoryId: filledCat.current && filledCat.current !== catId ? filledCat.current : null }) !== false;
         if (txOk && splitOn && splitSel.length > 0) {
           // Equal shares across you + friends; you keep shares[0] so any odd
           // paise from rounding lands on you, never on a friend's IOU.
@@ -1097,7 +1254,11 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
       // for more. Learn the RAW note (not the fixed-marker version) so the
       // tokens match what will be typed next time.
       if (type === "expense") {
-        onLearnCategory({ note, categoryId: catId, walletId: wid, amount: inrAmt, ...(filledCat.current && filledCat.current !== catId ? { wrongCategoryId: filledCat.current } : {}) });
+        // The labelled example itself is learned inside addE, so that every
+        // path that writes an expense teaches the model, not just this form.
+        // What is local to the form is the CORRECTION — it rides along with the
+        // write above as `wrongCategoryId`.
+        //
         // Re-arm auto-fill for the NEXT entry: catId survives a save, so without
         // this a single manual pick would switch auto-categorization off for the
         // rest of the session.
@@ -1788,9 +1949,9 @@ function Events({ events: evs, expenses: ex, splits: sp, settlements: stl, categ
     // has been paid. The old derivation needed a separate reconciliation for
     // each, and a written-off IOU kept showing as an outstanding balance that
     // SETTLE UP proposed a transfer for forever.
-    const grpExpIds = new Set(eExps.map(e => e.id));
+    const grpExpIds = eventExpenseKeys(ex, sel.id);
     const eStl = isGroup ? (stl || []).filter(s => s.eventId === sel.id && s.groupId && grpExpIds.has(s.groupId)) : [];
-    const evExpIous = isGroup ? sp.filter(s => s.eventId === sel.id && s.groupId && grpExpIds.has(s.groupId) && !s.deleted_at) : [];
+    const evExpIous = isGroup ? eventExpenseIous(sp, grpExpIds, sel.id) : [];
     // Per person, YOUR side of the ledger: + means they owe you.
     const iouNetOf = isGroup ? Object.fromEntries(allParts.filter(p => p !== "You").map(p => {
       const pl = p.toLowerCase();
@@ -2037,12 +2198,21 @@ export default function Nomad() {
   // conclude it is broken — while the labelled examples needed to make it good
   // have been sitting in `ex` the whole time. Explicit Settings rules are folded
   // in on top as strong priors so migrating never loses one.
+  //
+  // The backfill waits for EXPENSES, not merely for `loaded`. `loaded` flips on
+  // the localStorage paint, and on a fresh device the Supabase pull lands after
+  // it — so the old guard (`!ex.length && !autoRules.length` → return, anything
+  // else → latch) would seed a model from a couple of Settings rules, mark the
+  // job done, and never look at the history that arrived a moment later. The
+  // user then has a model that knows three keywords and nothing about the
+  // hundreds of expenses it was supposed to learn from. Rules are folded in
+  // when the real backfill runs; they also keep working as a hard override in
+  // the note handler regardless, so nothing is lost by waiting.
   const catSeedRef = useRef(false);
   useEffect(() => {
-    if (!loaded || catSeedRef.current) return;
-    if (modelSize(catModel) > 0) { catSeedRef.current = true; return; }
-    if (!ex.length && !autoRules.length) return;
+    if (!loaded || catSeedRef.current || !ex.length) return;
     catSeedRef.current = true;
+    if (modelSize(catModel) > 0) return; // a persisted model already carries this history
     sCatModel(seedFromRules(buildFromHistory(ex, { validCategoryIds: new Set(cats.map(c => c.id)) }), autoRules));
   }, [loaded, ex, autoRules, cats, catModel]);
   // Every saved expense is a labelled example. `wrongCategoryId` (set by the Add
@@ -2928,7 +3098,20 @@ export default function Nomad() {
   // (and store a stale balBefore). Callers thread the net effect of the
   // batch entries already accepted so each one sees the balance the previous
   // ones left behind — as if they'd been typed one at a time.
-  const addE = (data, { balanceDelta = 0, silent = false } = {}) => {
+  // EVERY saved expense is a labelled example, so the learning lives HERE, not
+  // in the Add form. It used to sit in AddPage's submit, which meant the model
+  // only ever saw expenses typed into that one form — quick-add taps, event and
+  // bill-split expenses, receipt line items, CSV imports and "mark bill paid"
+  // all wrote real (note → category) pairs and taught it nothing. The doc said
+  // "every saved expense teaches it"; only one path did.
+  //
+  // `wrongCategoryId` is the correction signal, passed by the Add form when you
+  // saved a category different from the one it filled in for you. It is worth
+  // far more than an ordinary example, which is why it has to ride along with
+  // the write instead of being learned separately (learning twice would count
+  // the same expense twice).
+  const addE = (data, { balanceDelta = 0, silent = false, wrongCategoryId = null } = {}) => {
+    const learnFrom = (rec) => { if (rec.categoryId) learnCategory({ note: rec.note, categoryId: rec.categoryId, walletId: rec.walletId, amount: rec.amount, ...(wrongCategoryId && wrongCategoryId !== rec.categoryId ? { wrongCategoryId } : {}) }); };
     const amt = roundMoney(data.amount);
     if (amt <= 0) { showT("Enter a valid amount", "error"); return false }
     if (amt > 10000000) { showT("Amount too large (max ₹1 crore)", "error"); return false }
@@ -2937,6 +3120,7 @@ export default function Nomad() {
       const rec = { id: uid(), type: "expense", ...data, amount: amt, walletId: "__tracked__", created_at: new Date().toISOString() };
       sEx(p => [rec, ...p]);
       sbUpsert("expenses", [toSB(rec, COLS.expenses)]);
+      learnFrom(rec);
       showT(online ? "Expense tracked" : "Expense saved offline", "success");
       return true;
     }
@@ -2956,6 +3140,7 @@ export default function Nomad() {
     const rec = { id: uid(), type: "expense", ...data, amount: amt, balBefore: b, created_at: new Date().toISOString() };
     sEx(p => [rec, ...p]);
     sbUpsert("expenses", [toSB(rec, COLS.expenses)]);
+    learnFrom(rec);
     dance();
     if (budgets[data.categoryId] > 0) { const cm = localDateKey().slice(0, 7); const prev = ex.filter(e => e.categoryId === data.categoryId && mk(e.date) === cm && !isTrackedExp(e)).reduce((s, e) => s + e.amount, 0); const tot = prev + amt; const lim = budgets[data.categoryId]; const cn = cats.find(c => c.id === data.categoryId)?.name || data.categoryId; if (tot >= lim) { showT(`${cn} budget exceeded! ${fmt(tot)} / ${fmt(lim)}`, "error"); sNotifs(pushNotifications([{ id: `budget-${data.categoryId}-${cm}`, kind: "budget", title: `${cn} budget exceeded`, body: `${fmt(tot)} spent of a ${fmt(lim)} limit this month. Tap to adjust.`, meta: { go: "budget" } }])); } else if (tot >= lim * 0.8) showT(`${cn} at ${Math.round(tot / lim * 100)}% of budget (${fmt(lim)})`, "info"); }
     if (!silent) showT(online ? "Expense added" : "Expense saved offline", "success");
@@ -3167,9 +3352,12 @@ export default function Nomad() {
   // partial event settle instead of stranding it.
   const settleEventNet = (eventId, name, wid, payAmt, opts = {}) => {
     const remOf = s => roundMoney(s.amount - stl.filter(x => x.splitId === s.id).reduce((t, x) => t + settlementNetAmount(x), 0));
-    const nameLc = String(name || "").toLowerCase();
-    const expIds = new Set(ex.filter(e => e.eventId === eventId && !e.deleted_at).map(e => e.id));
-    const items = sp.filter(s => s.eventId === eventId && (s.name || "").toLowerCase() === nameLc && s.groupId && expIds.has(s.groupId) && !s.deleted_at && !s.settled && !s.skipped).map(s => ({ s, rem: remOf(s) })).filter(x => x.rem > 0.005);
+    // eventExpenseKeys, not a set of expense ids: the Bill-split sheet stamps a
+    // fresh uid on the expense AND its IOUs, so an id-only scope silently
+    // dropped every bill-split IOU and this handler refused a row the wallet
+    // was showing as pending.
+    const keys = eventExpenseKeys(ex, eventId);
+    const items = eventExpenseIous(sp, keys, eventId, name).filter(s => !s.settled && !s.skipped).map(s => ({ s, rem: remOf(s) })).filter(x => x.rem > 0.005);
     if (!items.length) { showT(`No pending IOUs with ${name} in this event`, "info"); return false; }
     const net = roundMoney(items.reduce((t, x) => t + (x.s.direction === "owed" ? x.rem : -x.rem), 0));
     const hasPayAmt = payAmt != null && payAmt !== "";
@@ -4082,9 +4270,12 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
       {tab === "history" && <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "12px 0 16px", scrollbarWidth: "none" }}><button onClick={() => { sFm("all"); sHCalDay(null); }} style={{ padding: "7px 16px", borderRadius: 20, fontSize: 12, fontFamily: "var(--font-h)", border: `1.5px solid ${fm === "all" ? "var(--neg)" : "var(--border)"}`, background: fm === "all" ? "var(--neg)" : "var(--card)", color: fm === "all" ? "#fff" : "var(--muted)", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 500 }}>All</button>{allM.map(m => <button key={m} onClick={() => { sFm(m); sHCalDay(null); }} style={{ padding: "7px 16px", borderRadius: 20, fontSize: 12, fontFamily: "var(--font-h)", border: `1.5px solid ${fm === m ? "var(--pos)" : "var(--border)"}`, background: fm === m ? "var(--pos)" : "var(--card)", color: fm === m ? "#fff" : "var(--muted)", cursor: "pointer", whiteSpace: "nowrap", fontWeight: 500 }}>{ml(m)}</button>)}</div>}
 
       {tab === "dashboard" && <div className="pe">
-        <TerrainHero trail={balTrail} balance={mBal} income={tI} expense={tE} runway={runway} />
-        <div style={{ fontFamily: "var(--font-m)", fontSize: 9, letterSpacing: "0.26em", textTransform: "uppercase", color: "var(--muted)", margin: "12px 0 8px", textAlign: "left" }}>What you carry</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginBottom: 12 }}>{(() => { const tot = wallets.reduce((s, x) => s + Math.max(0, wBal[x.id] || 0), 0); return wallets.map(w => { const b = roundMoney(wBal[w.id] || 0); const share = tot > 0 && b > 0 ? Math.min(100, Math.round(b / tot * 100)) : 0; const v = walletVerify[w.id] || { state: "new" }; const cfg = { ok: { t: "✓ Verified", warn: false }, stale: { t: "Check", warn: true }, drift: { t: "Drift", warn: true }, new: { t: "Verify", warn: false } }[v.state]; const vTitle = v.state === "drift" ? `Last check was off by ${fmt(Math.abs(v.last.gap))} — tap to reconcile & find the missing entry` : v.state === "stale" ? `${v.newTx ? v.newTx + " new txn" + (v.newTx === 1 ? "" : "s") : v.days + "d"} ${v.last ? "since last verified" : "logged — never verified"} — tap to reconcile` : v.state === "ok" ? `Verified ${v.last.date}` : "Never verified — tap to set your real balance"; const ab = Math.abs(b), bi = Math.floor(ab), bd = ab - bi; const wk = wWeek[w.id] || 0, prior = roundMoney(b - wk); const tPct = Math.abs(wk) > 0.5 && prior > 1 ? Math.min(999, Math.max(-999, Math.round(wk / prior * 100))) : null; const lvl = 56 - (Math.max(share, 4) / 100) * 48; const ridge = `M0,${(lvl + 2).toFixed(1)} Q18,${(lvl - 4).toFixed(1)} 35,${(lvl + 1).toFixed(1)} Q55,${(lvl + 5).toFixed(1)} 70,${(lvl - 1).toFixed(1)} Q88,${(lvl - 5).toFixed(1)} 100,${(lvl + 2).toFixed(1)}`; return <div key={w.id} onClick={() => { hapticLight(); sCalW(w); }} title={vTitle} className="card-hover" style={{ position: "relative", borderRadius: 18, padding: "10px 11px 8px", display: "flex", flexDirection: "column", cursor: "pointer", overflow: "hidden", textAlign: "left", background: dm ? "rgba(255,255,255,0.055)" : "rgba(255,255,255,0.5)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: `1px solid ${dm ? "rgba(255,255,255,0.09)" : "rgba(255,255,255,0.75)"}`, boxShadow: dm ? "0 8px 20px -14px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.06)" : "0 8px 20px -14px rgba(26,26,46,0.25), inset 0 1px 0 rgba(255,255,255,0.8)" }}>{b > 0 && <svg viewBox="0 0 100 60" preserveAspectRatio="none" aria-hidden="true" style={{ position: "absolute", left: -2, right: -2, bottom: -1, width: "calc(100% + 4px)", height: 46, zIndex: 0 }}><path d={`${ridge} L100,60 L0,60 Z`} fill={w.color} fillOpacity={dm ? "0.16" : "0.13"} /><path d={ridge} fill="none" stroke={w.color} strokeOpacity="0.4" strokeWidth="1.2" /></svg>}{tPct !== null && tPct !== 0 && <span style={{ position: "absolute", top: 8, right: w.id === "cash" ? 24 : 9, zIndex: 2, fontFamily: "var(--font-m)", fontSize: 8.5, fontWeight: 600, color: tPct > 0 ? "var(--pos)" : "var(--neg)" }} title="Net movement, last 7 days">{tPct > 0 ? "▴" : "▾"}{Math.abs(tPct)}%</span>}{w.id === "cash" && <button onClick={e => { e.stopPropagation(); sRecountW(w); }} title="Count cash" style={{ position: "absolute", top: 5, right: 5, background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12, padding: 2, lineHeight: 1, zIndex: 2 }}>⟳</button>}<div style={{ position: "relative", zIndex: 1, minWidth: 0 }}><span style={{ width: 24, height: 24, borderRadius: 8, background: `${tint(w.color, "24")}`, outline: `1px dashed ${tint(w.color, "59")}`, outlineOffset: 2, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 6 }}><DI2 id={w.id} accent={w.color} size={13} /></span><div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 9, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.name}</div><div style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontSize: 14.5, fontWeight: 500, letterSpacing: "-0.05em", color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{b < 0 ? "−₹" : "₹"}{bi.toLocaleString("en-IN")}{bd > 0.004 && <span style={{ fontSize: 9.5, color: "var(--muted)", fontWeight: 600 }}>{bd.toFixed(2).slice(1)}</span>}</div><div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 6, paddingTop: 5, borderTop: "1px solid var(--border)" }}><span style={{ width: 5, height: 5, borderRadius: "50%", background: cfg.warn ? "var(--warn)" : w.color, flexShrink: 0 }} /><span style={{ fontFamily: "var(--font-m)", fontSize: 7.5, letterSpacing: "0.08em", textTransform: "uppercase", color: cfg.warn ? "var(--warn)" : "var(--muted)", fontWeight: cfg.warn ? 600 : 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cfg.t}</span></div></div></div>; }); })()}</div>
+        {/* DUE TODAY — above the hero on purpose. A bill that has to be paid
+            today is the only thing on this screen with a deadline, and it used to
+            sit below the balance readout and the wallet tiles, i.e. below the fold
+            on a phone: you had to scroll past "where you stand" to find out that
+            where you stand is about to change. Nothing else here is time-critical,
+            so nothing else earns the top slot. */}
         {(() => {
           const tod = new Date(), todS = localDateKey(tod), snoozed = (() => { try { return JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); } catch { return {}; } })(), due = rec.filter(r => isRecurringDueToday(r, todS) && !(snoozed[r.id] && snoozed[r.id] > todS));
           // Pay a due bill from the chosen wallet (the per-cycle override). The
@@ -4092,8 +4283,11 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
           // same default again. addE returns false on a cap/validation block —
           // keep the picker open so the user can pick another wallet.
           const payDue = (r, walletId) => { const ok = addE({ amount: r.amount, categoryId: r.categoryId, walletId, date: todS, note: r.name + " (recurring)", recurring: true }); if (ok === false) return; const updated = { ...r, lastPaidDate: todS, lastSkippedDate: null }; sRec(p => p.map(x => x.id === r.id ? updated : x)); sbUpsert("recurring", [toSB(updated, COLS.recurring)], null, getVersion("recurring", r.id) ? { "If-Unmodified-Since": getVersion("recurring", r.id) } : {}); showT(`${r.name} paid from ${wallets.find(w => w.id === walletId)?.name || "wallet"} — ${fmt(r.amount)}`, "success"); sPayRec(null); sPayRecWal(null); };
-          return due.length > 0 && <div style={{ marginBottom: 14 }}>{due.map(r => { const cat = resolveRecCategory(r.categoryId, [RC, recCats], r.categoryName); const wal = wallets.find(w => w.id === r.walletId) || { name: r.walletId }; const picking = payRec === r.id; const selWal = payRecWal || r.walletId; return <div key={r.id} style={{ ...cc, borderLeft: "3px solid var(--neg)", borderRadius: 14, padding: "14px 16px", marginBottom: 8 }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}><Warning size={16} color="var(--neg)" weight="fill" /><div style={{ flex: 1 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{(() => { const od = recurringDaysOverdue(r, todS); return <>{r.name} {od > 0 ? "overdue" : "due today"} — {fmt(r.amount)}{od > 0 ? <span style={{ marginLeft: 6, padding: "2px 6px", borderRadius: 4, background: "var(--danger)", color: "#fff", fontSize: 10, fontWeight: 600 }}>{od}d overdue</span> : null}</>; })()}</div><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{wal.name} → {cat.name}</div></div></div>{picking ? <div><div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: "0.5px", marginBottom: 6 }}>PAID FROM</div><div style={{ display: "flex", gap: 6, marginBottom: 8 }}>{wallets.map(w => { const on = selWal === w.id; return <button key={w.id} onClick={() => sPayRecWal(w.id)} style={{ flex: 1, padding: "8px 4px", borderRadius: 9, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, border: `2px solid ${on ? w.color : "var(--border)"}`, background: on ? tint(w.color, "15") : "var(--card)", cursor: "pointer" }}><DI2 id={w.id} accent={w.neon || w.color} size={15} /><span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: on ? 700 : 500, color: on ? w.color : "var(--muted)" }}>{w.name}</span></button>; })}</div>{isUpiLite(wallets.find(w => w.id === selWal) || {}) && <div style={{ fontSize: 10, color: "#00B4D8", fontFamily: "var(--font-h)", fontWeight: 600, marginBottom: 8 }}>UPI Lite · ₹5000 cap — blocked if short, just pick another.</div>}<div style={{ display: "flex", gap: 6 }}><button onClick={(ev) => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; payDue(r, selWal); ev.currentTarget.disabled = false; }} style={{ flex: 2, padding: "8px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>✓ Confirm paid</button><button onClick={() => { sPayRec(null); sPayRecWal(null); }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Cancel</button></div></div> : <div style={{ display: "flex", gap: 6 }}><button onClick={() => { sPayRec(r.id); sPayRecWal(r.walletId); }} style={{ flex: 1, padding: "8px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>✓ Paid</button><button onClick={(ev) => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; const updated = { ...r, lastSkippedDate: todS }; sRec(p => p.map(x => x.id === r.id ? updated : x)); sbUpsert("recurring", [toSB(updated, COLS.recurring)], null, getVersion("recurring", r.id) ? { "If-Unmodified-Since": getVersion("recurring", r.id) } : {}); showT("Skipped for this cycle", "info") }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Skip</button><button onClick={() => { const snoozeUntil = localDateKey(new Date(Date.now() + 864e5)); const snoozed = JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); snoozed[r.id] = snoozeUntil; localStorage.setItem("nomad-rec-snooze", JSON.stringify(snoozed)); sRec(p => [...p]); showT("Snoozed until tomorrow", "info") }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Snooze</button></div>}</div> })}</div>
+          return due.length > 0 && <div style={{ marginTop: 6, marginBottom: 16 }}>{due.map(r => { const cat = resolveRecCategory(r.categoryId, [RC, recCats], r.categoryName); const wal = wallets.find(w => w.id === r.walletId) || { name: r.walletId }; const picking = payRec === r.id; const selWal = payRecWal || r.walletId; return <div key={r.id} style={{ ...cc, borderLeft: "3px solid var(--neg)", borderRadius: 14, padding: "14px 16px", marginBottom: 8 }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}><Warning size={16} color="var(--neg)" weight="fill" /><div style={{ flex: 1 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{(() => { const od = recurringDaysOverdue(r, todS); return <>{r.name} {od > 0 ? "overdue" : "due today"} — {fmt(r.amount)}{od > 0 ? <span style={{ marginLeft: 6, padding: "2px 6px", borderRadius: 4, background: "var(--danger)", color: "#fff", fontSize: 10, fontWeight: 600 }}>{od}d overdue</span> : null}</>; })()}</div><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{wal.name} → {cat.name}</div></div></div>{picking ? <div><div style={{ fontSize: 10, fontFamily: "var(--font-h)", color: "var(--muted)", fontWeight: 700, letterSpacing: "0.5px", marginBottom: 6 }}>PAID FROM</div><div style={{ display: "flex", gap: 6, marginBottom: 8 }}>{wallets.map(w => { const on = selWal === w.id; return <button key={w.id} onClick={() => sPayRecWal(w.id)} style={{ flex: 1, padding: "8px 4px", borderRadius: 9, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, border: `2px solid ${on ? w.color : "var(--border)"}`, background: on ? tint(w.color, "15") : "var(--card)", cursor: "pointer" }}><DI2 id={w.id} accent={w.neon || w.color} size={15} /><span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: on ? 700 : 500, color: on ? w.color : "var(--muted)" }}>{w.name}</span></button>; })}</div>{isUpiLite(wallets.find(w => w.id === selWal) || {}) && <div style={{ fontSize: 10, color: "#00B4D8", fontFamily: "var(--font-h)", fontWeight: 600, marginBottom: 8 }}>UPI Lite · ₹5000 cap — blocked if short, just pick another.</div>}<div style={{ display: "flex", gap: 6 }}><button onClick={(ev) => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; payDue(r, selWal); ev.currentTarget.disabled = false; }} style={{ flex: 2, padding: "8px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>✓ Confirm paid</button><button onClick={() => { sPayRec(null); sPayRecWal(null); }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Cancel</button></div></div> : <div style={{ display: "flex", gap: 6 }}><button onClick={() => { sPayRec(r.id); sPayRecWal(r.walletId); }} style={{ flex: 1, padding: "8px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>✓ Paid</button><button onClick={(ev) => { if (ev.currentTarget.disabled) return; ev.currentTarget.disabled = true; const updated = { ...r, lastSkippedDate: todS }; sRec(p => p.map(x => x.id === r.id ? updated : x)); sbUpsert("recurring", [toSB(updated, COLS.recurring)], null, getVersion("recurring", r.id) ? { "If-Unmodified-Since": getVersion("recurring", r.id) } : {}); showT("Skipped for this cycle", "info") }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Skip</button><button onClick={() => { const snoozeUntil = localDateKey(new Date(Date.now() + 864e5)); const snoozed = JSON.parse(localStorage.getItem("nomad-rec-snooze") || "{}"); snoozed[r.id] = snoozeUntil; localStorage.setItem("nomad-rec-snooze", JSON.stringify(snoozed)); sRec(p => [...p]); showT("Snoozed until tomorrow", "info") }} style={{ flex: 1, padding: "8px", border: "1.5px solid var(--border)", borderRadius: 8, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Snooze</button></div>}</div> })}</div>
         })()}
+        <TerrainHero trail={balTrail} balance={mBal} income={tI} expense={tE} runway={runway} />
+        <div style={{ fontFamily: "var(--font-m)", fontSize: 9, letterSpacing: "0.26em", textTransform: "uppercase", color: "var(--muted)", margin: "12px 0 8px", textAlign: "left" }}>What you carry</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10, marginBottom: 12 }}>{(() => { const tot = wallets.reduce((s, x) => s + Math.max(0, wBal[x.id] || 0), 0); return wallets.map(w => { const b = roundMoney(wBal[w.id] || 0); const share = tot > 0 && b > 0 ? Math.min(100, Math.round(b / tot * 100)) : 0; const v = walletVerify[w.id] || { state: "new" }; const cfg = { ok: { t: "✓ Verified", warn: false }, stale: { t: "Check", warn: true }, drift: { t: "Drift", warn: true }, new: { t: "Verify", warn: false } }[v.state]; const vTitle = v.state === "drift" ? `Last check was off by ${fmt(Math.abs(v.last.gap))} — tap to reconcile & find the missing entry` : v.state === "stale" ? `${v.newTx ? v.newTx + " new txn" + (v.newTx === 1 ? "" : "s") : v.days + "d"} ${v.last ? "since last verified" : "logged — never verified"} — tap to reconcile` : v.state === "ok" ? `Verified ${v.last.date}` : "Never verified — tap to set your real balance"; const ab = Math.abs(b), bi = Math.floor(ab), bd = ab - bi; const wk = wWeek[w.id] || 0, prior = roundMoney(b - wk); const tPct = Math.abs(wk) > 0.5 && prior > 1 ? Math.min(999, Math.max(-999, Math.round(wk / prior * 100))) : null; const lvl = 56 - (Math.max(share, 4) / 100) * 48; const ridge = `M0,${(lvl + 2).toFixed(1)} Q18,${(lvl - 4).toFixed(1)} 35,${(lvl + 1).toFixed(1)} Q55,${(lvl + 5).toFixed(1)} 70,${(lvl - 1).toFixed(1)} Q88,${(lvl - 5).toFixed(1)} 100,${(lvl + 2).toFixed(1)}`; return <div key={w.id} onClick={() => { hapticLight(); sCalW(w); }} title={vTitle} className="card-hover" style={{ position: "relative", borderRadius: 18, padding: "10px 11px 8px", display: "flex", flexDirection: "column", cursor: "pointer", overflow: "hidden", textAlign: "left", background: dm ? "rgba(255,255,255,0.055)" : "rgba(255,255,255,0.5)", backdropFilter: "blur(14px) saturate(150%)", WebkitBackdropFilter: "blur(14px) saturate(150%)", border: `1px solid ${dm ? "rgba(255,255,255,0.09)" : "rgba(255,255,255,0.75)"}`, boxShadow: dm ? "0 8px 20px -14px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.06)" : "0 8px 20px -14px rgba(26,26,46,0.25), inset 0 1px 0 rgba(255,255,255,0.8)" }}>{b > 0 && <svg viewBox="0 0 100 60" preserveAspectRatio="none" aria-hidden="true" style={{ position: "absolute", left: -2, right: -2, bottom: -1, width: "calc(100% + 4px)", height: 46, zIndex: 0 }}><path d={`${ridge} L100,60 L0,60 Z`} fill={w.color} fillOpacity={dm ? "0.16" : "0.13"} /><path d={ridge} fill="none" stroke={w.color} strokeOpacity="0.4" strokeWidth="1.2" /></svg>}{tPct !== null && tPct !== 0 && <span style={{ position: "absolute", top: 8, right: w.id === "cash" ? 24 : 9, zIndex: 2, fontFamily: "var(--font-m)", fontSize: 8.5, fontWeight: 600, color: tPct > 0 ? "var(--pos)" : "var(--neg)" }} title="Net movement, last 7 days">{tPct > 0 ? "▴" : "▾"}{Math.abs(tPct)}%</span>}{w.id === "cash" && <button onClick={e => { e.stopPropagation(); sRecountW(w); }} title="Count cash" style={{ position: "absolute", top: 5, right: 5, background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12, padding: 2, lineHeight: 1, zIndex: 2 }}>⟳</button>}<div style={{ position: "relative", zIndex: 1, minWidth: 0 }}><span style={{ width: 24, height: 24, borderRadius: 8, background: `${tint(w.color, "24")}`, outline: `1px dashed ${tint(w.color, "59")}`, outlineOffset: 2, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 6 }}><DI2 id={w.id} accent={w.color} size={13} /></span><div style={{ fontFamily: "var(--font-h)", fontWeight: 600, fontSize: 9, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.name}</div><div style={{ fontFamily: "var(--font-m)", fontVariantNumeric: "tabular-nums", fontSize: 14.5, fontWeight: 500, letterSpacing: "-0.05em", color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{b < 0 ? "−₹" : "₹"}{bi.toLocaleString("en-IN")}{bd > 0.004 && <span style={{ fontSize: 9.5, color: "var(--muted)", fontWeight: 600 }}>{bd.toFixed(2).slice(1)}</span>}</div><div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 6, paddingTop: 5, borderTop: "1px solid var(--border)" }}><span style={{ width: 5, height: 5, borderRadius: "50%", background: cfg.warn ? "var(--warn)" : w.color, flexShrink: 0 }} /><span style={{ fontFamily: "var(--font-m)", fontSize: 7.5, letterSpacing: "0.08em", textTransform: "uppercase", color: cfg.warn ? "var(--warn)" : "var(--muted)", fontWeight: cfg.warn ? 600 : 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cfg.t}</span></div></div></div>; }); })()}</div>
         {streakInfo.atRisk && streakInfo.current >= 3 && !streakNudgeGone && new Date().getHours() >= 19 && <div style={{ ...cc, borderLeft: "3px solid var(--warn)", padding: "12px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 10 }}><PawPrint size={18} weight="fill" color="var(--warn)" /><div style={{ flex: 1, minWidth: 0 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>{streakInfo.current}-day streak at risk</div><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>Log today's transactions — or confirm a no-spend day.{streakInfo.freezesHeld > 0 ? ` (${streakInfo.freezesHeld} shield${streakInfo.freezesHeld === 1 ? "" : "s"} in reserve)` : ""}</div></div><button onClick={markNoSpendToday} style={{ padding: "7px 10px", border: "none", borderRadius: 8, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 11, fontWeight: 700, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" }}>No spend ✓</button><button onClick={() => { sStreakNudgeGone(true); try { localStorage.setItem("nomad-streak-nudge", localDateKey()); } catch { /* quota */ } }} style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 14, opacity: 0.5, flexShrink: 0, padding: "0 2px" }}>✕</button></div>}
         {loaded && ex.length === 0 && inc.length === 0 && <div style={{ ...cc, padding: "18px 20px", marginBottom: 14, borderLeft: "3px solid var(--acc)" }}><div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}><HandWaving size={16} weight="fill" />Welcome to NOMAD</div><div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6, marginBottom: 12 }}>Track expenses, income, and recurring bills.<br />Tap <strong>Add</strong> below to log your first transaction.</div><div style={{ display: "flex", gap: 8 }}><button onClick={() => sTab("add")} style={{ flex: 1, padding: "9px", border: "none", borderRadius: 9, background: "var(--neg)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>+ Add Expense</button><button onClick={() => sTab("settings")} style={{ padding: "9px 14px", border: "1.5px solid var(--border)", borderRadius: 9, background: "var(--card)", color: "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Settings</button></div></div>}
 
@@ -4118,7 +4312,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         <div style={{ ...cc, padding: 18, marginBottom: 16, position: "relative", overflow: "hidden" }}><div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "var(--neg)" }} /><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "var(--neg)", marginBottom: 16, letterSpacing: "0.5px", fontWeight: 700 }}>Spending by Category</div>{fltExAll.length === 0 ? <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: 20 }}>No expenses yet</p> : (() => { const t = {}; fltExAll.forEach(e => { t[e.categoryId] = (t[e.categoryId] || 0) + e.amount }); const s = Object.entries(t).sort((a, b) => b[1] - a[1]), mx = s[0]?.[1] || 1; const curM = heroM; const [pY, pM] = curM.split("-").map(Number); const prevM = pM === 1 ? `${pY - 1}-12` : `${pY}-${String(pM - 1).padStart(2, "0")}`; const prevT = {}; exAll.filter(e => mk(e.date) === prevM).forEach(e => { prevT[e.categoryId] = (prevT[e.categoryId] || 0) + e.amount }); return s.map(([cid, total]) => { const c = cats.find(x => x.id === cid) || { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#6366F1", neon: "#818CF8" }; const cExps = fltExAll.filter(e => e.categoryId === cid); const realEx = cExps.filter(e => !e.__settlement); const ctag = realEx.length > 0 && realEx.every(isFix) ? "fixed" : "flexible"; const prevTotal = prevT[cid] || 0; const momPct = prevTotal > 0 ? Math.round((total - prevTotal) / prevTotal * 100) : null; const isDrilled = drillCat === cid; const allTx = isDrilled ? [...cExps].sort((a, b) => (b.date || "").localeCompare(a.date || "")) : []; return <div key={cid} style={{ marginBottom: 12 }}><div onClick={() => sDrillCat(isDrilled ? null : cid)} style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}><span style={{ width: 30, display: "flex", justifyContent: "center" }}><DI2 id={c.id} accent={c.neon || c.color} size={20} /></span><div style={{ flex: 1 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><div style={{ display: "flex", alignItems: "center" }}><span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{c.name}</span><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: ctag === "fixed" ? "var(--acc2)" : "var(--warn)", background: ctag === "fixed" ? "#A78BFA15" : "#FBBF2415", padding: "2px 6px", borderRadius: 4, marginLeft: 6 }}>{ctag === "fixed" ? "FIXED" : "FLEX"}</span><span style={{ fontSize: 9, color: "var(--muted)", marginLeft: 6, fontFamily: "var(--font-h)" }}>{cExps.length} tx</span></div><div style={{ display: "flex", alignItems: "center", gap: 6 }}>{momPct !== null && <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: momPct > 0 ? "var(--neg)" : "var(--pos)", background: momPct > 0 ? "#E07A5F15" : "#6BAA7515", padding: "1px 5px", borderRadius: 3 }}>{momPct > 0 ? "+" : ""}{momPct}% MoM</span>}<span style={{ fontSize: 13, fontFamily: "var(--font-h)", color: "var(--ts)", fontWeight: 500 }}>{fmt(total)}</span></div></div><div style={{ height: 5, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${(total / mx) * 100}%`, background: c.color, borderRadius: 3 }} /></div></div><span style={{ fontSize: 10, color: "var(--muted)" }}>{isDrilled ? "▲" : "▼"}</span></div>{isDrilled && <div style={{ marginLeft: 42, marginTop: 6, padding: "8px 10px", background: "var(--bg)", borderRadius: 8, border: "1px solid var(--border)", maxHeight: 260, overflowY: "auto" }}>{allTx.length === 0 && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: 8 }}>No entries</div>}{allTx.map(tx => <div key={tx.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, paddingBottom: 6, borderBottom: "1px dashed var(--border)" }}><div style={{ flex: 1, minWidth: 0, marginRight: 8 }}><div style={{ fontSize: 11, color: "var(--ts)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-h)", fontWeight: 600 }}>{tx.note || "(no note)"}{tx.__settlement && <span style={{ marginLeft: 5, fontSize: 8, color: "var(--danger)", background: "#D4726A15", padding: "1px 4px", borderRadius: 3, fontWeight: 700 }}>SPLIT</span>}</div><div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 1 }}>{dl(tx.date)}</div></div><span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--text)", fontWeight: 600, flexShrink: 0 }}>{fmt(tx.amount)}</span></div>)}</div>}</div> }) })()}</div>
         </div>}
 
-      {tab === "add" && <div className="pse" style={{ paddingTop: 20 }}><div style={{ display: "flex", gap: 6, marginBottom: 16 }}>{[["log", "Log"], ["iou", "IOU · Splits"]].map(([s, lbl]) => <button key={s} onClick={() => sAddSeg(s)} style={{ flex: 1, padding: "9px", borderRadius: 10, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, cursor: "pointer", border: `1.5px solid ${addSeg === s ? "var(--neg)" : "var(--border)"}`, background: addSeg === s ? "var(--neg)" : "var(--card)", color: addSeg === s ? "#fff" : "var(--muted)" }}>{lbl}</button>)}</div>{addSeg === "log" && <AddPage categories={cats} incomeSources={isrc} recurringCats={recCats} onAddExpense={addE} onAddIncome={addI} onAddTransfer={addT} onAddRec={addRec} onError={showT} patterns={quickPatterns} onQuickLog={quickLog} defaults={addDefaults} autoRules={autoRules} catModel={catModel} onLearnCategory={learnCategory} wallets={wallets} cloudinaryEnabled={!!_creds.cloudName} splitPeople={splitPeopleList} onAddSplits={rows => { if (!rows.length) return; sSp(p => [...p, ...rows]); sbUpsert("splits", rows.map(r => ({ ...toSB(r, COLS.splits), deleted_at: null }))); const tot = roundMoney(rows.reduce((s, r) => s + r.amount, 0)); showT(`${rows.length} IOU${rows.length === 1 ? "" : "s"} created · ${fmt(tot)} to collect`, "success"); }} />}{addSeg === "iou" && <IOUWallet splits={sp} settlements={stl} categories={cats} wallets={wallets} events={evs} fmt={fmt} uid={uid} isUpiLite={isUpiLite} SettleModal={SettleM} onAdd={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); }} onSettle={settle} onSettleNet={settleNet} onSettleEventNet={settleEventNet} focusPerson={iouFocus} onFocusHandled={() => sIouFocus(null)} onSkip={skipSplit} onUnskip={unskipSplit} onDelete={id => delItem(id, "split")} onRenamePerson={(from, to) => { const f = (from || "").trim().toLowerCase(); const t = (to || "").trim(); if (!f || !t) return; const affected = sp.filter(s => !s.deleted_at && (s.name || "").trim().toLowerCase() === f); if (!affected.length) return; sSp(p => p.map(s => (s.name || "").trim().toLowerCase() === f ? { ...s, name: t } : s)); sbUpsert("splits", affected.map(s => toSB({ ...s, name: t }, COLS.splits))); showT(`${affected.length} IOU${affected.length === 1 ? "" : "s"} now under "${t}"`, "success"); }} onError={msg => showT(msg, "error")} />}</div>}
+      {tab === "add" && <div className="pse" style={{ paddingTop: 20 }}><div style={{ display: "flex", gap: 6, marginBottom: 16 }}>{[["log", "Log"], ["iou", "IOU · Splits"]].map(([s, lbl]) => <button key={s} onClick={() => sAddSeg(s)} style={{ flex: 1, padding: "9px", borderRadius: 10, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, cursor: "pointer", border: `1.5px solid ${addSeg === s ? "var(--neg)" : "var(--border)"}`, background: addSeg === s ? "var(--neg)" : "var(--card)", color: addSeg === s ? "#fff" : "var(--muted)" }}>{lbl}</button>)}</div>{addSeg === "log" && <AddPage categories={cats} incomeSources={isrc} recurringCats={recCats} onAddExpense={addE} onAddIncome={addI} onAddTransfer={addT} onAddRec={addRec} onError={showT} patterns={quickPatterns} onQuickLog={quickLog} defaults={addDefaults} autoRules={autoRules} catModel={catModel} wallets={wallets} cloudinaryEnabled={!!_creds.cloudName} splitPeople={splitPeopleList} onAddSplits={rows => { if (!rows.length) return; sSp(p => [...p, ...rows]); sbUpsert("splits", rows.map(r => ({ ...toSB(r, COLS.splits), deleted_at: null }))); const tot = roundMoney(rows.reduce((s, r) => s + r.amount, 0)); showT(`${rows.length} IOU${rows.length === 1 ? "" : "s"} created · ${fmt(tot)} to collect`, "success"); }} />}{addSeg === "iou" && <IOUWallet splits={sp} settlements={stl} categories={cats} wallets={wallets} events={evs} expenses={ex} fmt={fmt} uid={uid} isUpiLite={isUpiLite} SettleModal={SettleM} onAdd={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); }} onSettle={settle} onSettleNet={settleNet} onSettleEventNet={settleEventNet} focusPerson={iouFocus} onFocusHandled={() => sIouFocus(null)} onSkip={skipSplit} onUnskip={unskipSplit} onDelete={id => delItem(id, "split")} onRenamePerson={(from, to) => { const f = (from || "").trim().toLowerCase(); const t = (to || "").trim(); if (!f || !t) return; const affected = sp.filter(s => !s.deleted_at && (s.name || "").trim().toLowerCase() === f); if (!affected.length) return; sSp(p => p.map(s => (s.name || "").trim().toLowerCase() === f ? { ...s, name: t } : s)); sbUpsert("splits", affected.map(s => toSB({ ...s, name: t }, COLS.splits))); showT(`${affected.length} IOU${affected.length === 1 ? "" : "s"} now under "${t}"`, "success"); }} onError={msg => showT(msg, "error")} />}</div>}
       {tab === "events" && <div className="pse" style={{ background: "transparent", padding: 0 }}><Events events={evs} expenses={ex} splits={sp} settlements={stl} categories={cats} wallets={wallets} staleByEvent={staleByEvent} onCreate={ev => { sEvs(p => [...p, ev]); sbUpsert("events", [toSB(ev, COLS.events)]) }} onAddExp={addE} onAddSplit={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); showT(sr.direction === "owe" ? `You owe ${sr.name} ${fmt(sr.amount)}` : `${sr.name} owes you ${fmt(sr.amount)}`, "info") }} onSettleSplit={settle} onSettleEventNet={settleEventNet} onDeleteSplit={id => delItem(id, "split")} onSkipSplit={skipSplit} onUnskipSplit={unskipSplit} onEditSplit={(id, patch) => { sSp(p => p.map(s => s.id === id ? { ...s, ...patch } : s)); sbUpsert("splits", [{ id, ...patch }]); }} onDeleteExp={id => delItem(id, "expense")} onEditExp={(id, patch) => { const exp = ex.find(e => e.id === id); if (!exp) return false; const gid = exp.groupId || exp.id; const oldSplits = sp.filter(s => s.groupId === gid); const oldStls = stl.filter(s => s.groupId === gid); sSp(p => p.filter(s => s.groupId !== gid)); sStl(p => p.filter(s => s.groupId !== gid)); oldSplits.forEach(s => sbDelete("splits", s.id)); oldStls.forEach(s => sbDeleteRow("settlements", s.id)); const wallet = patch.paidBy && patch.paidBy !== "me" ? "__tracked__" : (patch.walletId ?? exp.walletId); const updated = { ...exp, ...patch, walletId: wallet }; sEx(p => p.map(e => e.id === id ? updated : e)); sbUpsert("expenses", [toSB(updated, COLS.expenses)]); return true; }} onMarkDone={id => { sEvs(p => p.map(e => e.id === id ? { ...e, status: "completed" } : e)); sbUpsert("events", [{ id, status: "completed" }]) }} onReopen={id => { sEvs(p => p.map(e => e.id === id ? { ...e, status: "active" } : e)); sbUpsert("events", [{ id, status: "active" }]); showT("Event reopened", "info") }} onUpdate={ev => { sEvs(p => p.map(e => e.id === ev.id ? ev : e)); sbUpsert("events", [toSB(ev, COLS.events)]); showT("Event updated", "success") }} onToast={showT} onDelete={id => { const ev = evs.find(e => e.id === id); if (!ev) return; const evSplits = sp.filter(s => s.eventId === id && !s.deleted_at); const evStls = stl.filter(s => s.eventId === id); sEvs(p => p.filter(e => e.id !== id)); sbDelete("events", id); if (evSplits.length) { sSp(p => p.filter(s => s.eventId !== id)); evSplits.forEach(s => sbDelete("splits", s.id)); } if (evStls.length) { sStl(p => p.filter(s => s.eventId !== id)); evStls.forEach(s => sbDeleteRow("settlements", s.id)); } showUndoToast(ev.name + " deleted", { type: "event", exp: ev, splits: evSplits, settlements: evStls }); }} dm={dm} /></div>}
       {tab === "history" && <div className="pe"><CalendarView compact expenses={exAll} incomes={inc} refunds={settlementsInAsRefunds} transfers={tr} categories={cats.concat(isrc)} wallets={wallets} viewMonth={fm === "all" ? null : fm} onMonthChange={m => { if (fm !== "all" && fm !== m) { sFm(m); sHCalDay(null); } }} selectedDay={hCalDay} onDayClick={d => { sHCalDay(d); if (d) { const dm = d.slice(0, 7); if (fm !== "all" && fm !== dm) sFm(dm); if (typeof document !== "undefined") { const scrollToDay = () => { const el = document.querySelector(`[data-history-date="${d}"]`); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }; requestAnimationFrame(() => requestAnimationFrame(scrollToDay)); } } }} />{(() => { // Counts only the HIDDEN filters behind the Filter button. The search box is
 // right there on screen; counting it made "Filter 1" light up for a plain
@@ -4357,7 +4551,13 @@ const activeCount = [hMinAmt, hMaxAmt, hDateFrom, hDateTo, hType !== "all" ? "x"
           });
           if (!r.ok) return null;
           const spec = await r.json();
-          if (spec?.needsData === false) return null;
+          // "Needs no lookup" is NOT the same as "the query path failed", and
+          // collapsing them into one null is what sent the entire 500-row
+          // ledger along with "Hello". That prompt is ~6k tokens, which is a
+          // whole minute's allowance on a free provider tier — so a greeting
+          // could exhaust every provider at once and come back "All AI
+          // providers failed", on the one question that needed no data at all.
+          if (spec?.needsData === false) return { skipRows: true };
           const clean = sanitizeQuerySpec(spec, {
             categories: cats.map(c => c.name), wallets: wallets.map(w => w.name), sources: isrc.map(s => s.name),
           });
@@ -4382,14 +4582,28 @@ const activeCount = [hMinAmt, hMaxAmt, hDateFrom, hDateTo, hType !== "all" ? "x"
         sChatLoading(true);
         try {
           sChatStage("reading your question…");
-          const grounded = await resolveFacts(q.trim());
-          sChatStage(grounded ? `searching ${queryRows.length} transaction${queryRows.length === 1 ? "" : "s"}…` : "crunching your numbers…");
+          const resolved = await resolveFacts(q.trim());
+          const grounded = resolved?.queryFacts ? resolved : null;
+          const skipRows = !!resolved?.skipRows;
+          sChatStage(grounded ? `searching ${queryRows.length} transaction${queryRows.length === 1 ? "" : "s"}…` : skipRows ? "thinking…" : "crunching your numbers…");
+          // Three payload sizes, smallest first. Grounded: the figures only —
+          // chatQuery already ran over the FULL local ledger. No-lookup: the
+          // summaries, so the model still knows whose finances it is talking
+          // about without a single row. Otherwise: the row dump, which is the
+          // fallback, not the default.
+          const summaryCtx = { today, month: cm, monthIncome, monthExpense, allTimeIncome, allTimeExpense, topCategories: topCats, walletBalances: wBals, recurringBills, recurringCount: activeRec.length, iou, streak: finStreak };
           const ctx = grounded
             ? { today, month: cm, monthIncome, monthExpense, walletBalances: wBals, ...grounded }
-            : { today, month: cm, monthIncome, monthExpense, allTimeIncome, allTimeExpense, expenses: expRows, incomes: incRows, coverage: { from: sentFrom, to: sentTo, total: myEx.length, sent: expRows.length }, topCategories: topCats, walletBalances: wBals, recurringBills, recurringCount: activeRec.length, iou, streak: finStreak };
+            : skipRows
+              ? summaryCtx
+              : { ...summaryCtx, expenses: expRows, incomes: incRows, coverage: { from: sentFrom, to: sentTo, total: myEx.length, sent: expRows.length } };
           const r = await fetch("/api/ai-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q.trim(), context: ctx }) });
           const d = await r.json();
-          sChatMsgs(p => [...p, { role: "assistant", content: r.ok ? d.answer : (d.error || "Something went wrong.") }]);
+          // `trimmed` means the full ledger was refused and the answer came
+          // from the newest rows only — say so rather than letting a partial
+          // answer pass as a complete one.
+          const answer = r.ok && d.trimmed ? `${d.answer}\n\n_(Answered from your most recent transactions — the full ledger was too large for the AI provider just now.)_` : d.answer;
+          sChatMsgs(p => [...p, { role: "assistant", content: r.ok ? answer : (d.error || "Something went wrong.") }]);
         } catch {
           sChatMsgs(p => [...p, { role: "assistant", content: "Network error — check your connection." }]);
         } finally { sChatLoading(false); sChatStage(""); }
@@ -4556,35 +4770,7 @@ const activeCount = [hMinAmt, hMaxAmt, hDateFrom, hDateTo, hType !== "all" ? "x"
       </div>
     </div>}
 
-    {streakOpen && <div onClick={e => { if (e.target === e.currentTarget) sStreakOpen(false); }} style={{ position: "fixed", inset: 0, background: "rgba(44,40,32,0.45)", zIndex: 60, display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
-      <div style={{ background: "var(--card)", borderRadius: "24px 24px 0 0", maxWidth: 430, width: "100%", margin: "0 auto", padding: "22px 20px calc(20px + env(safe-area-inset-bottom))", maxHeight: "84%", overflowY: "auto" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-          <div style={{ fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--text)", letterSpacing: "0.5px" }}>Logging Streak</div>
-          <button onClick={() => sStreakOpen(false)} style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--bg)", border: "none", cursor: "pointer", fontSize: 14, color: "var(--muted)" }}>✕</button>
-        </div>
-        <div style={{ textAlign: "center", marginBottom: 16 }}>
-          <PawPrint size={52} weight="fill" color={streakInfo.atRisk ? (dm ? "#4B5563" : "#D1CDC4") : "var(--warn)"} />
-          <div style={{ fontFamily: "var(--font-h)", fontSize: 40, fontWeight: 800, color: "var(--text)", lineHeight: 1.1 }}>{streakInfo.current}</div>
-          <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600 }}>day streak{streakInfo.atRisk ? " — today still unlogged" : streakInfo.todayLogged ? " — today ✓" : ""}</div>
-          <div style={{ display: "flex", justifyContent: "center", gap: 14, marginTop: 10 }}>
-            <span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-h)" }}>Longest <strong style={{ color: "var(--text)" }}>{streakInfo.longest}</strong></span>
-            <span style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-h)" }}>Shields <strong style={{ color: "var(--text)", display: "inline-flex", alignItems: "center", gap: 1, verticalAlign: "-2px" }}>{streakInfo.freezesHeld > 0 ? Array.from({ length: streakInfo.freezesHeld }, (_, i) => <Shield key={i} size={12} weight="fill" color="var(--acc)" />) : "0"}</strong>/2</span>
-          </div>
-        </div>
-        {!streakInfo.todayLogged && <button onClick={markNoSpendToday} style={{ width: "100%", padding: "12px", border: "none", borderRadius: 12, background: "var(--pos)", color: "#fff", fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, cursor: "pointer", marginBottom: 16 }}>Nothing spent today — keep the trail ✓</button>}
-        {streakInfo.nextMilestone && <div style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><span style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--ts)" }}>Next milestone</span><span style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 700, color: "var(--warn)" }}>{streakInfo.current} / {streakInfo.nextMilestone}</span></div>
-          <div style={{ height: 6, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${Math.min(100, Math.round(streakInfo.current / streakInfo.nextMilestone * 100))}%`, background: "var(--warn)", borderRadius: 3 }} /></div>
-        </div>}
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ fontSize: 11, fontFamily: "var(--font-h)", fontWeight: 600, color: "var(--ts)", marginBottom: 7 }}>Last 4 weeks</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 5 }}>
-            {streakInfo.calendar.map(c => <div key={c.date} title={`${c.date} — ${c.state}`} style={{ aspectRatio: "1", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, background: c.state === "active" ? "var(--warn)" : c.state === "frozen" ? "var(--acc)" : "var(--bg)", border: c.state === "pending" ? "1.5px dashed var(--warn)" : "1px solid var(--border)", color: c.state === "active" ? "#7A5A00" : "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 700 }}>{c.state === "frozen" ? <Shield size={11} weight="fill" color="#fff" /> : Number(c.date.slice(8))}</div>)}
-          </div>
-        </div>
-        <p style={{ fontSize: 10.5, color: "var(--muted)", fontFamily: "var(--font-b)", lineHeight: 1.55, margin: 0 }}>Any log keeps the day — expense, income, transfer, settlement, or a "no spend" confirmation. Every 7 straight days earns a shield (max 2); a shield auto-covers a fully missed day. Backfilling a missed day's transactions repairs it retroactively.</p>
-      </div>
-    </div>}
+    {streakOpen && <StreakSheet info={streakInfo} onNoSpend={markNoSpendToday} onClose={() => sStreakOpen(false)} dm={dm} />}
     {calW && <CalM wallet={calW} currentBal={wBal[calW.id] || 0} onSave={(v, note) => handleCal(calW.id, v, note)} onViewLedger={() => { const wv = calW; sCalW(null); sLedgerW(wv); }} onClose={() => sCalW(null)} />}{recountW && <RecountM wallet={recountW} currentBal={wBal[recountW.id] || 0} onClose={() => sRecountW(null)} />}{ledgerW && (() => { const wid = ledgerW.id; const touches = (it) => it.type === "expense" ? (it.walletId || "upi_lite") === wid : it.type === "income" ? (it.walletId || "bank") === wid : it.type === "transfer" ? (it.fromWallet === wid || it.toWallet === wid) : it.type === "settlement" ? it.walletId === wid : false; const all = [...ex.map(e => ({ ...e, type: "expense" })), ...inc.map(i => ({ ...i, type: "income" })), ...tr.map(t => ({ ...t, type: "transfer" })), ...stl.map(s => ({ ...s, type: "settlement" }))].filter(touches).sort(historySortCompare); const labelFor = (it) => it.type === "expense" ? (cats.find(c => c.id === it.categoryId)?.name || recCats.find(c => c.id === it.categoryId)?.name || "Expense") : it.type === "income" ? (isrc.find(s => s.id === it.sourceId)?.name || "Income") : it.type === "transfer" ? (it.fromWallet === wid ? `Transfer → ${wallets.find(x => x.id === it.toWallet)?.name || "?"}` : `Transfer ← ${wallets.find(x => x.id === it.fromWallet)?.name || "?"}`) : (it.splitName ? `Settle · ${it.splitName}` : "Settlement"); const lastV = walletVerify[wid]?.last; const rowVerified = (it) => { if (!lastV) return false; const precise = it.created_at || it.createdAt || it.updated_at; if (precise) return new Date(precise).getTime() <= lastV.ts; if (!it.date) return false; return it.date <= lastV.date; }; const wD = (it) => { if (it.type === "expense") return (it.walletId || "upi_lite") === wid ? -it.amount : 0; if (it.type === "income") return (it.walletId || "bank") === wid ? it.amount : 0; if (it.type === "transfer") return it.fromWallet === wid ? -it.amount : it.toWallet === wid ? it.amount : 0; if (it.type === "settlement") return it.walletId === wid ? (it.direction === "owed" ? it.amount : -it.amount) : 0; return 0; }; const _txTs = (it) => { const t = it.created_at || it.createdAt || it.updated_at; return t ? new Date(t).getTime() : new Date(it.date + "T23:59:59").getTime(); }; const _cals = (calLog || []).filter(c => c.wId === wid); const _chrono = [...all].sort((a, b) => { const dd = new Date(a.date) - new Date(b.date); if (dd !== 0) return dd; return new Date(a.created_at || a.createdAt || a.updated_at || 0) - new Date(b.created_at || b.createdAt || b.updated_at || 0); }); const _afterById = {}; let _prefix = 0; _chrono.forEach(it => { const _fg = _cals.filter(c => c.ts > _txTs(it)).reduce((s, c) => s + (c.gap || 0), 0); _prefix += wD(it); _afterById[it.id] = (wsb[wid] || 0) - _fg + _prefix; }); const rows = all.map(it => { const d = wD(it); return { id: it.id, label: labelFor(it), date: it.date, note: dispNote(it.note), delta: roundMoney(d), after: roundMoney(_afterById[it.id] ?? 0), verified: rowVerified(it) }; }); const lastVerifyLabel = lastV ? dl(lastV.date) : null; return <LedgerM wallet={ledgerW} rows={rows} curBal={roundMoney(wBal[wid] || 0)} lastVerifyLabel={lastVerifyLabel} onReconcile={() => { const wv = ledgerW; sLedgerW(null); sCalW(wv); }} onClose={() => sLedgerW(null)} />; })()}
     {recEditId && (() => {
       const r = rec.find(x => x.id === recEditId);

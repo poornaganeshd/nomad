@@ -98,6 +98,52 @@ describe("same-gesture dedupe", () => {
     h.hapticLight(); // e.g. gesture/keyboard path with no click event
     expect(vibrateMock).toHaveBeenCalledTimes(1);
   });
+
+  // THE "haptics work sometimes" BUG. The gesture flag used to clear on a
+  // setTimeout(…, 0) — a task queued behind whatever the click handler kicked
+  // off. In this app that is a re-render of a 3k-line monolith, which on a
+  // phone can hold the main thread past the user's next tap, so the flag was
+  // still set when that tap arrived and it produced no buzz at all. Every real
+  // click dispatch must therefore open a new gesture on its own, with no timer
+  // in the loop.
+  it("a second tap buzzes even when the flag reset timer has NOT run yet", () => {
+    const btn = document.createElement("button");
+    document.body.appendChild(btn);
+    btn.click();
+    btn.click(); // same macrotask — the pending setTimeout(0) has not fired
+    expect(vibrateMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("survives a handler that blocks the main thread between taps", () => {
+    const btn = document.createElement("button");
+    btn.addEventListener("click", () => { const end = Date.now() + 5; while (Date.now() < end) { /* busy render */ } });
+    document.body.appendChild(btn);
+    btn.click();
+    btn.click();
+    btn.click();
+    expect(vibrateMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("still collapses one tap into exactly one tick across nested targets", () => {
+    const card = document.createElement("div");
+    card.style.cursor = "pointer";
+    const inner = document.createElement("span");
+    card.appendChild(inner);
+    card.addEventListener("click", () => h.hapticSelection()); // legacy inline call
+    document.body.appendChild(card);
+    inner.click();
+    expect(vibrateMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("finds an interactive ancestor past the old 12-level walk cap", () => {
+    const card = document.createElement("div");
+    card.style.cursor = "pointer";
+    let leaf = card;
+    for (let i = 0; i < 16; i++) { const d = document.createElement("div"); leaf.appendChild(d); leaf = d; }
+    document.body.appendChild(card);
+    leaf.click();
+    expect(vibrateMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("outcome tier", () => {

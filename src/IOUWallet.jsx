@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, memo } from "react";
-import { roundMoney, localDateKey, defaultSettleWalletId, settlementNetAmount, isSuspiciousExcess, settleWritesIncoming } from "./financeUtils";
+import { roundMoney, localDateKey, defaultSettleWalletId, settlementNetAmount, isSuspiciousExcess, settleWritesIncoming, eventExpenseKeyMap } from "./financeUtils";
 import { parseAmount } from "./txParsers";
 import { rankPeople, highlightParts, peopleFromSplits, sameName } from "./peopleSearch";
 import { tint } from "./tint";
@@ -78,7 +78,7 @@ const cardInfoOf = (name, personMap, catMap, fmt) => {
   return { n, up, down, c1, openCount: open.length, sub, dir: up ? "Owes you" : down ? "You owe" : "Settled", amt: Math.abs(n) < 0.5 ? "—" : fmt(Math.abs(n)) };
 };
 
-export default function IOUWallet({ splits = [], settlements = [], categories = [], wallets = [], events = [], fmt = n => "₹" + n, uid = () => Math.random().toString(36).slice(2), isUpiLite = () => false, SettleModal = null, onAdd = () => {}, onSettle = () => {}, onSettleNet = () => {}, onSettleEventNet = () => {}, onSkip = () => {}, onUnskip = () => {}, onDelete = () => {}, onRenamePerson = () => {}, onError = () => {}, focusPerson = null, onFocusHandled = () => {} }) {
+export default function IOUWallet({ splits = [], settlements = [], categories = [], wallets = [], events = [], expenses = [], fmt = n => "₹" + n, uid = () => Math.random().toString(36).slice(2), isUpiLite = () => false, SettleModal = null, onAdd = () => {}, onSettle = () => {}, onSettleNet = () => {}, onSettleEventNet = () => {}, onSkip = () => {}, onUnskip = () => {}, onDelete = () => {}, onRenamePerson = () => {}, onError = () => {}, focusPerson = null, onFocusHandled = () => {} }) {
   const [view, sView] = useState("home");        // home | person
   const [cur, sCur] = useState(null);            // current person name
   const [settleTgt, sSettleTgt] = useState(null);// single split → SettleModal
@@ -154,6 +154,11 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
   const evName = id => model.evMap.get(id)?.name || "Event";
   const remOf = s => roundMoney(s.amount - (paidBy[s.id] || 0));
   const catMap = useMemo(() => new Map(categories.map(c => [c.id, c])), [categories]);
+  // eventId → the group-expense keys of that event, built ONCE per expense
+  // change. The person view re-renders on every 60s background pull and every
+  // toast, and rescanning the whole expense list per group on each of those is
+  // exactly the kind of work that turned into scroll jank here before.
+  const evKeys = useMemo(() => eventExpenseKeyMap(expenses), [expenses]);
   // Name-suggestion pool for the New-IOU field: EVERY person you've had an IOU
   // with, most-recent-first. `people` above is only who the wallet currently
   // shows (general + active events), so someone whose IOUs all sat in a completed
@@ -218,10 +223,16 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
     const groupMap = {}; pm.splits.forEach(s => { const key = s.eventId || "__general__"; if (!groupMap[key]) groupMap[key] = { key, eventId: s.eventId || null, label: s.eventId ? evName(s.eventId) : "General", splits: [], net: 0 }; groupMap[key].splits.push(s); if (!s.settled && !s.skipped) groupMap[key].net += s.direction === "owed" ? remOf(s) : -remOf(s); });
     // canNet decides whether a one-tap net "Settle up" is offered for the group.
     // General → always (onSettleNet). Event → only when every pending IOU is
-    // expense-derived (has a groupId), because onSettleEventNet settles those
-    // alone; a manual-only event IOU would make the net button a no-op, so we
-    // hide it there and let each row settle via its own Record button instead.
-    Object.values(groupMap).forEach(g => { if (!g.eventId) { g.canNet = true; return; } const pend = g.splits.filter(s => !s.settled && !s.skipped); g.canNet = pend.length > 0 && pend.every(s => !!s.groupId); });
+    // expense-derived, because onSettleEventNet settles those alone; a
+    // manual-only event IOU would make the net button a no-op, so we hide it
+    // there and let each row settle via its own Record button instead.
+    //
+    // "Expense-derived" is eventExpenseKeyMap — the SAME rule the handler runs —
+    // not the old `!!s.groupId`. That loose check passed any row carrying a
+    // groupId, including bill-split IOUs whose groupId is a standalone uid the
+    // handler's expense-id scope rejected, so the button offered a settle that
+    // came back "No pending IOUs with X in this event".
+    Object.values(groupMap).forEach(g => { if (!g.eventId) { g.canNet = true; return; } const keys = evKeys.get(g.eventId) || new Set(); const pend = g.splits.filter(s => !s.settled && !s.skipped); g.canNet = pend.length > 0 && pend.every(s => s.groupId != null && keys.has(s.groupId)); });
     const groupList = Object.values(groupMap).sort((a, b) => (a.eventId ? 1 : 0) - (b.eventId ? 1 : 0) || Math.abs(b.net) - Math.abs(a.net));
     // Whole-person settle: offered when 2+ groups still have pending IOUs.
     // Scope = EVERY pending group (manual event IOUs included — App's
