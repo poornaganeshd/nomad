@@ -389,3 +389,40 @@ export class AiProviderError extends Error {
 export function configuredProviderCount(): number {
   return getProviders().length;
 }
+
+/**
+ * Turn the raw provider failures into ONE short line a user can act on.
+ *
+ * "All AI providers failed. Try again later." is the least useful thing this
+ * could say: every cause looks identical from the chat bubble, so a rejected
+ * API key, a hit rate limit and a retired model all read as "the app is
+ * broken", and there is nothing to do but retry forever. The causes want
+ * completely different responses — wait a minute, fix a key in Vercel, change a
+ * model — so the reason goes in the message.
+ *
+ * Provider errors are built from the provider NAME, the HTTP status and the
+ * response BODY (see callProvider). None of those carries the API key, and the
+ * text is hard-truncated regardless, so this is safe to show.
+ */
+export function summarizeProviderErrors(errors: string[]): string {
+  if (!errors || errors.length === 0) return "";
+  const seen: string[] = [];
+  for (const raw of errors) {
+    const e = String(raw || "");
+    const name = e.split(/[ :]/)[0] || "provider";
+    const status = Number(e.match(/HTTP (\d{3})/)?.[1] || 0);
+    let why: string;
+    if (/timeout|timed out|aborted|AbortError/i.test(e)) why = "timed out";
+    else if (status === 401 || status === 403) why = "API key rejected";
+    else if (status === 429) why = "rate limit or quota reached";
+    else if (status === 413 || /context length|too large|too many tokens|maximum context/i.test(e)) why = "request too large";
+    else if (/decommission|not found|does not exist|unsupported model/i.test(e)) why = "model unavailable";
+    else if (status >= 500) why = `provider error (HTTP ${status})`;
+    else if (status) why = `HTTP ${status}`;
+    else if (/empty response/i.test(e)) why = "returned nothing";
+    else why = e.slice(0, 60);
+    const line = `${name}: ${why}`;
+    if (!seen.includes(line)) seen.push(line);
+  }
+  return seen.slice(0, 3).join("; ");
+}

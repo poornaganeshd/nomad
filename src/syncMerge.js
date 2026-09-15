@@ -22,6 +22,11 @@
 //
 // The MERGE returns the orphan list separately so the caller can re-queue
 // only those without colliding with rows that are already in flight.
+//
+// Rule 2c holds only where the server keeps TOMBSTONES. On a hard-deleted
+// table (settlements — sbDeleteRow) a deleted row just disappears, so "missing
+// remotely" is ambiguous and `hardDeleted: true` resolves it with the DB-owned
+// created_at stamp instead of guessing (see `vanished` below).
 
 // Union two row arrays by id, primary rows winning on conflict. Used by
 // load() to merge LIVE React state with the (800ms-debounced) nomad-v5
@@ -35,7 +40,15 @@ export function unionById(primary, secondary) {
   return [...safePrimary, ...extras];
 }
 
-export function mergeRemote({ table, remote, local, isPendingDelete, isPendingUpsert, remoteDeletedIds }) {
+// Has this row ever been to the server? `created_at` is DB-OWNED — it is
+// deliberately absent from COLS (src/dbCols.js), so the client never sends it
+// and it appears on a local row ONLY after that row has come back from
+// Supabase. `createdAt` (camelCase) is the client's own stamp and proves
+// nothing. This is the whole basis for telling "never uploaded" apart from
+// "deleted somewhere else" on a table with no tombstones.
+export const hasSyncedOnce = (row) => !!(row && row.created_at);
+
+export function mergeRemote({ table, remote, local, isPendingDelete, isPendingUpsert, remoteDeletedIds, hardDeleted = false }) {
   const safeRemote = Array.isArray(remote) ? remote : [];
   const safeLocal  = Array.isArray(local)  ? local  : [];
   // IDs the SERVER has soft-deleted (tombstones). A delete made on another
@@ -61,7 +74,21 @@ export function mergeRemote({ table, remote, local, isPendingDelete, isPendingUp
   const localOnlyNotPendingDelete = notRemotelyDeleted.filter(r => !isPendingDelete(table, r.id));
 
   const queued = localOnlyNotPendingDelete.filter(r => isPendingUpsert(table, r.id));
-  const orphans = localOnlyNotPendingDelete.filter(r => !isPendingUpsert(table, r.id));
+  const unqueued = localOnlyNotPendingDelete.filter(r => !isPendingUpsert(table, r.id));
+
+  // HARD-DELETED TABLES (settlements) have no tombstone to read: the row is
+  // simply gone from the server, and "gone" looks identical to "my upsert was
+  // dropped". Guessing "dropped" and healing it is how a settlement deleted on
+  // one device came back: device B still had it locally, found it missing
+  // remotely, re-uploaded it, and the cash reappeared in a wallet with the IOU
+  // already reopened — the money counted twice, on every device.
+  //
+  // `created_at` settles it. A row carrying the DB-owned stamp HAS been on the
+  // server, so its absence now is a delete: drop it locally and never re-upload
+  // it. A row without one never made it there, so it is a genuinely lost write
+  // and still heals. Rows with a queued upsert are untouched either way.
+  const vanished = hardDeleted ? unqueued.filter(hasSyncedOnce) : [];
+  const orphans = hardDeleted ? unqueued.filter(r => !hasSyncedOnce(r)) : unqueued;
 
   // Rows present in BOTH local and remote: the remote copy is normally the
   // server-of-record and wins. EXCEPTION — if this device still has a pending
@@ -79,6 +106,7 @@ export function mergeRemote({ table, remote, local, isPendingDelete, isPendingUp
   return {
     next: [...queued, ...orphans, ...reconciledRemote],
     orphans,
+    vanished,
   };
 }
 

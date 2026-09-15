@@ -74,12 +74,20 @@ function paidAgainst(settlements, splitId) {
  * still live, so both must come from here or they drift apart.
  *
  * @param settlements settlement rows — needed to subtract partial payments.
+ * @param snoozed      { [recurringId]: "YYYY-MM-DD" } — hide a bill until that
+ *                     date. Snooze used to be applied ONLY where the dashboard
+ *                     rendered its due-bill cards, so tapping Snooze silenced
+ *                     one of the three surfaces that state the same claim: the
+ *                     notification centre went on saying the bill was due, and
+ *                     its row deep-linked to a dashboard list the bill was no
+ *                     longer in. It belongs in the derivation, not in one view.
  */
-export function buildReminders(recurring, splits, todayStr, getRecurringDueDateFn, isRecurringDueTodayFn, settlements = []) {
+export function buildReminders(recurring, splits, todayStr, getRecurringDueDateFn, isRecurringDueTodayFn, settlements = [], snoozed = {}) {
   const reminders = [];
   const in3Str = addDays(todayStr, 3);
+  const snoozedPast = (r) => { const until = snoozed && snoozed[r.id]; return typeof until === "string" && until > todayStr; };
 
-  (recurring || []).filter(r => r.active).forEach(r => {
+  (recurring || []).filter(r => r.active && !snoozedPast(r)).forEach(r => {
     const key = "rec-" + r.id;
     if (isRecurringDueTodayFn(r, todayStr)) {
       reminders.push({ id: key, msg: `${r.name} is due`, type: "warn" });
@@ -118,9 +126,9 @@ export function buildReminders(recurring, splits, todayStr, getRecurringDueDateF
  * fired today (tracked per local day in localStorage), marking whatever it
  * returns as shown. Same arguments as `buildReminders`.
  */
-export function checkBillReminders(recurring, splits, todayStr, getRecurringDueDateFn, isRecurringDueTodayFn, settlements = []) {
+export function checkBillReminders(recurring, splits, todayStr, getRecurringDueDateFn, isRecurringDueTodayFn, settlements = [], snoozed = {}) {
   const shown = getTodayShown(todayStr);
-  const fresh = buildReminders(recurring, splits, todayStr, getRecurringDueDateFn, isRecurringDueTodayFn, settlements)
+  const fresh = buildReminders(recurring, splits, todayStr, getRecurringDueDateFn, isRecurringDueTodayFn, settlements, snoozed)
     .filter(r => !shown.has(r.id));
   if (fresh.length > 0) markShown(todayStr, fresh.map(r => r.id));
   return fresh;

@@ -4,7 +4,7 @@ import { getCredentials as _getCreds } from './credentials';
 import { analyzeFood, foodResultToText, foodResultToMacroString } from './foodVision';
 import { IconFlameFilled, IconDropletFilled, IconCalendarMonth, IconCircleCheckFilled, IconMoodHappyFilled, IconMoodNeutralFilled, IconMoodSadFilled, IconMoodAngryFilled, IconBedFilled, IconMoonFilled, IconCameraFilled, IconCalendarWeek, IconPhotoPlus } from '@tabler/icons-react';
 import { Camera, Leaf, Robot } from "@phosphor-icons/react";
-import { hapticSelection } from './haptics';
+import { hapticSelection, hapticsEnabled, setHapticsEnabled } from './haptics';
 import { tint } from "./tint";
 
 /* ============================================================
@@ -1813,21 +1813,31 @@ const Check = ({ on, onClick, teal }) => (
 const ActivityRing = ({ pct, size = 76, strokeWidth = 7, color, trackColor }) => { const r = (size - strokeWidth) / 2; const circ = 2 * Math.PI * r; const offset = circ * (1 - Math.min(pct, 100) / 100); const c = color || (pct >= 100 ? 'var(--green)' : 'var(--amber)'); return (<svg width={size} height={size} style={{ transform: 'rotate(-90deg)', display: 'block' }}><circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={trackColor || 'rgba(255,255,255,0.22)'} strokeWidth={strokeWidth} /><circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={c} strokeWidth={strokeWidth} strokeDasharray={`${circ}`} strokeDashoffset={offset} strokeLinecap="round" style={{ transition: 'stroke-dashoffset 0.25s ease' }} /></svg>); };
 
 /* ---------- Haptic ---------- */
-const prefersReducedMotion = () => {
-    try { return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
-    catch { return false; }
-};
+// ONE toggle, ONE gate. This used to check `prefers-reduced-motion` and a
+// second localStorage key of its own, so Routine could be silent while the rest
+// of the app buzzed — which is exactly what "haptics work sometimes" feels like
+// from the outside. Reduced motion is a VESTIBULAR preference about things
+// moving on screen; it says nothing about touch feedback, and using it to mute
+// the motor took haptics away from everyone who turned it on. The old
+// `form_haptic_off` key is migrated once into the shared setting (below) so an
+// existing opt-out is honoured rather than silently reversed.
 const haptic = () => {
     try {
-        if (prefersReducedMotion()) return;
-        const off = localStorage.getItem('form_haptic_off');
-        if (off === '1') return;
         // Routed through the shared module (not navigator.vibrate directly) so
         // the app-wide toggle and same-gesture dedupe apply — a direct vibrate
         // here would double-buzz against the global delegated tick.
         hapticSelection();
     } catch { }
 };
+
+// One-time migration of Routine's own vibration switch into the app-wide one.
+try {
+    const legacy = localStorage.getItem('form_haptic_off');
+    if (legacy !== null) {
+        if (legacy === '1') setHapticsEnabled(false);
+        localStorage.removeItem('form_haptic_off');
+    }
+} catch { }
 
 /* ---------- Progress dots ---------- */
 const ProgressDots = ({ day, config, mode }) => {
@@ -3255,11 +3265,12 @@ const SettingsScreen = ({ config, setConfig, allData, setAllData, showToast = ()
                                     <div className="lbl">Vibration on tap</div>
                                     <div className="desc">Off saves battery</div>
                                 </div>
-                                <div className={`toggle ${(localStorage.getItem('form_haptic_off') !== '1') ? 'on' : ''}`}
+                                <div className={`toggle ${hapticsEnabled() ? 'on' : ''}`}
                                     onClick={() => {
-                                        const cur = localStorage.getItem('form_haptic_off');
-                                        const turningOff = cur !== '1';
-                                        localStorage.setItem('form_haptic_off', turningOff ? '1' : '0');
+                                        // Same switch as Settings → Haptics. Two independent
+                                        // toggles meant one could silence the other.
+                                        const turningOff = hapticsEnabled();
+                                        setHapticsEnabled(!turningOff);
                                         setConfig(c => ({ ...c })); // force re-render
                                         showToast(turningOff ? 'Vibration off' : 'Vibration on', 'info');
                                     }} />
