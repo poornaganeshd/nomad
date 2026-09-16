@@ -78,6 +78,20 @@ const cardInfoOf = (name, personMap, catMap, fmt) => {
   return { n, up, down, c1, openCount: open.length, sub, dir: up ? "Owes you" : down ? "You owe" : "Settled", amt: Math.abs(n) < 0.5 ? "—" : fmt(Math.abs(n)) };
 };
 
+// Does this settle earn the confetti? A burst celebrates a debt CLEARED BY
+// PAYMENT, and two things disqualify one:
+//   • it left the IOU open — `closes: false`, set by whichever sheet ran the
+//     numbers, since only that sheet knows the entered amount was a partial;
+//   • part of the balance was WRITTEN OFF rather than paid — `forgiveRemainder`,
+//     the same flag the handlers read to close the unpaid tail.
+// The second is the fix for a settle that closed a person while celebrating
+// money that never arrived. Its extreme is the full write-off (amount 0 +
+// write-off ticked): nothing changes hands, the WHOLE balance lands in the
+// write-off ledger — a loss, and the toast says so — and because that path
+// isn't a "partial" (a zeroed amount fails NetSheet's `validEntered` check) it
+// arrived here as `closes: true` and set off fireworks over giving up on ₹300.
+const celebrates = opts => opts.closes !== false && !opts.forgiveRemainder;
+
 export default function IOUWallet({ splits = [], settlements = [], categories = [], wallets = [], events = [], expenses = [], fmt = n => "₹" + n, uid = () => Math.random().toString(36).slice(2), isUpiLite = () => false, SettleModal = null, onAdd = () => {}, onSettle = () => {}, onSettleNet = () => {}, onSettleEventNet = () => {}, onSkip = () => {}, onUnskip = () => {}, onDelete = () => {}, onRenamePerson = () => {}, onError = () => {}, focusPerson = null, onFocusHandled = () => {} }) {
   const [view, sView] = useState("home");        // home | person
   const [cur, sCur] = useState(null);            // current person name
@@ -205,10 +219,12 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
   // `opts.closes` is set by whichever sheet ran the numbers — it is the only
   // thing that knows whether this was a partial — so the confetti tracks "this
   // IOU is cleared", not merely "cash moved". A burst over "₹240 paid, ₹60 still
-  // remaining" celebrated a debt that is still open.
+  // remaining" celebrated a debt that is still open. `celebrates` is the whole
+  // rule and BOTH sheets go through it — see its comment for why a write-off is
+  // closed but never celebrated.
   const sheets = <>
-    {SettleModal && settleTgt && <SettleModal split={settleTgt} remaining={remOf(settleTgt)} wallets={wallets} onConfirm={(wid, amount, date, opts = {}) => { const r = onSettle(settleTgt.id, wid, amount, date, opts); if (r === false) return false; sSettleTgt(null); if (opts.closes !== false) sBurst(b => b + 1); return true; }} onClose={() => sSettleTgt(null)} />}
-    {netSheet && <NetSheet desc={netSheet} wallets={wallets} fmt={fmt} isUpiLite={isUpiLite} onConfirm={(wid, amt, opts = {}) => { const r = netSheet.all ? settleAllWith(netSheet.name, netSheet.groups, wid, amt, opts) : netSheet.eventId ? onSettleEventNet(netSheet.eventId, netSheet.name, wid, amt, opts) : onSettleNet(netSheet.name, wid, amt, null, opts); if (r !== false && opts.closes !== false) sBurst(b => b + 1); return r; }} onClose={() => sNetSheet(null)} />}
+    {SettleModal && settleTgt && <SettleModal split={settleTgt} remaining={remOf(settleTgt)} wallets={wallets} onConfirm={(wid, amount, date, opts = {}) => { const r = onSettle(settleTgt.id, wid, amount, date, opts); if (r === false) return false; sSettleTgt(null); if (celebrates(opts)) sBurst(b => b + 1); return true; }} onClose={() => sSettleTgt(null)} />}
+    {netSheet && <NetSheet desc={netSheet} wallets={wallets} fmt={fmt} isUpiLite={isUpiLite} onConfirm={(wid, amt, opts = {}) => { const r = netSheet.all ? settleAllWith(netSheet.name, netSheet.groups, wid, amt, opts) : netSheet.eventId ? onSettleEventNet(netSheet.eventId, netSheet.name, wid, amt, opts) : onSettleNet(netSheet.name, wid, amt, null, opts); if (r !== false && celebrates(opts)) sBurst(b => b + 1); return r; }} onClose={() => sNetSheet(null)} />}
     {burst > 0 && <Confetti key={burst} onDone={endBurst} />}
   </>;
 
@@ -304,7 +320,9 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
         </div>;
       })}
     </div>; };
-    return <div>
+    // The view divs are children of ONE fragment whose SECOND child is always
+    // `sheets` — see the note above the return of the home view.
+    return <><div>
       <div onClick={() => { sView("home"); sCur(null); }} role="button" tabIndex={0} onKeyDown={kbd(() => { sView("home"); sCur(null); })} aria-label="Back to wallet" style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--muted)", fontSize: 12.5, fontWeight: 700, fontFamily: "var(--font-h)", cursor: "pointer", padding: "7px 12px", marginBottom: 8, borderRadius: 12, background: SURF, boxShadow: NEU_SM }}><CaretLeft size={14} weight="bold" /> Wallet</div>
       <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 16 }}>
         <div style={{ width: 50, height: 50, borderRadius: 16, background: ac, color: ink(ac), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 17, boxShadow: NEU_SM }}>{initials(cur)}</div>
@@ -324,8 +342,7 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
       {curSeg === "personal" && !genGroup && <div style={{ ...neuCard, textAlign: "center", padding: "22px 16px", color: "var(--muted)", fontSize: 12, fontWeight: 600, marginBottom: 14 }}>No personal IOUs with {cur} yet.</div>}
       {curSeg === "events" && evGroups.map(renderGroup)}
       <div style={{ display: curSeg === "personal" ? undefined : "none" }}>{!adding ? <button onClick={() => sAdding(true)} style={{ width: "100%", border: "none", borderRadius: RAD_SM, padding: 13, background: SURF, boxShadow: NEU_SM, color: "var(--ts)", fontFamily: "var(--font-h)", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginTop: 8, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6 }}><Plus size={15} weight="bold" /> Add IOU with {cur}</button> : <AddForm fixedName={cur} {...addFormProps} />}</div>
-      {sheets}
-    </div>;
+    </div>{sheets}</>;
   }
 
   // ── HOME (neumorphic card wallet) ─────────────────────────────────────────
@@ -335,7 +352,21 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
   // shaped while the sheet is open.
   const bkRows = !netBk ? [] : people.map(name => ({ name, net: roundMoney(personMap[name].net), parts: Object.values(personMap[name].parts).map(p => ({ ...p, net: roundMoney(p.net) })).filter(p => Math.abs(p.net) > 0.005) })).filter(r => Math.abs(r.net) > 0.005).sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
 
-  return <div>
+  // `sheets` is rendered OUTSIDE the view div, as the second child of the same
+  // fragment in both branches — the one thing in this component that must keep
+  // its identity across a home ⇄ person navigation. Inside the view divs it sat
+  // at child index 8 in the person tree and index 5 in the home tree, and React
+  // reconciles children by POSITION: every switch unmounted and remounted
+  // Confetti, whose effect then appended 18 fresh particles and restarted its
+  // 1400ms timer. Clearing the trigger (endBurst) stopped a dangling burst from
+  // replaying after it finished, but a burst still IN FLIGHT replayed on the
+  // screen you navigated to, and kept replaying for as long as you kept tapping.
+  // A stable slot fixes that at the cause: the element is created once per
+  // render and lands at the same index whichever view is on screen, so React
+  // updates it in place. (morph/netBk stay inside the home div — they are
+  // home-only, and all four overlays carry distinct z-indexes, so moving
+  // `sheets` past them in DOM order changes no stacking.)
+  return <><div>
     <div style={{ display: "flex", alignItems: "stretch", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
       <div onClick={() => sNetBk(true)} role="button" tabIndex={0} onKeyDown={kbd(() => sNetBk(true))} aria-label="Show net breakdown" style={{ ...neuCard, padding: "9px 15px", display: "inline-flex", flexDirection: "column", justifyContent: "center", cursor: "pointer" }}><span style={{ fontSize: 9, color: "var(--muted)", fontWeight: 700, letterSpacing: ".8px", textTransform: "uppercase" }}>Net · tap</span><b style={{ fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 20, letterSpacing: "-.6px", fontVariantNumeric: "tabular-nums", color: near0 ? "var(--muted)" : net >= 0 ? MINT : CORAL }}>{near0 ? "₹0" : (net >= 0 ? "+" : "−") + fmt(Math.abs(net)).slice(1)}</b></div>
       <div style={{ ...neuCard, padding: "9px 15px", display: "flex", alignItems: "center", gap: 14, fontSize: 12, fontWeight: 700, fontFamily: "var(--font-h)", fontVariantNumeric: "tabular-nums" }}><span style={{ color: MINT, display: "inline-flex", alignItems: "center", gap: 3 }}><ArrowUp size={14} weight="bold" /> {fmt(owedTot)}</span><span style={{ color: CORAL, display: "inline-flex", alignItems: "center", gap: 3 }}><ArrowDown size={14} weight="bold" /> {fmt(oweTot)}</span></div>
@@ -352,10 +383,9 @@ export default function IOUWallet({ splits = [], settlements = [], categories = 
 
     {settledPeople.length > 0 && <details style={{ marginTop: 18 }}><summary style={{ fontSize: 11.5, color: "var(--muted)", cursor: "pointer", fontFamily: "var(--font-h)", fontWeight: 700 }}><CheckCircle size={12} weight="fill" style={{ verticalAlign: "-2px", marginRight: 4 }} />Settled up ({settledPeople.length})</summary><div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 9 }}>{settledPeople.map(name => <div key={name} onClick={() => openPerson(name)} role="button" tabIndex={0} onKeyDown={kbd(() => openPerson(name))} aria-label={`Open ${name}, settled`} style={{ display: "flex", alignItems: "center", gap: 11, padding: "11px 14px", ...neuCard, opacity: 0.72, cursor: "pointer" }}><div style={{ width: 32, height: 32, borderRadius: 11, background: avatarColor(name), color: ink(avatarColor(name)), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontFamily: "var(--font-h)", fontWeight: 800, fontSize: 12, boxShadow: NEU_SM }}>{initials(name)}</div><span style={{ flex: 1, fontFamily: "var(--font-h)", fontSize: 13, fontWeight: 700, color: "var(--ts)" }}>{name}</span><span style={{ fontSize: 11, color: MINT, fontFamily: "var(--font-h)", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 3 }}><CheckCircle size={12} weight="fill" /> settled</span><button onClick={e => { e.stopPropagation(); openMorph(name, e.currentTarget.getBoundingClientRect()); }} aria-label={`New IOU with ${name}`} title="New IOU" style={{ width: 30, height: 30, border: "none", borderRadius: 10, boxShadow: NEU_SM, background: SURF, color: "var(--ts)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}><Plus size={14} weight="bold" /></button></div>)}</div></details>}
 
-    {sheets}
     {morph && <MorphCompose rect={morph.rect} name={morph.name} categories={categories} uid={uid} onAdd={onAdd} onError={onError} suggestions={allPeople} onClose={() => sMorph(null)} />}
     {netBk && <NetBreakdown rows={bkRows} net={net} owedTot={owedTot} oweTot={oweTot} fmt={fmt} onOpenPerson={name => { sNetBk(false); openPerson(name); }} onClose={() => sNetBk(false)} />}
-  </div>;
+  </div>{sheets}</>;
 }
 
 // ── card-morph quick-add (module-level; grows from a rect to full-screen) ──
