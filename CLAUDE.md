@@ -29,7 +29,7 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 
 ## Baselines (verify before/after edits; don't regress)
 
-- **Tests:** 1153 pass / 0 fail, 57 files (`npm test`). E2E: 116 pass, 26 files (`npm run test:e2e`).
+- **Tests:** 1153 pass / 0 fail, 57 files (`npm test`). E2E: 119 pass, 26 files (`npm run test:e2e`).
 - **Lint:** 0 errors / 12 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
 - **Build:** succeeds. Main chunk ~920 kB (gzip ~244 kB) + lazy chunks (Routine, CatDonut/recharts, IOUWallet, CalendarView, CredentialSetup, pdfjs); the >500 kB warning on the main chunk is expected.
@@ -99,7 +99,7 @@ Vitest + jsdom (configured in `vite.config.js` under `test`). Coverage via `@vit
 | `src/txSearch.js` (history search: amount + AND tokens) | `src/__tests__/txSearch.test.js` |
 | `src/tint.js` (colour tinting — hex AND CSS-var safe) | `src/__tests__/tint.test.js` |
 | amount search / search-field state / terrain full-bleed geometry | e2e `18-amount-search-and-hero.spec.js` |
-| settle confetti (fires once, never replays) / refused settle keeps its sheet open / write-off card gating | e2e `19-iou-settle-feedback.spec.js` |
+| settle confetti (fires once, never replays — not on navigation mid-burst, not over a write-off) / refused settle keeps its sheet open / write-off card gating | e2e `19-iou-settle-feedback.spec.js` |
 | `pendingIouNet`/`settlementsBySplit` + the FULL write-off branch of `settleNet`/`settleEventNet` | `src/__tests__/writeOffAll.test.js` |
 | full write-off (amount 0) / event settle-up wallet + write-off / written-off event IOU clears its balance | e2e `20-write-off-and-event-settle.spec.js` |
 | `api/sync.ts` (SSRF host guard + idempotency) | `api/__tests__/sync.test.ts` |
