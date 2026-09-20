@@ -219,6 +219,81 @@ const USE_SYNC_PROXY =
 export const idempotencyKeyFor = (item) =>
   item && item.dedupeKey ? `${item.dedupeKey}:${item.id}` : null;
 
+// A BYODB user's Supabase can lag the client by a column, and PostgREST rejects
+// the WHOLE row when it meets one it doesn't know (PGRST204 = not in the schema
+// cache, 42703 = undefined_column). Treating that as a definitive drop is what
+// made a skipped bill come back: the local state kept the skip, the row never
+// reached the server, and the next load restored it from remote — so the app
+// said "Skipped for this cycle" and then un-skipped itself on refresh.
+//
+// The column does not exist in that database, so a row sent without it stores
+// everything that COULD have been stored. Retrying without it turns a silently
+// lost write into a saved one, and the caller still hears that the schema is
+// behind so it can tell the user to migrate.
+const MISSING_COLUMN_CODES = new Set(["PGRST204", "42703"]);
+const MAX_COLUMN_STRIPS = 6;
+
+// "Could not find the 'type' column of 'recurring' in the schema cache" (PGRST204)
+// `column "type" of relation "recurring" does not exist`                  (42703)
+export const missingColumnFrom = (message) => {
+  if (typeof message !== "string") return null;
+  const m = message.match(/'([^']+)'\s+column/i)
+    || message.match(/column\s+"([^"]+)"/i)
+    || message.match(/'([^']+)'\s+of\s+relation/i);
+  return m ? m[1] : null;
+};
+
+// Drop `col` from every row of a JSON body. Returns null when there is nothing
+// to strip — an unparseable body, a column no row carries, or `id`, which is
+// the row's identity and never the thing a stale schema is missing.
+const stripColumn = (bodyText, col) => {
+  if (typeof bodyText !== "string" || !col || col === "id") return null;
+  let parsed;
+  try { parsed = JSON.parse(bodyText); } catch { return null; }
+  const isArray = Array.isArray(parsed);
+  const rows = isArray ? parsed : [parsed];
+  let touched = false;
+  const next = rows.map(r => {
+    if (!r || typeof r !== "object" || !(col in r)) return r;
+    touched = true;
+    const copy = { ...r };
+    delete copy[col];
+    return copy;
+  });
+  if (!touched) return null;
+  return JSON.stringify(isArray ? next : next[0]);
+};
+
+// Re-send the write with each unknown column removed in turn, so a schema that
+// is several columns behind still lands. Gives up the moment the server says
+// anything other than "I don't have that column" — a NOT NULL violation from a
+// stripped column, for instance, must stay a real rejection.
+const retryWithoutMissingColumns = async (item, firstCode, firstMessage) => {
+  const stripped = [];
+  let body = item.body;
+  let code = firstCode;
+  let message = firstMessage;
+  for (let i = 0; i < MAX_COLUMN_STRIPS; i++) {
+    if (!MISSING_COLUMN_CODES.has(code)) return null;
+    const col = missingColumnFrom(message);
+    if (!col || stripped.includes(col)) return null;
+    const nextBody = stripColumn(body, col);
+    if (nextBody == null) return null;
+    body = nextBody;
+    stripped.push(col);
+    let response;
+    try { response = await performRequest({ ...item, body }); }
+    catch { return null; }
+    if (response.ok) return { response, stripped };
+    if (response.status < 400 || response.status >= 500) return null;
+    let text = null;
+    try { text = await response.clone().text(); } catch { return null; }
+    try { const parsed = JSON.parse(text); code = parsed?.code ?? null; message = parsed?.message ?? null; }
+    catch { return null; }
+  }
+  return null;
+};
+
 const performRequest = (item) => {
   const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timer = ctrl ? setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS) : null;
@@ -300,6 +375,14 @@ export const sendSupabaseRequest = async (request, options = {}) => {
           code = parsed?.code ?? null;
           message = parsed?.message ?? null;
         } catch { /* not JSON */ }
+      }
+      if (MISSING_COLUMN_CODES.has(code)) {
+        const healed = await retryWithoutMissingColumns(item, code, message);
+        if (healed) {
+          dropQueuedByDedupeKey(item.dedupeKey);
+          notifyDrops({ kind: "schema-stale", columns: healed.stripped, item });
+          return { ok: true, queued: false, offline: false, response: healed.response };
+        }
       }
       notifyDrops({ kind: "rejected", status: response.status, item, code, message, body: errorBody });
     }
