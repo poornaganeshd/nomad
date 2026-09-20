@@ -12,6 +12,8 @@
  *   Logging habit     0–20 pts  (days with at least one transaction)
  */
 
+import { getRecurringDueDate, isRecurringDueToday, localDateKey } from "./financeUtils";
+
 /**
  * Filter transactions to a given YYYY-MM month string.
  * @param {Array} txns
@@ -57,13 +59,40 @@ function savingsScore(totalIncome, totalExpense) {
  * @param {string} month      — YYYY-MM
  * @returns {number}
  */
-function billScore(recurring, month) {
+function billScore(recurring, month, asOf) {
   // Only monthly bills are scored — yearly/quarterly/custom bills paid in
   // their due month would otherwise drag the score for every other month.
   const active = recurring.filter(r => r.active !== false && (r.frequency === "monthly" || r.frequency == null));
   if (active.length === 0) return 20; // no monthly bills → mild bonus
-  const paid = active.filter(r => String(r.lastPaidDate || "").slice(0, 7) === month).length;
-  return Math.round((paid / active.length) * 25);
+
+  // What counts is whether the bill has anything OUTSTANDING as of `asOf` —
+  // not whether its lastPaidDate stamp happens to land in `month`.
+  //
+  // The stamp test got this wrong in both directions. A bill due on the 28th
+  // was scored as unpaid for the first 27 days of every month, so the score
+  // opened each month 25 points down and blamed the user for bills that were
+  // not due yet. And paying an overdue bill late — September's rent on 2 Oct —
+  // stamped it into October, so September never got the credit and October got
+  // credit it had not earned.
+  //
+  // `isRecurringDueToday` answers the real question, and answers it the same
+  // way the reminder card does, so the score and the card can no longer
+  // disagree about whether a bill is outstanding.
+  const onTrack = active.filter(r => {
+    const sched = { ...r, active: true, frequency: "monthly" };
+    // Legacy rows carry no startDate/dayOfMonth, so no due date can be derived.
+    // Fall back to the old month-stamp test rather than scoring them blindly.
+    if (!getRecurringDueDate(sched, asOf)) return String(r.lastPaidDate || "").slice(0, 7) === month;
+    return !isRecurringDueToday(sched, asOf);
+  }).length;
+  return Math.round((onTrack / active.length) * 25);
+}
+
+// Last day of a YYYY-MM month, as YYYY-MM-DD.
+function endOfMonth(month) {
+  const [y, m] = String(month).split("-").map(Number);
+  if (!y || !m) return `${month}-28`;
+  return `${month}-${String(new Date(y, m, 0).getDate()).padStart(2, "0")}`;
 }
 
 /**
@@ -114,14 +143,18 @@ function loggingScore(expenses, incomes, month) {
  *   incomes:   Array,
  *   recurring: Array,
  *   month?:    string   YYYY-MM — defaults to current month
+ *   today?:    string   YYYY-MM-DD — injectable clock, for bill-due evaluation
  * }} params
  * @returns {{
  *   score:     number   0–100
  *   breakdown: { savings: number, bills: number, spread: number, logging: number }
  * }}
  */
-export function computeFinanceScore({ expenses = [], incomes = [], recurring = [], month }) {
+export function computeFinanceScore({ expenses = [], incomes = [], recurring = [], month, today = localDateKey() }) {
   const m  = month || currentMonth();
+  // Bills are judged as of a point in time, not a whole month: today for the
+  // live month, month-end for a month already over.
+  const asOf = m < String(today).slice(0, 7) ? endOfMonth(m) : today;
   const mE = forMonth(expenses, m);
   const mI = forMonth(incomes,  m);
 
@@ -129,7 +162,7 @@ export function computeFinanceScore({ expenses = [], incomes = [], recurring = [
   const totalExpense = mE.reduce((s, e) => s + (e.amount || 0), 0);
 
   const savings = savingsScore(totalIncome, totalExpense);
-  const bills   = billScore(recurring, m);
+  const bills   = billScore(recurring, m, asOf);
   const spread  = spreadScore(mE);
   const logging = loggingScore(expenses, incomes, m);
 

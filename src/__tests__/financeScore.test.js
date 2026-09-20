@@ -88,6 +88,31 @@ describe('computeFinanceScore — bills', () => {
     });
     expect(breakdown.bills).toBe(13); // 1/2 * 25 = 12.5 → rounded 13
   });
+
+  // Scheduled bills are judged on whether anything is OUTSTANDING, not on where
+  // the lastPaidDate stamp happens to fall.
+  const bills = (recurring, today) =>
+    computeFinanceScore({ recurring, month: today.slice(0, 7), today }).breakdown.bills;
+
+  const RENT = { active: true, frequency: 'monthly', dayOfMonth: 28, startDate: '2025-01-28' };
+  const ELEC = { active: true, frequency: 'monthly', dayOfMonth: 5,  startDate: '2025-01-05' };
+
+  it('does not penalise a bill that is not due yet', () => {
+    // 6 Oct: electricity (5th) is paid; rent is not due until the 28th. Scoring
+    // on the month stamp read rent's September stamp as "unpaid this month" and
+    // docked 12 points for a bill the user could not have paid yet.
+    const r = [{ ...RENT, lastPaidDate: '2026-09-28' }, { ...ELEC, lastPaidDate: '2026-10-05' }];
+    expect(bills(r, '2026-10-06')).toBe(25);
+    expect(bills(r, '2026-10-10')).toBe(25);
+  });
+
+  it('penalises a bill that is genuinely overdue', () => {
+    expect(bills([{ ...RENT, lastPaidDate: '2026-09-28' }], '2026-11-02')).toBe(0);
+  });
+
+  it('credits a cycle paid late, after the month rolled over', () => {
+    expect(bills([{ ...RENT, lastPaidDate: '2026-11-02' }], '2026-11-02')).toBe(25);
+  });
 });
 
 // ---------------------------------------------------------------------------
