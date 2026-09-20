@@ -2516,8 +2516,23 @@ export default function Nomad() {
     if ("requestIdleCallback" in window) window.requestIdleCallback(warm, { timeout: 3000 }); else setTimeout(warm, 1500);
   }, []);
 
+  // Columns this database turned out not to have. Kept per page load so the
+  // "your schema is behind" nudge fires once per column instead of on every save.
+  const schemaWarnedRef = useRef(new Set());
+
   useEffect(() => subscribeSyncDrops((info) => {
     if (info.kind === "storage") { showT("Storage full — clear some data or export and reset", "error"); return; }
+    // The write LANDED — just without columns this database doesn't have. Not
+    // an error: saying "schema missing 'type'" in red for a change that saved
+    // fine is what made a successful skip look like a failure.
+    if (info.kind === "schema-stale") {
+      const fresh = (info.columns || []).filter(c => !schemaWarnedRef.current.has(c));
+      if (!fresh.length) return;
+      fresh.forEach(c => schemaWarnedRef.current.add(c));
+      const cols = fresh.map(c => `'${c}'`).join(", ");
+      showT(`Saved — but your database has no ${cols} column. Re-run nomad_setup.sql to store it.`, "info");
+      return;
+    }
     if (info.kind === "conflict") { showT("Sync conflict — a newer version exists; local change discarded", "error"); return; }
     if (info.kind === "dead-letter") { sDeadLetterCount(getDeadLetterCount()); sDlBanner(true); showT("Change failed after 3 retries — moved to failed queue (see Sync Status)", "error"); sNotifs(pushNotifications([{ id: `sync-dead-${localDateKey()}`, kind: "sync", title: "A change failed to sync", body: "Retried 3 times, then moved to the failed queue. Tap to open Sync Status.", meta: { go: "sync" } }])); return; }
     if (info.kind === "rejected") {
