@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { calcSleepDuration, fmtSleep } from './routineSleep';
 import { sendSupabaseRequest } from './offlineSync';
 import { getCredentials as _getCreds } from './credentials';
 import { analyzeFood, foodResultToText, foodResultToMacroString } from './foodVision';
@@ -1536,15 +1537,7 @@ const parseMorningWater = (s) => {
 const effectiveMorningWater = (day) =>
     day && day.morningWater ? parseMorningWater(day.morningWaterAmount) : 0;
 
-const calcSleepDuration = (sleepTime, wakeTime) => {
-    if (!sleepTime || !wakeTime) return null;
-    const [sh, sm] = sleepTime.split(':').map(Number);
-    const [wh, wm] = wakeTime.split(':').map(Number);
-    let mins = (wh * 60 + wm) - (sh * 60 + sm);
-    if (mins < 0) mins += 1440;
-    return mins / 60;
-};
-const fmtSleep = (h) => h == null ? '—' : `${Math.floor(h)}h${Math.round((h % 1) * 60) > 0 ? ` ${Math.round((h % 1) * 60)}m` : ''}`;
+
 const compressPhoto = (file, maxPx = 480) => new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);

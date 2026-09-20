@@ -162,6 +162,56 @@ describe("reconcile", () => {
     const ledger = ledgerOf({ date: "2026-06-10", amount: 0.3, dir: "debit" });
     expect(reconcile(rows, ledger).matched).toHaveLength(1);
   });
+
+  // A per-row greedy walked rows in date order and let each take its nearest
+  // free entry, so an earlier row could reach forward and consume the entry a
+  // later row matched EXACTLY — naming a logged transaction "missing" and
+  // inviting the user to import a duplicate of it.
+  describe("assignment picks the right row, not merely a row", () => {
+    it("an exact-date row keeps its entry when an earlier row reaches for it", () => {
+      // Two 500 debits; only the 12th is logged, so the 10th is the missing one.
+      const rows = [
+        { ref: "A", date: "2026-09-10", amount: 500, type: "expense" },
+        { ref: "B", date: "2026-09-12", amount: 500, type: "expense" },
+      ];
+      const ledger = ledgerOf({ date: "2026-09-12", amount: 500, dir: "debit" });
+      const r = reconcile(rows, ledger);
+      expect(r.matched).toHaveLength(1);
+      expect(r.matched[0].row.ref).toBe("B");
+      expect(r.missing.map(m => m.ref)).toEqual(["A"]);
+    });
+
+    it("preferring the exact match never costs a match elsewhere", () => {
+      // Both rows are logged and contend for the same nearest entry; the
+      // augmenting path hands it over so both still match.
+      const rows = [
+        { ref: "A", date: "2026-09-10", amount: 500, type: "expense" },
+        { ref: "B", date: "2026-09-12", amount: 500, type: "expense" },
+      ];
+      const ledger = ledgerOf(
+        { date: "2026-09-12", amount: 500, dir: "debit" },
+        { date: "2026-09-14", amount: 500, dir: "debit" },
+      );
+      const r = reconcile(rows, ledger);
+      expect(r.matched).toHaveLength(2);
+      expect(r.missing).toHaveLength(0);
+    });
+
+    it("three contending rows over two entries strand the unlogged one", () => {
+      const rows = [
+        { ref: "A", date: "2026-09-09", amount: 500, type: "expense" },
+        { ref: "B", date: "2026-09-11", amount: 500, type: "expense" },
+        { ref: "C", date: "2026-09-13", amount: 500, type: "expense" },
+      ];
+      const ledger = ledgerOf(
+        { date: "2026-09-11", amount: 500, dir: "debit" },
+        { date: "2026-09-13", amount: 500, dir: "debit" },
+      );
+      const r = reconcile(rows, ledger);
+      expect(r.matched).toHaveLength(2);
+      expect(r.missing.map(m => m.ref)).toEqual(["A"]);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -87,13 +87,21 @@ describe('checkBillReminders — recurring bills', () => {
     expect(result).toHaveLength(1);
   });
 
-  it('does not include upcoming reminder when bill is already handled this month', () => {
-    // isNotHandled check: monthly bill skipped in the same month as upcoming due
-    const r = makeRec({ id: 'r5', lastSkippedDate: '2024-04-01' });
+  it('does not include upcoming reminder when that cycle is already handled', () => {
+    // Skipped ON the upcoming due date → that cycle is settled → stay quiet.
+    const r = makeRec({ id: 'r5', lastSkippedDate: '2024-04-17' });
     const getDue = () => '2024-04-17'; // within 3 days of Apr 15
     const result = checkBillReminders([r], [], '2024-04-15', getDue, notDueToday);
-    // Same year-month as due → handled → no reminder
     expect(result).toHaveLength(0);
+  });
+
+  it('still warns about an upcoming cycle when the last action settled an older one', () => {
+    // Apr 1 skip belongs to a PREVIOUS cycle; Apr 17 is still unhandled.
+    // Matching on calendar month alone silenced this warning.
+    const r = makeRec({ id: 'r6', lastSkippedDate: '2024-04-01' });
+    const getDue = () => '2024-04-17';
+    const result = checkBillReminders([r], [], '2024-04-15', getDue, notDueToday);
+    expect(result).toHaveLength(1);
   });
 });
 
