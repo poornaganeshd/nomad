@@ -49,31 +49,69 @@ export function buildLedger({ expenses = [], incomes = [], transfers = [], settl
   return out.filter(x => x.date && x.amount > 0);
 }
 
-// Match statement rows against ledger entries. Greedy: rows sorted by date,
-// each takes its nearest-date unused candidate with identical amount and
-// direction. One ledger entry can satisfy only one statement row, so two
-// identical statement debits need two logged expenses.
+// Match statement rows against ledger entries on identical amount + direction
+// within a +/- day window. One ledger entry can satisfy only one statement row,
+// so two identical statement debits need two logged expenses.
+//
+// Assignment is a maximum bipartite matching (Kuhn's augmenting path), NOT a
+// per-row greedy. A greedy that walked rows in date order and let each take its
+// nearest free entry named the WRONG row as missing whenever an earlier row
+// reached forward and took an entry a later row matched exactly: two 500 debits
+// on the 10th and the 12th with only the 12th logged reported the 12th missing,
+// and re-importing it duplicated an expense that was already there. Every
+// falsely-missing row is money the user is invited to enter twice, so the
+// matching has to be right rather than merely quick.
+//
+// Rows claim in order of their tightest date evidence, and the augmenting path
+// then lets a row hand its entry over when it has an alternative — so an exact
+// date match never loses to a two-day-old one, and preferring it never costs a
+// match elsewhere.
+//
 // Returns { matched, missing, alreadyImported } — `missing` rows are the ones
 // the user should review/import; `matched`/`alreadyImported` are informational.
+// `matched` and `missing` stay in statement-date order.
 export function reconcile(statementRows, ledger, { windowDays = DATE_WINDOW_DAYS, importedRefs } = {}) {
   const refs = importedRefs || new Set();
-  const used = new Set();
   const matched = [], missing = [], alreadyImported = [];
   const rows = [...statementRows].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  const pending = [];
   for (const row of rows) {
     if (row.ref && refs.has(row.ref)) { alreadyImported.push(row); continue; }
     const dir = row.type === "income" ? "credit" : "debit";
-    let best = -1, bestDist = Infinity;
+    const cands = [];
     for (let i = 0; i < ledger.length; i++) {
-      if (used.has(i)) continue;
       const l = ledger[i];
       if (l.dir !== dir || Math.abs(l.amount - row.amount) >= 0.005) continue;
       const dist = dayDiff(l.date, row.date);
-      if (dist <= windowDays && dist < bestDist) { best = i; bestDist = dist; }
+      if (dist <= windowDays) cands.push({ i, dist });
     }
-    if (best >= 0) { used.add(best); matched.push({ row, entry: ledger[best] }); }
-    else missing.push(row);
+    // Nearest first, ledger order as the tie-break, so the result is stable.
+    cands.sort((a, b) => a.dist - b.dist || a.i - b.i);
+    pending.push({ row, cands: cands.map(c => c.i), best: cands.length ? cands[0].dist : Infinity });
   }
+
+  const entryToRow = new Map();
+  const assign = (k, seen) => {
+    for (const i of pending[k].cands) {
+      if (seen.has(i)) continue;
+      seen.add(i);
+      const holder = entryToRow.get(i);
+      if (holder === undefined || assign(holder, seen)) { entryToRow.set(i, k); return true; }
+    }
+    return false;
+  };
+  pending
+    .map((p, k) => k)
+    .sort((a, b) => pending[a].best - pending[b].best || a - b)
+    .forEach(k => assign(k, new Set()));
+
+  const rowToEntry = new Map();
+  entryToRow.forEach((k, i) => rowToEntry.set(k, i));
+  pending.forEach((p, k) => {
+    if (rowToEntry.has(k)) matched.push({ row: p.row, entry: ledger[rowToEntry.get(k)] });
+    else missing.push(p.row);
+  });
   return { matched, missing, alreadyImported };
 }
 
