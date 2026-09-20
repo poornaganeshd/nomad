@@ -75,12 +75,31 @@ export const getRecurringDueDate = (record, todayString) => {
   return null;
 };
 
+// Has the cycle that fell due on `dueDate` been paid or skipped? A cycle is
+// settled by an action taken ON or AFTER its due date.
+//
+// This used to compare only the calendar PERIOD (YYYY-MM for monthly, YYYY for
+// yearly) of lastPaidDate against the due date's, which broke in both
+// directions as soon as an overdue bill was paid after that period rolled
+// over. Paying September's rent (due the 15th) on 2 Oct stamps lastPaidDate in
+// OCTOBER, so the September cycle never matched its own period: the card kept
+// claiming "Rent overdue" every day until the due date caught up, with the
+// overdue counter still climbing — and each tap of Paid booked ANOTHER expense.
+// The same mismatch then made October's cycle match the October stamp, so the
+// bill the user had not paid yet was silently swallowed.
+//
+// Comparing the dates themselves fixes both: the late payment settles the cycle
+// it was actually for, and leaves the next one untouched. Dates are YYYY-MM-DD,
+// so lexical >= is chronological.
+export const isRecurringCycleHandled = (record, dueDate) =>
+  (!!record.lastPaidDate && record.lastPaidDate >= dueDate) ||
+  (!!record.lastSkippedDate && record.lastSkippedDate >= dueDate);
+
 export const isRecurringDueToday = (record, todayString) => {
   if (!record.active || record.startDate > todayString) return false;
   const dueDate = getRecurringDueDate(record, todayString);
   if (!dueDate || dueDate > todayString) return false;
-  if (record.frequency === 'monthly') return !(record.lastPaidDate?.slice(0, 7) === dueDate.slice(0, 7) || record.lastSkippedDate?.slice(0, 7) === dueDate.slice(0, 7));
-  if (record.frequency === 'yearly') return !(record.lastPaidDate?.slice(0, 4) === dueDate.slice(0, 4) || record.lastSkippedDate?.slice(0, 4) === dueDate.slice(0, 4));
+  if (record.frequency === 'monthly' || record.frequency === 'yearly') return !isRecurringCycleHandled(record, dueDate);
   // custom: the first occurrence (no payment/skip yet) is due/awaiting action.
   if (!record.lastPaidDate && !record.lastSkippedDate) return true;
   return getRecurringAnchorDate(record) !== dueDate;

@@ -225,14 +225,48 @@ describe('isRecurringDueToday', () => {
     expect(isRecurringDueToday(r, '2024-04-15')).toBe(true);
   });
 
-  it('returns false when monthly bill already paid this month', () => {
-    const r = { frequency: 'monthly', startDate: '2024-01-15', active: true, lastPaidDate: '2024-04-01' };
+  it('returns false when the due cycle has been paid', () => {
+    const r = { frequency: 'monthly', startDate: '2024-01-15', active: true, lastPaidDate: '2024-04-15' };
     expect(isRecurringDueToday(r, '2024-04-15')).toBe(false);
   });
 
-  it('returns false when monthly bill skipped this month', () => {
-    const r = { frequency: 'monthly', startDate: '2024-01-15', active: true, lastSkippedDate: '2024-04-01' };
+  it('returns false when the due cycle has been skipped', () => {
+    const r = { frequency: 'monthly', startDate: '2024-01-15', active: true, lastSkippedDate: '2024-04-15' };
     expect(isRecurringDueToday(r, '2024-04-15')).toBe(false);
+  });
+
+  // A payment dated BEFORE the due date settled an EARLIER (overdue) cycle, not
+  // this one. Apr 1 is when the Mar 15 cycle was 17 days overdue and got paid;
+  // the Apr 15 cycle is still outstanding. Matching on calendar month alone
+  // suppressed it and the April bill vanished without ever being paid.
+  it('stays due when the only payment predates this cycle (settled an older one)', () => {
+    const r = { frequency: 'monthly', startDate: '2024-01-15', active: true, lastPaidDate: '2024-04-01' };
+    expect(isRecurringDueToday(r, '2024-04-15')).toBe(true);
+  });
+
+  it('stays due when the only skip predates this cycle', () => {
+    const r = { frequency: 'monthly', startDate: '2024-01-15', active: true, lastSkippedDate: '2024-04-01' };
+    expect(isRecurringDueToday(r, '2024-04-15')).toBe(true);
+  });
+
+  // The reported bug: an overdue bill paid after the calendar month rolled over
+  // kept re-firing every single day, overdue counter climbing, because the
+  // October payment date never matched the September due date's month. Each tap
+  // of "Paid" booked another duplicate expense.
+  it('clears a cycle paid late, after the month has rolled over', () => {
+    const r = { frequency: 'monthly', dayOfMonth: 15, startDate: '2025-01-15', active: true, lastPaidDate: '2026-10-02' };
+    expect(getRecurringDueDate(r, '2026-10-02')).toBe('2026-09-15');
+    expect(isRecurringDueToday(r, '2026-10-02')).toBe(false);
+    expect(isRecurringDueToday(r, '2026-10-10')).toBe(false);
+    // ...and the NEXT cycle still comes due on time.
+    expect(isRecurringDueToday(r, '2026-10-15')).toBe(true);
+  });
+
+  it('clears a yearly cycle paid late, after the year has rolled over', () => {
+    const r = { frequency: 'yearly', yearMonth: 12, yearDay: 31, startDate: '2024-12-31', active: true, lastPaidDate: '2026-01-05' };
+    expect(isRecurringDueToday(r, '2026-01-05')).toBe(false);
+    expect(isRecurringDueToday(r, '2026-06-01')).toBe(false);
+    expect(isRecurringDueToday(r, '2026-12-31')).toBe(true);
   });
 
   it('returns false when inactive', () => {

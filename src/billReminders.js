@@ -38,8 +38,14 @@ function addDays(dateStr, n) {
 // Exported so any future consumer shares this exact "paid/skipped this
 // cycle?" decision instead of re-deriving it (guarded by billReminders tests).
 export function isNotHandled(r, dueStr) {
-  if (r.frequency === "monthly") return !(r.lastPaidDate?.slice(0, 7) === dueStr.slice(0, 7) || r.lastSkippedDate?.slice(0, 7) === dueStr.slice(0, 7));
-  if (r.frequency === "yearly") return !(r.lastPaidDate?.slice(0, 4) === dueStr.slice(0, 4) || r.lastSkippedDate?.slice(0, 4) === dueStr.slice(0, 4));
+  // Mirrors isRecurringCycleHandled in financeUtils (kept inline so this module
+  // stays dependency-free): a cycle is settled by a paid/skipped action taken ON
+  // or AFTER its due date. Comparing only the calendar period meant paying an
+  // overdue bill after the month rolled over never cleared the cycle it paid,
+  // and wrongly cleared the NEXT one. Dates are YYYY-MM-DD, so >= is chronological.
+  if (r.frequency === "monthly" || r.frequency === "yearly") {
+    return !((r.lastPaidDate && r.lastPaidDate >= dueStr) || (r.lastSkippedDate && r.lastSkippedDate >= dueStr));
+  }
   // custom: first occurrence (no payment/skip yet) is not yet handled.
   if (!r.lastPaidDate && !r.lastSkippedDate) return true;
   const anchor = r.lastPaidDate || r.lastSkippedDate || r.startDate;
