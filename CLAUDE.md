@@ -29,7 +29,7 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 
 ## Baselines (verify before/after edits; don't regress)
 
-- **Tests:** 1153 pass / 0 fail, 57 files (`npm test`). E2E: 119 pass, 26 files (`npm run test:e2e`).
+- **Tests:** 1191 pass / 0 fail, 60 files (`npm test`). E2E: 126 pass, 29 files (`npm run test:e2e`).
 - **Lint:** 0 errors / 12 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
 - **Build:** succeeds. Main chunk ~920 kB (gzip ~244 kB) + lazy chunks (Routine, CatDonut/recharts, IOUWallet, CalendarView, CredentialSetup, pdfjs); the >500 kB warning on the main chunk is expected.
@@ -102,6 +102,8 @@ Vitest + jsdom (configured in `vite.config.js` under `test`). Coverage via `@vit
 | settle confetti (fires once, never replays — not on navigation mid-burst, not over a write-off) / refused settle keeps its sheet open / write-off card gating | e2e `19-iou-settle-feedback.spec.js` |
 | `pendingIouNet`/`settlementsBySplit` + the FULL write-off branch of `settleNet`/`settleEventNet` | `src/__tests__/writeOffAll.test.js` |
 | full write-off (amount 0) / event settle-up wallet + write-off / written-off event IOU clears its balance | e2e `20-write-off-and-event-settle.spec.js` |
+| `src/sbPaging.js` (paged reads past Supabase's 1000-row cap) | `src/__tests__/sbPaging.test.js` |
+| event-expense edit keeps its IOUs + payments, is balance-gated; New Event clears the tab bar | e2e `29-event-expense-edit.spec.js` |
 | `api/sync.ts` (SSRF host guard + idempotency) | `api/__tests__/sync.test.ts` |
 | `api/send-now.ts` (registry gate — fails CLOSED) | `api/__tests__/send-now.test.ts` |
 | `api/_shared.ts` | `api/__tests__/_shared.test.ts` |
@@ -181,6 +183,9 @@ All Supabase writes go through `sendSupabaseRequest` in `offlineSync.js`. Offlin
 
 ### Cross-device live pull
 An open tab fetches Supabase only once on mount, so a row added on another device used to stay invisible until a full reload ("new entries missing on other device"). `App.jsx` runs a **background re-pull** — `load({ skipLocal: true })` on tab refocus (`visibilitychange`) **and** a 60s interval — via a `loadRef` so the interval always uses the latest closure. `load()` flushes the offline write queue first (push), then re-fetches + `mergeRemote` (pull); `mergeRemote` keeps any pending-upsert local row so a background pull can't clobber an in-flight edit. **`skipLocal` is load-bearing:** under `if (!skipLocal)`, the mount load restores local-only prefs (theme, categories, income sources) from the `nomad-v5` backup — background pulls MUST skip that, or a pull firing inside the 800ms backup debounce reverts a just-added category / theme toggle.
+
+### Reading from Supabase is PAGED
+`sbGet` goes through `fetchAllRows` (`src/sbPaging.js`). Supabase clamps every response to its "Max rows" setting (1000 by default) no matter what `limit` the URL asks for — the old `limit=50000` did nothing, so past 1000 rows a fresh device showed wrong balances and every 60s pull re-uploaded the rows it "lost". Pages are ordered by the primary key (`wallet_id` for `wallet_balances`), sized from `Prefer: count=exact`, and a failed page fails the whole read (a partial table is worse than none). Don't add a table read that bypasses it.
 
 ### Soft delete & conflicts
 **Settlements are the ONE table `sbDeleteRow` hard-deletes, and that makes them the one table with no tombstone** — so "missing from the remote read" is ambiguous there in a way it never is elsewhere. `mergeRemote`'s self-heal used to resolve it the dangerous way: any local-only row with no queue entry was called a lost write and `heal()` re-uploaded it. Delete a settlement on your phone and your laptop pushed it straight back — the cash returned to the wallet, and because the delete also reopened the linked IOU (and THAT reopen synced, splits being soft-deleted), the same money was then counted twice. `hardDeleted: true` + **`hasSyncedOnce`** settle it with the DB-owned `created_at`: the client never sends that column (it is deliberately absent from `COLS`), so it appears only on a row that has come back from Supabase. Carrying one ⇒ it WAS on the server ⇒ its absence is a delete ⇒ drop it locally (`vanished`) and never re-upload. No `created_at` ⇒ it never got there ⇒ still an orphan, still healed. Don't add a second hard-deleted table without passing this flag. Guarded by `syncHardDelete.test.js`.

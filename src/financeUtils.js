@@ -379,11 +379,18 @@ export const projectedBalances = (balances, before, after) => {
 // The first wallet an edit would push negative, or null when it is affordable.
 // "__tracked__" is a placeholder for a group expense someone else paid — it is
 // not a real wallet and has no balance to overdraw.
+//
+// A wallet that is ALREADY negative (an income deleted after the money was
+// spent, say) is only refused when the edit makes it MORE negative. Checking
+// the projected balance alone refused every edit to that wallet — fixing a
+// typo in a note, even — since swapping a row for itself leaves the balance
+// exactly where it was, below zero.
 export const overdrawnBy = (balances, before, after, wallets = []) => {
   const projected = projectedBalances(balances, before, after);
   for (const [wid, bal] of Object.entries(projected)) {
     if (wid === "__tracked__") continue;
-    if (bal < -0.005) return { walletId: wid, shortBy: roundMoney(-bal), name: (wallets.find(w => w.id === wid) || {}).name || wid };
+    const now = roundMoney(Number(balances?.[wid]) || 0);
+    if (bal < -0.005 && bal < now - 0.005) return { walletId: wid, shortBy: roundMoney(-bal), name: (wallets.find(w => w.id === wid) || {}).name || wid };
   }
   return null;
 };
@@ -918,4 +925,31 @@ export const runwayInfo = (balance, spendEvents, { todayKey = localDateKey(), wi
   const daysAtUsual = usual > 0 ? Math.floor(bal / usual) : null;
   const dryBy = daysLeft !== null ? keyAt(daysLeft) : null;
   return { rate, usual, daysLeft, daysAtUsual, dryBy };
+};
+
+// The IOUs a group expense creates, as plain {name, amount, direction} rows.
+// When YOU paid, every other included person owes you their share; when
+// someone else paid, only YOUR share is recorded, as a debt to the payer
+// (makeExpIOUs in App.jsx writes exactly this list).
+export const expenseIouPlan = (splitWith, payer) => {
+  if (!splitWith || typeof splitWith !== "object") return [];
+  if (payer === "You") {
+    return Object.entries(splitWith)
+      .filter(([person, share]) => person !== "You" && Number(share) > 0)
+      .map(([name, share]) => ({ name, amount: roundMoney(Number(share)), direction: "owed" }));
+  }
+  const mine = Number(splitWith.You) || 0;
+  return mine > 0 && payer ? [{ name: payer, amount: roundMoney(mine), direction: "owe" }] : [];
+};
+
+// True when the live IOUs of an expense already say exactly what `plan` would
+// write — same people, same amounts, same directions. Editing an event expense
+// used to delete and re-create its IOUs on EVERY save, so fixing a typo in the
+// note wiped the repayments recorded against them: the cash vanished from the
+// wallet and the debt came back as unpaid.
+export const sameIouPlan = (liveSplits, plan) => {
+  const key = (r) => `${String(r.name || "").trim().toLowerCase()}|${r.direction}|${roundMoney(Number(r.amount) || 0).toFixed(2)}`;
+  const a = (liveSplits || []).filter((s) => s && !s.deleted_at).map(key).sort();
+  const b = (plan || []).map(key).sort();
+  return a.length === b.length && a.every((k, i) => k === b[i]);
 };

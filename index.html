@@ -9,7 +9,17 @@
     <link rel="manifest" href="/manifest.json" />
     <meta name="theme-color" content="#E07A5F" />
     <link rel="apple-touch-icon" href="/icon-192.png">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="NOMAD" />
+    <!-- viewport-fit=cover is what makes env(safe-area-inset-*) report real
+         values; without it every inset the app pads by is 0 and the tab bar sits
+         under the iPhone home indicator. iOS also zooms into any input under
+         16px on focus and never zooms back out (the app's fields are 12-15px);
+         maximum-scale stops that auto-zoom, and on iOS it still leaves pinch-zoom
+         working, so it is applied there only — on Android it would block pinch. -->
+    <script>try{if(/iP(hone|ad|od)/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1)){var m=document.querySelector('meta[name=viewport]');m.setAttribute("content",m.getAttribute("content")+", maximum-scale=1")}}catch(e){/* keep the default viewport */}</script>
     <title>NOMAD</title>
     <script>/* pre-paint theme sniff so the splash matches the app theme (darkMode lives in the nomad-v5 backup) */try{if((localStorage.getItem("nomad-v5")||"").indexOf('"darkMode":true')>-1)document.documentElement.setAttribute("data-nomad-dark","")}catch(e){/* storage blocked — default to light */}</script>
     <style>

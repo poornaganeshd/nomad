@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { walletDeltas, projectedBalances, overdrawnBy, roundMoney } from '../financeUtils.js';
+import { walletDeltas, projectedBalances, overdrawnBy, roundMoney, expenseIouPlan, sameIouPlan } from '../financeUtils.js';
 
 // History was delete-only: fixing a wrong amount meant deleting and re-typing,
 // which loses the row's created_at (it jumps to the top of history and out of
@@ -89,5 +89,43 @@ describe('overdrawnBy', () => {
   it('tolerates a paisa of float noise rather than refusing on it', () => {
     const b = { bank: roundMoney(0.001) };
     expect(overdrawnBy(b, exp({ amount: 0 }), exp({ amount: 0.004 }), wallets)).toBe(null);
+  });
+});
+
+describe('overdrawnBy — a wallet that is already negative', () => {
+  const neg = { bank: -50, cash: 500 };
+  it('lets you fix a note (or anything that does not make it worse)', () => {
+    expect(overdrawnBy(neg, exp(), exp({ note: 'typo fixed' }), wallets)).toBe(null);
+    expect(overdrawnBy(neg, exp(), exp({ amount: 200 }), wallets)).toBe(null);
+  });
+  it('still refuses an edit that digs it deeper', () => {
+    expect(overdrawnBy(neg, exp(), exp({ amount: 310 }), wallets)).toMatchObject({ walletId: 'bank', shortBy: 60 });
+  });
+});
+
+describe('expenseIouPlan / sameIouPlan — event expense edits keep their IOUs', () => {
+  it('you paid: everyone else owes you their share', () => {
+    expect(expenseIouPlan({ You: 100, A: 100, B: 100 }, 'You')).toEqual([
+      { name: 'A', amount: 100, direction: 'owed' }, { name: 'B', amount: 100, direction: 'owed' },
+    ]);
+  });
+  it('someone else paid: only your share, owed to them', () => {
+    expect(expenseIouPlan({ You: 40, A: 60 }, 'A')).toEqual([{ name: 'A', amount: 40, direction: 'owe' }]);
+    expect(expenseIouPlan({ A: 60 }, 'A')).toEqual([]);
+    expect(expenseIouPlan(null, 'You')).toEqual([]);
+  });
+  it('an unchanged split matches the live IOUs (order and case do not matter)', () => {
+    const live = [{ name: 'b', amount: 100, direction: 'owed' }, { name: 'A', amount: 100.001, direction: 'owed' }];
+    expect(sameIouPlan(live, expenseIouPlan({ You: 100, A: 100, B: 100 }, 'You'))).toBe(true);
+  });
+  it('a changed amount, person or direction does not', () => {
+    const live = [{ name: 'A', amount: 100, direction: 'owed' }];
+    expect(sameIouPlan(live, [{ name: 'A', amount: 120, direction: 'owed' }])).toBe(false);
+    expect(sameIouPlan(live, [{ name: 'B', amount: 100, direction: 'owed' }])).toBe(false);
+    expect(sameIouPlan(live, [{ name: 'A', amount: 100, direction: 'owe' }])).toBe(false);
+    expect(sameIouPlan(live, [])).toBe(false);
+  });
+  it('soft-deleted IOUs are not live', () => {
+    expect(sameIouPlan([{ name: 'A', amount: 1, direction: 'owed', deleted_at: 'x' }], [])).toBe(true);
   });
 });
