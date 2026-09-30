@@ -139,7 +139,14 @@ function isNotHandled(r: RecurringRow, dueStr: string): boolean {
   return getRecurringAnchorDate(r) !== dueStr;
 }
 
-const inr = (n: number) => "₹" + Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 });
+// Same rule as the app's formatMoney: whole rupees plain, anything else to
+// the paisa. Rounding to 0 digits told someone who owes ₹117.50 that they
+// owe ₹118 — a figure that appears nowhere in the app.
+const inr = (n: number) => {
+  const v = Number(n) || 0;
+  const whole = Math.abs(v - Math.round(v)) < 0.005;
+  return "₹" + v.toLocaleString("en-IN", { minimumFractionDigits: whole ? 0 : 2, maximumFractionDigits: whole ? 0 : 2 });
+};
 
 export interface BillDigest {
   title: string;
