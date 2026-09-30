@@ -690,3 +690,39 @@ describe('formatMoney — one shape for money everywhere', () => {
     expect(formatMoney(12.5, '$')).toBe('$12.50');
   });
 });
+
+// ---------------------------------------------------------------------------
+// compactMoney — calendar cells, chart chips
+// ---------------------------------------------------------------------------
+import { compactMoney } from '../financeUtils.js';
+describe('compactMoney', () => {
+  it('uses the Indian scale', () => {
+    expect(compactMoney(950)).toBe('₹950');
+    expect(compactMoney(1500)).toBe('₹1.5k');
+    expect(compactMoney(2000)).toBe('₹2k');
+    expect(compactMoney(25000)).toBe('₹25k');
+    expect(compactMoney(123456.78)).toBe('₹1.2L');
+    expect(compactMoney(1234567)).toBe('₹12L');
+    expect(compactMoney(15000000)).toBe('₹1.5Cr');
+  });
+
+  it('never spills into a four-digit k or a "100k"', () => {
+    // The chart's old copy printed ₹100.0k for 99,999, and the calendar's
+    // printed ₹123.5k in a cell with room for five characters.
+    expect(compactMoney(99999)).toBe('₹1L');
+    expect(compactMoney(999.6)).toBe('₹1k');
+    expect(compactMoney(9999)).toBe('₹10k');
+    expect(compactMoney(9949)).toBe('₹9.9k');
+  });
+
+  it('keeps a sign and treats junk as zero', () => {
+    expect(compactMoney(-2500)).toBe('−₹2.5k');
+    expect(compactMoney(undefined)).toBe('₹0');
+  });
+
+  it('fits a calendar cell (≤ 6 characters) for any day under ₹1 crore', () => {
+    for (const v of [0, 7, 999, 1000, 9999, 12345, 99999, 123456, 999999, 9999999]) {
+      expect(compactMoney(v).length).toBeLessThanOrEqual(6);
+    }
+  });
+});

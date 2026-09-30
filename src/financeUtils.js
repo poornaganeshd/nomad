@@ -203,6 +203,25 @@ export const formatMoney = (value, currency = "\u20B9") => {
   return currency + v.toLocaleString("en-IN", { minimumFractionDigits: whole ? 0 : 2, maximumFractionDigits: 2 });
 };
 
+// Short money for tight spaces (calendar cells, chart chips, axis labels), in
+// the Indian scale: ₹950 · ₹1.5k · ₹25k · ₹1.2L · ₹12L · ₹1.5Cr.
+//
+// The calendar only knew "k", so a ₹1,23,456 day printed "₹123.5k" — seven
+// characters in a cell with room for five, cut to "₹1…" — and the chart's
+// copy rounded 99,999 up to "₹100.0k". Rounding is done BEFORE picking the
+// unit so a value never spills into a four-digit "k"; a trailing ".0" is
+// dropped ("₹2k", not "₹2.0k"). Negative values keep their sign in front.
+export const compactMoney = (value, currency = "\u20B9") => {
+  const v = Number(value) || 0;
+  const sign = v < 0 ? "−" : "";
+  const n = Math.abs(v);
+  const one = (x) => { const r = Math.round(x * 10) / 10; return r >= 10 ? String(Math.round(x)) : String(r); };
+  if (Math.round(n) < 1000) return `${sign}${currency}${Math.round(n)}`;
+  if (Math.round(n / 100) / 10 < 100) return `${sign}${currency}${one(n / 1000)}k`;
+  if (Math.round(n / 10000) / 10 < 100) return `${sign}${currency}${one(n / 100000)}L`;
+  return `${sign}${currency}${one(n / 10000000)}Cr`;
+};
+
 // Stable, descending comparator for history rows.
 // Order: date desc → creation timestamp desc → id desc.
 //

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { localDateKey, formatMoney} from "./financeUtils";
+import { localDateKey, formatMoney, compactMoney } from "./financeUtils";
 
 // Shared formatter — this used to be a second copy of the same expression, and
 // it drifted from App's the moment either changed.
@@ -168,7 +168,7 @@ export default function CalendarView({
               whiteSpace: "nowrap",
               minWidth: 0,
             }}>
-              {dat.exp >= 1000 ? `₹${(dat.exp / 1000).toFixed(1)}k` : `₹${Math.round(dat.exp)}`}
+              {compactMoney(dat.exp)}
             </div>
           )}
         </div>
