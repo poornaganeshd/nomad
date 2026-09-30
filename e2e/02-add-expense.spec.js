@@ -26,3 +26,17 @@ test("add income flow persists to local backup", async ({ page }) => {
     .poll(async () => (await readBackup(page)).incomes?.length ?? 0)
     .toBeGreaterThan(0);
 });
+
+// A mistyped year (2062) used to file the expense decades ahead — outside every
+// month anyone looks at — and check it against today's balance.
+test("a future date is refused, not filed decades ahead", async ({ page }) => {
+  await gotoLocal(page, funded());
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.locator("input[placeholder='0']").first().fill("500");
+  const date = page.locator("input[type='date']").first();
+  await expect(date).toHaveAttribute("max", /^\d{4}-\d{2}-\d{2}$/);
+  await date.fill("2062-01-15");
+  await page.getByRole("button", { name: "Add Expense" }).click();
+  await expect(page.getByText("That date is in the future — pick today or earlier")).toBeVisible();
+  expect((await readBackup(page)).expenses || []).toHaveLength(0);
+});

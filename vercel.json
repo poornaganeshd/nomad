@@ -5,6 +5,15 @@
     },
     "api/ai-chat.ts": {
       "maxDuration": 60
+    },
+    "api/ai-analyze.ts": {
+      "maxDuration": 60
+    },
+    "api/ai-categorize.ts": {
+      "maxDuration": 60
+    },
+    "api/send-reports.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [
