@@ -29,7 +29,7 @@ npm run test:e2e       # Playwright (needs dev server; localhost:5173)
 
 ## Baselines (verify before/after edits; don't regress)
 
-- **Tests:** 1269 pass / 0 fail, 61 files (`npm test`). E2E: 136 pass / 0 skipped, 33 files (`npm run test:e2e`).
+- **Tests:** 1269 pass / 0 fail, 61 files (`npm test`). E2E: 136 pass / 0 skipped, 32 files (`npm run test:e2e`).
 - **Lint:** 0 errors / 12 warnings (`npm run lint`). Warnings are cosmetic react-compiler/`exhaustive-deps` noise on the monoliths — don't chase to zero. The react-compiler/react-refresh *error* rules are demoted to `warn` for `App.jsx`/`Routine.jsx` only (see `eslint.config.js`); they stay errors everywhere else, so CI gates lint strictly.
 - **Typecheck:** clean (`npm run typecheck` → `tsc --noEmit` on `api/`).
 - **Build:** succeeds. Main chunk ~935 kB (gzip ~249 kB) + lazy chunks (Routine, CatDonut/recharts, IOUWallet, CalendarView, CredentialSetup, pdfjs); the >500 kB warning on the main chunk is expected.
