@@ -129,3 +129,42 @@ describe("istTodayStr", () => {
     expect(istTodayStr(new Date("2024-06-05T10:00:00Z"))).toBe("2024-06-05");
   });
 });
+
+// The server port had drifted from src/financeUtils.js: it still compared the
+// calendar PERIOD of lastPaidDate, and it shared the client's start-day-anchored
+// month count. These pin it to the client's behaviour.
+describe("server port matches the client's cycle rules", () => {
+  it("a bill paid LATE, after its month rolled over, is handled — no daily 'overdue' push", () => {
+    const r = rec({ dayOfMonth: 25, startDate: "2026-01-25", lastPaidDate: "2026-10-02" });
+    expect(isRecurringDueToday(r, "2026-10-05")).toBe(false);
+    expect(buildBillDigest([r], [], "2026-10-05")).toBeNull();
+  });
+
+  it("…and the NEXT cycle is still owed once it falls due", () => {
+    const r = rec({ dayOfMonth: 25, startDate: "2026-01-25", lastPaidDate: "2026-10-02" });
+    expect(isRecurringDueToday(r, "2026-10-25")).toBe(true);
+  });
+
+  it("an unpaid cycle stays overdue when the bill day is later than the start day", () => {
+    const r = rec({ dayOfMonth: 25, startDate: "2026-08-20" });
+    expect(getRecurringDueDate(r, "2026-09-22")).toBe("2026-08-25");
+    expect(buildBillDigest([r], [], "2026-09-22")!.message).toContain("28 days overdue");
+  });
+
+  it("a yearly renewal earlier in the year than the start is not overdue on day one", () => {
+    const r = rec({ frequency: "yearly", dayOfMonth: null, yearMonth: 3, yearDay: 15, startDate: "2026-09-10" });
+    expect(getRecurringDueDate(r, "2026-09-30")).toBe("2027-03-15");
+    expect(buildBillDigest([r], [], "2026-09-30")).toBeNull();
+  });
+
+  it("a 31st-of-month bill keeps an unpaid 28 Feb due through March", () => {
+    const r = rec({ dayOfMonth: 31, startDate: "2026-01-31" });
+    expect(getRecurringDueDate(r, "2026-03-15")).toBe("2026-02-28");
+    expect(isRecurringDueToday(r, "2026-03-15")).toBe(true);
+  });
+
+  it("upcoming uses the same date rule", () => {
+    const r = rec({ dayOfMonth: 8, startDate: "2024-01-08", lastPaidDate: "2024-05-10" });
+    expect(buildBillDigest([r], [], "2024-06-06")!.message).toContain("in 2 days");
+  });
+});

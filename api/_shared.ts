@@ -23,6 +23,54 @@ export async function userGet(baseUrl: string, key: string, path: string) {
   if (!r.ok) throw new Error(`GET ${baseUrl}${path} → ${r.status}`);
   return r.json();
 }
+// Read EVERY row a PostgREST query matches, a page at a time. Port of
+// src/sbPaging.js fetchAllRows (api/ is CommonJS and cannot import src/).
+//
+// Supabase clamps every response to the project's "Max rows" (1000 by default)
+// whatever `limit` the URL asks for, so a plain userGet silently returns the
+// first 1000 rows. The 365-day backup attached to every report email read
+// expenses that way — anyone logging ~3 a day got a "backup" missing months
+// of data with nothing to say so — and the reminder cron's settlements read
+// did too, so past 1000 settlements "You owe ₹X" stopped subtracting payments.
+//
+// `order` must be a TOTAL order (end on a unique column) or offset paging can
+// skip or repeat rows between pages. The page size is whatever the server
+// actually returned, so a project with Max rows set to 500 still pages right.
+// A failed page fails the whole read — a partial table is worse than none.
+const MAX_PAGES = 200; // 200k rows — a runaway guard, not a real limit
+export async function userGetAll(baseUrl: string, key: string, path: string, order = "id.asc", fetchImpl: typeof fetch = fetch): Promise<unknown[]> {
+  const sep = path.includes("?") ? "&" : "?";
+  const url = (offset: number) => `${baseUrl}/rest/v1${path}${sep}order=${order}&offset=${offset}`;
+  const first = await fetchImpl(url(0), { headers: { ...makeHeaders(key), Prefer: "count=exact" } });
+  if (!first.ok) throw new Error(`GET ${baseUrl}${path} → ${first.status}`);
+  const head: unknown = await first.json();
+  if (!Array.isArray(head)) throw new Error(`GET ${baseUrl}${path} → not a list`);
+  let rows: unknown[] = head;
+  const m = /\/(\d+)\s*$/.exec(String(first.headers?.get?.("content-range") || ""));
+  const total = m ? Number(m[1]) : null;
+  const pageSize = rows.length;
+  for (let page = 1; page < MAX_PAGES && pageSize > 0; page++) {
+    // Known total → stop once we hold it. Unknown (header stripped by a
+    // proxy) → stop on a short page, the best that can be done.
+    if (total != null ? rows.length >= total : rows.length % pageSize !== 0) break;
+    const r = await fetchImpl(url(rows.length), { headers: makeHeaders(key) });
+    if (!r.ok) throw new Error(`GET ${baseUrl}${path} → ${r.status}`);
+    const next: unknown = await r.json();
+    if (!Array.isArray(next)) throw new Error(`GET ${baseUrl}${path} → not a list`);
+    if (next.length === 0) break;
+    rows = rows.concat(next);
+  }
+  return rows;
+}
+
+// A group expense someone ELSE paid is stored with this placeholder wallet: it
+// records the event's total, but none of it left your wallets (your share is a
+// separate IOU). The app leaves it out of every spend figure (isTrackedExp in
+// App.jsx); the email report counted it as money you spent.
+export const isTrackedExpense = (e: { walletId?: string | null }) => e?.walletId === "__tracked__";
+
+const escHtml = (v: unknown) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
+
 export async function userPatch(baseUrl: string, key: string, path: string, body: object) {
   await fetch(`${baseUrl}/rest/v1${path}`, { method: "PATCH", headers: makeHeaders(key), body: JSON.stringify(body) });
 }
@@ -93,6 +141,21 @@ export function prettyCategory(id: string | undefined | null): string {
   return id.split(/[_\-]+/).map(w => w ? w.charAt(0).toUpperCase() + w.slice(1) : "").join(" ").trim() || id;
 }
 
+// The figures the report states. Money only: a group expense someone else
+// paid (isTrackedExpense) is not spending of yours, and amounts are summed in
+// paisa so a month of ₹x.10 entries can't print as ₹1,234.5600000001.
+export function reportTotals(expenses: Expense[], incomes: Income[], transfers: Transfer[]) {
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const own = (expenses || []).filter(e => !isTrackedExpense(e));
+  const totalSpent     = r2(own.reduce((sum, e) => sum + (Number(e.amount) || 0), 0));
+  const totalIncome    = r2((incomes || []).reduce((sum, i) => sum + (Number(i.amount) || 0), 0));
+  const totalTransfers = r2((transfers || []).reduce((sum, t) => sum + (Number(t.amount) || 0), 0));
+  const catMap = new Map<string, number>();
+  own.forEach(e => catMap.set(e.categoryId, r2((catMap.get(e.categoryId) ?? 0) + (Number(e.amount) || 0))));
+  const byCategory = Array.from(catMap.entries()).map(([id, amount]) => ({ name: prettyCategory(id), amount }));
+  return { totalSpent, totalIncome, totalTransfers, byCategory };
+}
+
 function buildCsv(expenses: Expense[], incomes: Income[], transfers: Transfer[], s: Schedule) {
   const q = (v?: string) => `"${(v ?? "").replace(/"/g, '""')}"`;
   let csv = "Type,Date,Amount,Category/Source/From,To/Wallet,Note\n";
@@ -116,7 +179,7 @@ function buildHtml(opts: { schedule: Schedule; periodStart: Date; periodEnd: Dat
   const catRows = byCategory.sort((a, b) => b.amount - a.amount).slice(0, 10).map(c => {
     const pct = totalSpent > 0 ? Math.round((c.amount / totalSpent) * 100) : 0;
     return `<tr>
-      <td style="padding:10px 20px 10px 24px;font-size:13px;color:#cccccc;font-family:'Segoe UI',Arial,sans-serif;white-space:nowrap;">${c.name}</td>
+      <td style="padding:10px 20px 10px 24px;font-size:13px;color:#cccccc;font-family:'Segoe UI',Arial,sans-serif;white-space:nowrap;">${escHtml(c.name)}</td>
       <td style="padding:10px 8px;width:100%;"><div style="height:6px;border-radius:3px;background:#2a2a2a;"><div style="height:6px;border-radius:3px;background:#c9a96e;width:${Math.max(4, pct)}%;"></div></div></td>
       <td style="padding:10px 24px 10px 8px;font-size:13px;color:#c9a96e;font-family:'Segoe UI',Arial,sans-serif;text-align:right;font-weight:700;white-space:nowrap;">${inr(c.amount)} <span style="color:#555;font-weight:400;font-size:11px;">${pct}%</span></td>
     </tr>`;
@@ -180,21 +243,19 @@ export async function processSchedule(
   // backup attachment on restore — the frontend filters them everywhere, so the
   // email/backup must match. (deleted_at is added to all core tables by
   // nomad_setup.sql, the same script that creates report_schedules.)
+  // Paged (userGetAll): a plain read stops at Supabase's 1000-row cap, which a
+  // year of expenses passes easily — the backup attachment came back short.
+  const PERIOD = "date.asc,id.asc", RECENT = "date.desc,id.desc";
   const [expenses, incomes, transfers, allExpenses, allIncomes, allTransfers] = await Promise.all([
-    s.include_expenses  ? userGet(sbUrl, sbKey, `/expenses?date=gte.${pStart}&date=lte.${pEnd}${catFilter}&deleted_at=is.null&select=*`)  : [],
-    s.include_incomes   ? userGet(sbUrl, sbKey, `/incomes?date=gte.${pStart}&date=lte.${pEnd}&deleted_at=is.null&select=*`)               : [],
-    s.include_transfers ? userGet(sbUrl, sbKey, `/transfers?date=gte.${pStart}&date=lte.${pEnd}&deleted_at=is.null&select=*`)             : [],
-    userGet(sbUrl, sbKey, `/expenses?date=gte.${backupCutoff}&deleted_at=is.null&select=*&order=date.desc`),
-    userGet(sbUrl, sbKey, `/incomes?date=gte.${backupCutoff}&deleted_at=is.null&select=*&order=date.desc`),
-    userGet(sbUrl, sbKey, `/transfers?date=gte.${backupCutoff}&deleted_at=is.null&select=*&order=date.desc`),
+    s.include_expenses  ? userGetAll(sbUrl, sbKey, `/expenses?date=gte.${pStart}&date=lte.${pEnd}${catFilter}&deleted_at=is.null&select=*`, PERIOD)  : [],
+    s.include_incomes   ? userGetAll(sbUrl, sbKey, `/incomes?date=gte.${pStart}&date=lte.${pEnd}&deleted_at=is.null&select=*`, PERIOD)               : [],
+    s.include_transfers ? userGetAll(sbUrl, sbKey, `/transfers?date=gte.${pStart}&date=lte.${pEnd}&deleted_at=is.null&select=*`, PERIOD)             : [],
+    userGetAll(sbUrl, sbKey, `/expenses?date=gte.${backupCutoff}&deleted_at=is.null&select=*`, RECENT),
+    userGetAll(sbUrl, sbKey, `/incomes?date=gte.${backupCutoff}&deleted_at=is.null&select=*`, RECENT),
+    userGetAll(sbUrl, sbKey, `/transfers?date=gte.${backupCutoff}&deleted_at=is.null&select=*`, RECENT),
   ]) as [Expense[], Income[], Transfer[], Expense[], Income[], Transfer[]];
 
-  const totalSpent     = expenses.reduce((sum, e) => sum + Number(e.amount), 0);
-  const totalIncome    = incomes.reduce((sum, i)  => sum + Number(i.amount), 0);
-  const totalTransfers = transfers.reduce((sum, t) => sum + Number(t.amount), 0);
-  const catMap = new Map<string, number>();
-  expenses.forEach(e => catMap.set(e.categoryId, (catMap.get(e.categoryId) ?? 0) + Number(e.amount)));
-  const byCategory = Array.from(catMap.entries()).map(([id, amount]) => ({ name: prettyCategory(id), amount }));
+  const { totalSpent, totalIncome, totalTransfers, byCategory } = reportTotals(expenses, incomes, transfers);
 
   const lbl    = `${s.frequency}_${format(end, "yyyy-MM-dd")}`;
   const fLabel = s.frequency === "custom" ? `Every ${s.custom_days}d` : s.frequency.charAt(0).toUpperCase() + s.frequency.slice(1);

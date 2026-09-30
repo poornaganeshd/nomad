@@ -42,21 +42,30 @@ export const getRecurringDueDate = (record, todayString) => {
     return null;
   }
   if (start > today) return null;
-  if (record.frequency === 'monthly') {
-    const dom = record.dayOfMonth || start.getDate();
-    let months = Math.max(0, fullMonthsBetween(start, today));
-    let due = withClampedDay(start.getFullYear(), start.getMonth() + months, dom);
-    const daysInDueMonth = new Date(due.getFullYear(), due.getMonth() + 1, 0).getDate();
-    if (dom > daysInDueMonth && due < today) { months += 1; due = withClampedDay(start.getFullYear(), start.getMonth() + months, dom); }
-    if (due < start) { months += 1; due = withClampedDay(start.getFullYear(), start.getMonth() + months, dom); }
-    return isoDate(due);
-  }
-  if (record.frequency === 'yearly') {
-    const monthIndex = Math.max(0, (record.yearMonth || (start.getMonth() + 1)) - 1);
-    const desiredDay = record.yearDay || start.getDate();
-    const startAnchor = withClampedDay(start.getFullYear(), monthIndex, desiredDay);
-    const years = Math.max(0, fullYearsBetween(startAnchor, today));
-    return isoDate(withClampedDay(start.getFullYear() + years, monthIndex, desiredDay));
+  // Monthly and yearly answer the same question: the LATEST occurrence on or
+  // before today, but never one before the bill's first occurrence (the first
+  // scheduled day on or after startDate). Before the first one it is returned
+  // as the upcoming date.
+  //
+  // This used to count whole months from the START date's day-of-month, which
+  // is not the day the bill falls on. A bill started on the 20th and due on the
+  // 25th rolled over on the 20th — so an unpaid 25 Aug cycle vanished from 20 to
+  // 24 Sep, the bill read "not due" and its overdue counter reset. The month-end
+  // clamp had the same hole from the other side: a bill due on the 31st jumped
+  // to 31 Mar on 1 Mar, silently dropping an unpaid 28 Feb. And a yearly bill
+  // whose renewal day falls earlier in the year than its start date (insurance
+  // that renews in March, added in September) was reported OVERDUE on the day
+  // it was created, for a March the bill did not exist in.
+  if (record.frequency === 'monthly' || record.frequency === 'yearly') {
+    const monthly = record.frequency === 'monthly';
+    const at = monthly
+      ? ((y, m) => withClampedDay(y, m, Number(record.dayOfMonth) || start.getDate()))
+      : ((y) => withClampedDay(y, Math.max(0, (Number(record.yearMonth) || (start.getMonth() + 1)) - 1), Number(record.yearDay) || start.getDate()));
+    let due = at(today.getFullYear(), today.getMonth());
+    if (due > today) due = monthly ? at(today.getFullYear(), today.getMonth() - 1) : at(today.getFullYear() - 1);
+    let first = at(start.getFullYear(), start.getMonth());
+    if (first < start) first = monthly ? at(start.getFullYear(), start.getMonth() + 1) : at(start.getFullYear() + 1);
+    return isoDate(due < first ? first : due);
   }
   if (record.frequency === 'custom') {
     const intervalDays = Number(record.intervalDays) || 0;
