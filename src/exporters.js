@@ -56,6 +56,60 @@ export const inPeriod = (rows, from, to) => (rows || []).filter(r => {
 
 const nameOf = (list, id, fallback = "") => (list || []).find(x => x && x.id === id)?.name || fallback || id || "";
 
+// A group expense someone ELSE paid: it records the event's total, but none of
+// that money left your wallets (your share is a separate IOU, and paying it is
+// a settlement). Every figure in the app leaves it out of spending — the
+// exports added it to "Expenses" / "Money out" and to the category shares.
+const isTracked = (e) => e && e.walletId === "__tracked__";
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const sumAmt = (rows) => r2((rows || []).reduce((t, r) => t + (Number(r.amount) || 0), 0));
+
+/**
+ * The cash story of a period, the one set of totals both exports print.
+ *
+ * Settlements are real cash — an IOU repaid to you arrives in a wallet, one
+ * you repay leaves it — and the statement lists them signed; its totals used
+ * to leave them out, so "Net" disagreed with the rows printed beneath it.
+ */
+export const periodTotals = ({ expenses = [], incomes = [], settlements = [] } = {}) => {
+  const own = (expenses || []).filter(e => e && !isTracked(e));
+  const income = sumAmt(incomes);
+  const spent = sumAmt(own);
+  const repaidToYou = sumAmt((settlements || []).filter(s => s && s.direction === "owed"));
+  const youRepaid = sumAmt((settlements || []).filter(s => s && s.direction !== "owed"));
+  const moneyIn = r2(income + repaidToYou), moneyOut = r2(spent + youRepaid);
+  return { income, spent, repaidToYou, youRepaid, moneyIn, moneyOut, net: r2(moneyIn - moneyOut) };
+};
+
+/**
+ * The flat, all-time CSV ("hand the whole thing to an AI"), one row per entry.
+ *
+ * Three things made it unreliable once it left the app:
+ *   • No byte-order mark, so Excel on Windows read the UTF-8 as ANSI and every
+ *     ₹, → and Devanagari note arrived as mojibake.
+ *   • A note starting with = + - or @ is a FORMULA to every spreadsheet: "+91
+ *     recharge" opened as #NAME?, and a crafted merchant name from an imported
+ *     statement could run one. Such cells are prefixed with ' (OWASP's advice).
+ *   • A group expense someone else paid had a blank wallet and read as your
+ *     spending; it now says who paid.
+ */
+export function buildFlatCsv({ expenses = [], incomes = [], transfers = [], settlements = [], wallets = [], categories = [], sources = [] } = {}) {
+  const w = (id) => nameOf(wallets, id, id);
+  const cell = (v) => {
+    let t = String(v ?? "");
+    if (/^[=+\-@\t\r]/.test(t)) t = "'" + t;
+    return `"${t.replace(/"/g, '""')}"`;
+  };
+  const live = (rows) => (rows || []).filter(r => r && !r.deleted_at);
+  const lines = [["Type", "Date", "Amount", "Category/Source", "Wallet", "Note"].join(",")];
+  const add = (...cells) => lines.push(cells.map((c, i) => (i === 2 && typeof c === "number" ? String(c) : cell(c))).join(","));
+  live(incomes).forEach(i => add("Income", i.date, Number(i.amount) || 0, nameOf(sources, i.sourceId, i.sourceId), w(i.walletId), i.note));
+  live(expenses).forEach(e => add("Expense", e.date, Number(e.amount) || 0, nameOf(categories, e.categoryId, e.categoryId), isTracked(e) ? `Paid by ${e.paidBy || "someone else"} (not from your wallets)` : w(e.walletId), e.note));
+  live(transfers).forEach(t => add("Transfer", t.date, Number(t.amount) || 0, `${w(t.fromWallet)} → ${w(t.toWallet)}`, "", t.note));
+  live(settlements).forEach(x => add("Settlement", x.date, Number(x.amount) || 0, x.splitName, w(x.walletId), x.direction === "owed" ? `${x.splitName || "They"} paid you` : `You paid ${x.splitName || "them"}`));
+  return "\uFEFF" + lines.join("\r\n") + "\r\n";
+}
+
 /**
  * The whole ledger as a SpreadsheetML workbook.
  *
@@ -76,16 +130,17 @@ export function buildWorkbook({ expenses = [], incomes = [], transfers = [], set
   const st = inPeriod(settlements, from, to);
   const sp = (splits || []).filter(x => x && !x.deleted_at);
 
-  const sum = (rows) => Math.round(rows.reduce((t, r) => t + (Number(r.amount) || 0), 0) * 100) / 100;
-  const totalIn = sum(inc), totalOut = sum(ex);
+  const t = periodTotals({ expenses: ex, incomes: inc, settlements: st });
 
   const sheets = [
     sheet("Summary", ["Item", "Value"], [
       ["Period", from || to ? `${from || "start"} to ${to || today || "today"}` : "All time"],
       ["Generated", today],
-      ["Income", totalIn],
-      ["Expenses", totalOut],
-      ["Net", Math.round((totalIn - totalOut) * 100) / 100],
+      ["Income", t.income],
+      ["Expenses", t.spent],
+      ...(t.repaidToYou ? [["Repaid to you", t.repaidToYou]] : []),
+      ...(t.youRepaid ? [["You repaid", t.youRepaid]] : []),
+      ["Net", t.net],
       ["Transactions", ex.length + inc.length + tr.length + st.length],
       ...(wallets.length ? [["", ""], ["Wallet", "Balance"]] : []),
       ...wallets.map(x => [x.name, Math.round((Number(balances[x.id]) || 0) * 100) / 100]),
@@ -128,21 +183,27 @@ ${sheets.join("\n")}
  */
 export function buildStatementHtml({ expenses = [], incomes = [], transfers = [], settlements = [], wallets = [], categories = [], sources = [], balances = {}, from = null, to = null, today = "", periodLabel = "All time", currency = "₹" } = {}) {
   const w = (id) => nameOf(wallets, id, id);
-  const money = (n) => `${currency}${(Math.round((Number(n) || 0) * 100) / 100).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+  // Sign before the symbol: an overdrawn wallet read "₹-500".
+  const money = (n) => { const v = r2(n); return `${v < 0 ? "−" : ""}${currency}${Math.abs(v).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`; };
   const ex = inPeriod(expenses, from, to);
   const inc = inPeriod(incomes, from, to);
   const tr = inPeriod(transfers, from, to);
   const st = inPeriod(settlements, from, to);
-  const totalIn = inc.reduce((t, r) => t + (Number(r.amount) || 0), 0);
-  const totalOut = ex.reduce((t, r) => t + (Number(r.amount) || 0), 0);
+  const t = periodTotals({ expenses: ex, incomes: inc, settlements: st });
+  const totalIn = t.moneyIn, totalOut = t.moneyOut;
 
+  // Where the money that LEFT went: your own expenses plus IOUs you repaid,
+  // each under its category — the same rule as the app's category cards.
   const byCat = {};
-  ex.forEach(e => { const k = nameOf(categories, e.categoryId, "Other"); byCat[k] = (byCat[k] || 0) + (Number(e.amount) || 0); });
-  const catRows = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const addCat = (cid, amt) => { const k = nameOf(categories, cid, "Other"); byCat[k] = r2((byCat[k] || 0) + (Number(amt) || 0)); };
+  ex.filter(e => !isTracked(e)).forEach(e => addCat(e.categoryId, e.amount));
+  st.filter(x => x.direction !== "owed").forEach(x => addCat(x.categoryId, x.amount));
+  const catRows = Object.entries(byCat).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
 
   const all = [
     ...inc.map(r => ({ ...r, _k: "Income", _label: nameOf(sources, r.sourceId, "Income"), _sign: 1, _wallet: w(r.walletId) })),
-    ...ex.map(r => ({ ...r, _k: "Expense", _label: nameOf(categories, r.categoryId, "Other"), _sign: -1, _wallet: r.walletId === "__tracked__" ? "tracked" : w(r.walletId) })),
+    // Someone else's payment moved none of your money: listed, never signed.
+    ...ex.map(r => ({ ...r, _k: "Expense", _label: nameOf(categories, r.categoryId, "Other"), _sign: isTracked(r) ? 0 : -1, _wallet: isTracked(r) ? `paid by ${r.paidBy || "someone else"}` : w(r.walletId) })),
     ...tr.map(r => ({ ...r, _k: "Transfer", _label: `${w(r.fromWallet)} → ${w(r.toWallet)}`, _sign: 0, _wallet: "" })),
     ...st.map(r => ({ ...r, _k: "Settlement", _label: r.splitName || "", _sign: r.direction === "owed" ? 1 : -1, _wallet: w(r.walletId) })),
   ].sort((a, b) => String(a.date).localeCompare(String(b.date)));
@@ -175,10 +236,10 @@ export function buildStatementHtml({ expenses = [], incomes = [], transfers = []
 <div class="cards">
   <div class="card"><div class="k">Money in</div><div class="v pos">${money(totalIn)}</div></div>
   <div class="card"><div class="k">Money out</div><div class="v neg">${money(totalOut)}</div></div>
-  <div class="card"><div class="k">Net</div><div class="v">${money(totalIn - totalOut)}</div></div>
+  <div class="card"><div class="k">Net</div><div class="v">${money(t.net)}</div></div>
   <div class="card"><div class="k">Entries</div><div class="v">${all.length}</div></div>
 </div>
-${catRows.length ? `<h2>Where it went</h2><table><thead><tr><th>Category</th><th style="text-align:right">Amount</th><th style="text-align:right">Share</th></tr></thead><tbody>${catRows.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="amt">${money(v)}</td><td class="amt">${totalOut > 0 ? Math.round((v / totalOut) * 100) : 0}%</td></tr>`).join("")}</tbody></table>` : ""}
+${catRows.length ? `<h2>Where it went</h2><table><thead><tr><th>Category</th><th style="text-align:right">Amount</th><th style="text-align:right">Share</th></tr></thead><tbody>${catRows.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="amt">${money(v)}</td><td class="amt">${t.moneyOut > 0 ? Math.round((v / t.moneyOut) * 100) : 0}%</td></tr>`).join("")}</tbody></table>` : ""}
 ${wallets.length ? `<h2>Balances</h2><table><thead><tr><th>Wallet</th><th style="text-align:right">Balance</th></tr></thead><tbody>${wallets.map(x => `<tr><td>${esc(x.name)}</td><td class="amt">${money(balances[x.id] || 0)}</td></tr>`).join("")}</tbody></table>` : ""}
 <h2>Transactions</h2>
 ${all.length ? `<table><thead><tr><th>Date</th><th>Type</th><th>Category / Person</th><th>Wallet</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead><tbody>${tx}</tbody></table>` : `<div class="empty">Nothing logged in this period.</div>`}

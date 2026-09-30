@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildWorkbook, buildStatementHtml, inPeriod } from '../exporters.js';
+import { buildWorkbook, buildStatementHtml, inPeriod, periodTotals, buildFlatCsv } from '../exporters.js';
 
 // Export was one flat CSV — every row type crammed into six shared columns, so
 // "Category/Source" meant three different things depending on the row — plus a
@@ -140,5 +140,89 @@ describe('buildStatementHtml', () => {
   it('says so plainly when the period is empty', () => {
     const out = buildStatementHtml({ wallets: [], today: '2026-09-15', from: '2020-01-01', to: '2020-01-31' });
     expect(out).toContain('Nothing logged in this period');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Totals that agree with the app — and with the rows printed beneath them
+// ---------------------------------------------------------------------------
+describe('periodTotals', () => {
+  it('leaves out a group expense someone else paid, and counts settlements as cash', () => {
+    const t = periodTotals({
+      expenses: [{ amount: 1200, walletId: 'bank' }, { amount: 900, walletId: '__tracked__', paidBy: 'Rafi' }],
+      incomes: [{ amount: 5000 }],
+      settlements: [{ amount: 900, direction: 'owed' }, { amount: 300, direction: 'owe' }],
+    });
+    expect(t).toEqual({ income: 5000, spent: 1200, repaidToYou: 900, youRepaid: 300, moneyIn: 5900, moneyOut: 1500, net: 4400 });
+  });
+});
+
+describe('buildStatementHtml — tracked expenses and settlements', () => {
+  const html = buildStatementHtml({
+    expenses: [
+      { id: 'a', date: '2026-09-02', amount: 1200, categoryId: 'food', walletId: 'bank', note: 'Dinner I paid' },
+      { id: 'b', date: '2026-09-03', amount: 900, categoryId: 'food', walletId: '__tracked__', paidBy: 'Rafi', note: 'Rafi paid' },
+    ],
+    settlements: [{ id: 's', date: '2026-09-04', amount: 300, direction: 'owe', splitName: 'Rafi', walletId: 'bank', categoryId: 'food' }],
+    wallets: [{ id: 'bank', name: 'Bank' }],
+    categories: [{ id: 'food', name: 'Food' }],
+    balances: { bank: -250 },
+    periodLabel: 'September 2026',
+  });
+
+  it('money out is your wallets only: ₹1,200 spent + ₹300 repaid, not the ₹900 Rafi paid', () => {
+    expect(html).toMatch(/Money out<\/div><div class="v neg">₹1,500</);
+  });
+
+  it('lists the tracked row unsigned, naming who paid', () => {
+    expect(html).toContain('paid by Rafi');
+    expect(html).toMatch(/Rafi paid<\/td><td class="amt ">₹900/);
+  });
+
+  it('puts the sign before the currency symbol', () => {
+    expect(html).toContain('−₹250');
+    expect(html).not.toContain('₹-250');
+  });
+});
+
+describe('buildWorkbook — summary', () => {
+  it('does not count someone else\'s payment as your expense', () => {
+    const xml = buildWorkbook({ expenses: [{ date: '2026-09-02', amount: 100, walletId: 'bank' }, { date: '2026-09-02', amount: 900, walletId: '__tracked__' }] });
+    expect(xml).toMatch(/Expenses<\/Data><\/Cell><Cell><Data ss:Type="Number">100<\/Data>/);
+  });
+});
+
+describe('buildFlatCsv', () => {
+  const csv = buildFlatCsv({
+    expenses: [
+      { date: '2026-09-02', amount: 50, categoryId: 'food', walletId: 'bank', note: '+91 recharge' },
+      { date: '2026-09-03', amount: 900, categoryId: 'food', walletId: '__tracked__', paidBy: 'Rafi', note: '=HYPERLINK("http://x")' },
+      { date: '2026-09-04', amount: 20, categoryId: 'food', walletId: 'bank', note: 'दूध "full cream"', deleted_at: 'x' },
+    ],
+    settlements: [{ date: '2026-09-05', amount: 300, direction: 'owed', splitName: 'Rafi', walletId: 'bank' }],
+    wallets: [{ id: 'bank', name: 'Bank' }],
+    categories: [{ id: 'food', name: 'Food' }],
+  });
+
+  it('starts with a UTF-8 byte-order mark so Excel reads ₹ and Devanagari', () => {
+    expect(csv.charCodeAt(0)).toBe(0xFEFF);
+  });
+
+  it('defuses cells a spreadsheet would run as a formula', () => {
+    expect(csv).toContain(`"'+91 recharge"`);
+    expect(csv).toContain(`"'=HYPERLINK(""http://x"")"`);
+  });
+
+  it('keeps amounts numeric and says who paid a tracked expense', () => {
+    expect(csv).toContain('"Expense","2026-09-02",50,"Food","Bank"');
+    expect(csv).toContain('Paid by Rafi (not from your wallets)');
+  });
+
+  it('reads a settlement as a sentence, not a direction code', () => {
+    expect(csv).toContain('Rafi paid you');
+  });
+
+  it('leaves soft-deleted rows out', () => {
+    expect(csv).not.toContain('full cream');
   });
 });
