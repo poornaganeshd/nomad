@@ -1401,7 +1401,7 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
     {(() => { const SI = { expense: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><polyline points="19 12 12 19 5 12" /></svg>, income: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></svg>, transfer: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9" /><line x1="3" y1="5" x2="21" y2="5" /><polyline points="7 23 3 19 7 15" /><line x1="21" y1="19" x2="3" y2="19" /></svg>, recurring: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="17 1 21 5 17 9" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><polyline points="7 23 3 19 7 15" /><path d="M21 13v2a4 4 0 0 1-4 4H3" /></svg> }; return <div style={{ display: "flex", background: "var(--card)", borderRadius: 12, padding: 4, border: "1px solid var(--border)", marginBottom: 20, gap: 2 }}>{[{ id: "expense", label: "Expense" }, { id: "income", label: "Income" }, { id: "transfer", label: "Transfer" }, { id: "recurring", label: "Recurring" }].map(t => <button key={t.id} onClick={() => { hapticSelection(); sType(t.id); }} style={{ flex: 1, padding: "10px 4px", border: "none", borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", gap: 4, lineHeight: 1, background: type === t.id ? (t.id === "expense" ? "var(--neg)" : t.id === "income" ? "var(--pos)" : t.id === "transfer" ? "var(--acc)" : "var(--acc2)") : "transparent", color: type === t.id ? "#fff" : "var(--muted)", fontFamily: "var(--font-h)", fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.15s" }}>{SI[t.id]}{t.label}</button>)}</div>; })()}
     {type !== "recurring" && (() => {
       const applyParsed = r => { if (r.amount) sAmt(String(r.amount)); if (r.note) sNote(r.note); if (r.walletId) { if (type === "expense") sW(r.walletId); else if (!isUpiLite(aw.find(w => w.id === r.walletId) || {})) sIW(r.walletId); } if (r.categoryId) { if (type === "expense") sCat(r.categoryId); else sSrc(r.categoryId); } };
-      const handleVoice = async t => { const local = parseVoiceTx(t, { wallets: aw, categories: type === "expense" ? cats : isrc }); applyParsed(local); if (local.amount && local.categoryId && local.walletId) { showT(`Heard: ₹${local.amount} ${local.note || ""}`, "info"); return; } try { const r = await fetch("/api/ai-analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "voice-parse", transcript: t, wallets: aw.map(w => ({ id: w.id, name: w.name })), categories: (type === "expense" ? cats : isrc).map(c => ({ id: c.id, name: c.name })) }) }); const data = await r.json(); if (r.ok && data.amount) { applyParsed(data); showT(`AI: ₹${data.amount} ${data.note || ""}`, "info"); } else if (!local.amount) { showT(data?.error || "Couldn't parse — try \"300 coffee bank\"", "error"); } } catch { if (!local.amount) showT("Couldn't parse — try \"300 coffee bank\"", "error"); } };
+      const handleVoice = async t => { const local = parseVoiceTx(t, { wallets: aw, categories: type === "expense" ? cats : isrc }); applyParsed(local); if (local.amount && local.categoryId && local.walletId) { showT(`Heard: ${fmt(local.amount)} ${local.note || ""}`, "info"); return; } try { const r = await fetch("/api/ai-analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "voice-parse", transcript: t, wallets: aw.map(w => ({ id: w.id, name: w.name })), categories: (type === "expense" ? cats : isrc).map(c => ({ id: c.id, name: c.name })) }) }); const data = await r.json(); if (r.ok && data.amount) { applyParsed(data); showT(`AI: ${fmt(data.amount)} ${data.note || ""}`, "info"); } else if (!local.amount) { showT(data?.error || "Couldn't parse — try \"300 coffee bank\"", "error"); } } catch { if (!local.amount) showT("Couldn't parse — try \"300 coffee bank\"", "error"); } };
       // Tint a colour. Hex goes down the rgba() path; ANYTHING ELSE (a CSS var,
       // an rgb()/hsl() string) goes through color-mix, because the hex parse
       // silently yields NaN → `|| 0` → pure BLACK. That wasn't theoretical: the
@@ -3491,9 +3491,9 @@ export default function Nomad() {
     // UPI Lite cap warnings
     if (isUpiLite(data.walletId, wallets)) {
       const u = upiLiteUsage(data.date || today, data.walletId);
-      if (roundMoney(u.day + amt) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (₹${u.day} used)`, "error"); return false }
+      if (roundMoney(u.day + amt) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (${fmt(u.day)} used)`, "error"); return false }
       if (roundMoney(u.month + amt) > 100000) { showT(`UPI Lite monthly cap ₹1L exceeded`, "error"); return false }
-      if (roundMoney(u.day + amt) > 4500) { showT(`Heads up: UPI Lite at ₹${roundMoney(u.day + amt)} today (cap ₹5000)`, "info") }
+      if (roundMoney(u.day + amt) > 4500) { showT(`Heads up: UPI Lite at ${fmt(u.day + amt)} today (cap ₹5000)`, "info") }
     }
     const rec = { id: uid(), type: "expense", ...data, amount: amt, balBefore: b, created_at: new Date().toISOString() };
     sEx(p => [rec, ...p]);
@@ -3522,7 +3522,7 @@ export default function Nomad() {
     return true;
   };
   const addI = (data, { balanceDelta = 0 } = {}) => { const amt = roundMoney(data.amount); if (isUpiLite(data.walletId, wallets)) { showT("UPI Lite is for spending only", "error"); return false } if (amt <= 0) { showT("Enter a valid amount", "error"); return false } if (amt > 10000000) { showT("Amount too large (max ₹1 crore)", "error"); return false } if (typeof data.note === "string" && data.note.length > 500) data = { ...data, note: data.note.slice(0, 500) }; const isBackdated = data.date && data.date < localDateKey(); const balBefore = roundMoney((isBackdated ? balanceOnDate(data.walletId, data.date) : (wBal[data.walletId] || 0)) + balanceDelta); const rec = { id: uid(), type: "income", ...data, amount: amt, balBefore, created_at: new Date().toISOString() }; sInc(p => [rec, ...p]); sbUpsert("incomes", [toSB(rec, COLS.incomes)]); dance(); showT(online ? "Income added" : "Income saved offline", "success"); return true };
-  const addT = data => { const amt = roundMoney(data.amount); if (amt <= 0) { showT("Enter an amount above zero", "error"); return false } if (amt > 10000000) { showT("Amount too large (max ₹1 crore)", "error"); return false } if (!data.fromWallet || !data.toWallet) { showT("Pick a source and a destination wallet", "error"); return false } if (data.fromWallet === data.toWallet) { showT("Source and destination must be different wallets", "error"); return false } const isBackdated = data.date && data.date < localDateKey(); const fromBalBefore = roundMoney(isBackdated ? balanceOnDate(data.fromWallet, data.date) : (wBal[data.fromWallet] || 0)); if (fromBalBefore < amt) { showT(`Insufficient balance`, "error"); return false } if (typeof data.note === "string" && data.note.length > 500) data = { ...data, note: data.note.slice(0, 500) }; const toBalBefore = roundMoney(isBackdated ? balanceOnDate(data.toWallet, data.date) : (wBal[data.toWallet] || 0)); if (isUpiLite(data.toWallet, wallets) && exceedsUpiLiteBalance(toBalBefore, amt)) { showT(`UPI Lite max balance is ₹${UPI_LITE_MAX_BALANCE} (RBI rule)`, "error"); return false } const rec = { id: uid(), type: "transfer", ...data, amount: amt, fromBalBefore, toBalBefore, created_at: new Date().toISOString() }; sTr(p => [rec, ...p]); sbUpsert("transfers", [toSB(rec, COLS.transfers)]); dance(); showT(online ? "Transfer done" : "Transfer queued offline", "success"); return true };
+  const addT = data => { const amt = roundMoney(data.amount); if (amt <= 0) { showT("Enter an amount above zero", "error"); return false } if (amt > 10000000) { showT("Amount too large (max ₹1 crore)", "error"); return false } if (!data.fromWallet || !data.toWallet) { showT("Pick a source and a destination wallet", "error"); return false } if (data.fromWallet === data.toWallet) { showT("Source and destination must be different wallets", "error"); return false } const isBackdated = data.date && data.date < localDateKey(); const fromBalBefore = roundMoney(isBackdated ? balanceOnDate(data.fromWallet, data.date) : (wBal[data.fromWallet] || 0)); if (fromBalBefore < amt) { showT(`Insufficient balance`, "error"); return false } if (typeof data.note === "string" && data.note.length > 500) data = { ...data, note: data.note.slice(0, 500) }; const toBalBefore = roundMoney(isBackdated ? balanceOnDate(data.toWallet, data.date) : (wBal[data.toWallet] || 0)); if (isUpiLite(data.toWallet, wallets) && exceedsUpiLiteBalance(toBalBefore, amt)) { showT(`UPI Lite max balance is ${fmt(UPI_LITE_MAX_BALANCE)} (RBI rule)`, "error"); return false } const rec = { id: uid(), type: "transfer", ...data, amount: amt, fromBalBefore, toBalBefore, created_at: new Date().toISOString() }; sTr(p => [rec, ...p]); sbUpsert("transfers", [toSB(rec, COLS.transfers)]); dance(); showT(online ? "Transfer done" : "Transfer queued offline", "success"); return true };
   const refundItem = exp => { if (!exp || exp.amount <= 0 || exp.walletId === "__tracked__") return; const src = isrc[0]; if (!src) { showT("No income source configured", "error"); return; } let destW = exp.walletId, rerouted = false; if (isUpiLite(destW, wallets)) { const alt = wallets.find(w => w.id === "bank" && !isUpiLite(w, wallets)) || wallets.find(w => !isUpiLite(w, wallets)); if (!alt) { showT("No wallet can receive a refund — UPI Lite is spend-only", "error"); return; } destW = alt.id; rerouted = true; } const note = ("Refund: " + (exp.note || cats.find(c => c.id === exp.categoryId)?.name || "")).slice(0, 500); const ok = addI({ id: uid(), amount: exp.amount, sourceId: src.id, walletId: destW, note, date: localDateKey() }); if (ok !== false && rerouted) showT(`Refund added to ${wallets.find(w => w.id === destW)?.name || destW} (UPI Lite can't receive)`, "info"); };
   const settle = (sid, wid, payAmt, date, opts = {}) => {
     const s = sp.find(x => x.id === sid);
@@ -3547,9 +3547,9 @@ export default function Nomad() {
       if (b < amount) { showT(`Not enough — need ${fmt(amount)}, have ${fmt(b)}`, "error"); return false }
       if (isUpiLite(wid, wallets)) {
         const u = upiLiteUsage(day, wid);
-        if (roundMoney(u.day + amount) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (₹${u.day} used)`, "error"); return false }
+        if (roundMoney(u.day + amount) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (${fmt(u.day)} used)`, "error"); return false }
         if (roundMoney(u.month + amount) > 100000) { showT(`UPI Lite monthly cap ₹1L exceeded`, "error"); return false }
-        if (roundMoney(u.day + amount) > 4500) { showT(`Heads up: UPI Lite at ₹${roundMoney(u.day + amount)} today`, "info") }
+        if (roundMoney(u.day + amount) > 4500) { showT(`Heads up: UPI Lite at ${fmt(u.day + amount)} today`, "info") }
       }
     }
     if (s.direction === "owed" && isUpiLite(wid, wallets)) { showT("UPI Lite cannot receive money", "error"); return false }
@@ -3641,7 +3641,7 @@ export default function Nomad() {
       if (dir === "owe") {
         const b = roundMoney(wBal[wid] || 0);
         if (b < cap) { showT(`Not enough — need ${fmt(cap)}, ${wallets.find(w => w.id === wid)?.name || "wallet"} has ${fmt(b)}`, "error"); return false; }
-        if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + cap) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (₹${u.day} used)`, "error"); return false; } if (roundMoney(u.month + cap) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
+        if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + cap) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (${fmt(u.day)} used)`, "error"); return false; } if (roundMoney(u.month + cap) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
       }
       const recs = []; const doneIds = []; const paidById = {};
       // General IOUs pay down before event IOUs so a partial amount clears the
@@ -3689,7 +3689,7 @@ export default function Nomad() {
     if (youPay) {
       const b = roundMoney(wBal[wid] || 0);
       if (b < gross) { showT(`Not enough — need ${fmt(gross)}, ${wallets.find(w => w.id === wid)?.name || "wallet"} has ${fmt(b)}`, "error"); return false; }
-      if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + gross) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (₹${u.day} used)`, "error"); return false; } if (roundMoney(u.month + gross) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
+      if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + gross) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (${fmt(u.day)} used)`, "error"); return false; } if (roundMoney(u.month + gross) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
     }
     const recs = items.map(x => mkRec(x, x.rem));
     if (excess > 0.005) { const dir = net > 0 ? "owed" : "owe"; const host = recs.find(r => r.direction === dir); if (host) { host.amount = roundMoney(host.amount + excess); host.excess = excess; } }
@@ -3750,7 +3750,7 @@ export default function Nomad() {
       if (dir === "owe") {
         const b = roundMoney(wBal[wid] || 0);
         if (b < cap) { showT(`Not enough — need ${fmt(cap)}, ${wallets.find(w => w.id === wid)?.name || "wallet"} has ${fmt(b)}`, "error"); return false; }
-        if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + cap) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (₹${u.day} used)`, "error"); return false; } if (roundMoney(u.month + cap) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
+        if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + cap) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (${fmt(u.day)} used)`, "error"); return false; } if (roundMoney(u.month + cap) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
       }
       const recs = []; const doneIds = []; const paidById = {};
       for (const x of items.filter(i => i.s.direction === dir)) {
@@ -3785,7 +3785,7 @@ export default function Nomad() {
     if (youPay) {
       const b = roundMoney(wBal[wid] || 0);
       if (b < -net) { showT(`Not enough — net is ${fmt(-net)}, ${wallets.find(w => w.id === wid)?.name || "wallet"} has ${fmt(b)}`, "error"); return false; }
-      if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + (-net)) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (₹${u.day} used)`, "error"); return false; } if (roundMoney(u.month + (-net)) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
+      if (isUpiLite(wid, wallets)) { const u = upiLiteUsage(today, wid); if (roundMoney(u.day + (-net)) > 5000) { showT(`UPI Lite daily cap ₹5000 exceeded (${fmt(u.day)} used)`, "error"); return false; } if (roundMoney(u.month + (-net)) > 100000) { showT("UPI Lite monthly cap ₹1L exceeded", "error"); return false; } }
     }
     const recs = items.map(x => mkRec(x, x.rem));
     { const cash = settlementsCash(recs); if (!cashMatchesExpectation(opts.expectCash, cash)) return refuseStaleSettle(opts.expectCash, cash); }
@@ -3875,7 +3875,7 @@ export default function Nomad() {
     if (type === "transfer") {
       if (!after.fromWallet || !after.toWallet) { showT("Pick a source and a destination wallet", "error"); return false; }
       if (after.fromWallet === after.toWallet) { showT("Source and destination must be different wallets", "error"); return false; }
-      if (isUpiLite(after.toWallet, wallets) && exceedsUpiLiteBalance(roundMoney((wBal[after.toWallet] || 0) - (walletDeltas(before)[after.toWallet] || 0)), amt)) { showT(`UPI Lite max balance is ₹${UPI_LITE_MAX_BALANCE} (RBI rule)`, "error"); return false; }
+      if (isUpiLite(after.toWallet, wallets) && exceedsUpiLiteBalance(roundMoney((wBal[after.toWallet] || 0) - (walletDeltas(before)[after.toWallet] || 0)), amt)) { showT(`UPI Lite max balance is ${fmt(UPI_LITE_MAX_BALANCE)} (RBI rule)`, "error"); return false; }
     }
     if (type === "income" && isUpiLite(after.walletId, wallets)) { showT("UPI Lite is for spending only", "error"); return false; }
 
@@ -3966,7 +3966,7 @@ export default function Nomad() {
   const addCust = () => { if (!nn.trim()) return; const id = nn.trim().toLowerCase().replace(/\s+/g, "_") + "_" + uid(), item = { id, name: nn.trim(), emoji: ne2, color: nc }; if (mt === "expense") sCats(p => [...p, item]); else sIsrc(p => [...p, item]); sNN(""); sNE2("📁"); sNC("#E07A5F") };
   const handleCal = (wId, desired, note = "") => {
     if (isUpiLite(wId, wallets) && desired > UPI_LITE_MAX_BALANCE) {
-      showT(`UPI Lite max balance is ₹${UPI_LITE_MAX_BALANCE} (RBI rule)`, "error");
+      showT(`UPI Lite max balance is ${fmt(UPI_LITE_MAX_BALANCE)} (RBI rule)`, "error");
       return;
     }
     if (desired < 0) {
@@ -4305,7 +4305,7 @@ export default function Nomad() {
       if (sum.missing === 0) {
         sChatMsgs(p => [...p, { role: "assistant", content: `**All caught up!** I checked ${sum.total} statement row${sum.total === 1 ? "" : "s"} against **${wName}**: ${sum.matched} matched${already} — nothing missing. 🦁` }]);
       } else {
-        const lines = sum.missingRows.slice(0, 8).map(x => `• ${x.date} · ${x.type === "income" ? "+" : "−"}₹${x.amount} · ${x.note || "—"}`).join("\n");
+        const lines = sum.missingRows.slice(0, 8).map(x => `• ${x.date} · ${x.type === "income" ? "+" : "−"}${fmt(x.amount)} · ${x.note || "—"}`).join("\n");
         const more = sum.missing > 8 ? `\n…and ${sum.missing - 8} more` : "";
         sChatMsgs(p => [...p, { role: "assistant", content: `I compared ${sum.total} statement row${sum.total === 1 ? "" : "s"} against **${wName}**: **${sum.matched} matched**, **${sum.missing} missing** from NOMAD${already}.\n\nMissing:\n${lines}${more}\n\nOpen the review to tick & import. The **AI review** button there asks every configured AI provider and majority-votes the verdicts.`, action: "recon" }]);
       }
