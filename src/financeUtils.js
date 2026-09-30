@@ -274,6 +274,18 @@ export const defaultSettleWalletId = (direction, wallets, isUpiLiteFn) => {
   return (usable[0] || list[0])?.id;
 };
 
+// Which wallet an IMPORT books into by default (bank CSV, ledger photo, the
+// statement reconcile). A statement is a bank's record, so "bank" when it
+// exists — and never UPI Lite, which cannot receive money and caps spending at
+// ₹5000 a day. The imports used to take wallets[0], which in the default seed
+// order IS UPI Lite: every income row was refused, most expense rows hit the
+// cap, and the preview underneath said "Bank wallet" the whole time.
+export const defaultImportWalletId = (wallets, isUpiLiteFn) => {
+  const list = (wallets || []).filter(Boolean);
+  const canReceive = list.filter(w => !isUpiLiteFn(w));
+  return (canReceive.find(w => w.id === "bank") || canReceive[0] || list[0])?.id || "bank";
+};
+
 // A settlement's contribution to the SPLIT ledger. `amount` is the cash that
 // actually moved (wallet math must always use it in full); `excess` is the part
 // paid over and above the IOU's remainder (an overpay — e.g. owed ₹11.66, friend

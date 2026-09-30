@@ -7,6 +7,7 @@ import {
   settlementNetAmount,
   isSuspiciousExcess,
   settleWritesIncoming,
+  defaultImportWalletId,
 } from '../financeUtils.js';
 
 // Regression "wall" for the class of bugs that kept recurring in App.jsx:
@@ -178,5 +179,24 @@ describe('settleWritesIncoming — the one rule for offering/accepting UPI Lite'
 
   it('defaults to "no incoming" with nothing passed', () => {
     expect(settleWritesIncoming()).toBe(false);
+  });
+});
+
+// Every import (bank CSV, ledger photo, statement reconcile) books into this
+// wallet by default. It used to be wallets[0] — UPI Lite in the default seed
+// order — so every income row was refused and most expenses hit the ₹5000 cap,
+// under a preview that said "Bank wallet".
+describe('defaultImportWalletId', () => {
+  const isLite = w => w?.id === 'upi_lite' || !!w?.upiLite;
+  it('prefers bank over the first wallet', () => {
+    expect(defaultImportWalletId([{ id: 'upi_lite' }, { id: 'cash' }, { id: 'bank' }], isLite)).toBe('bank');
+  });
+  it('never picks a UPI Lite wallet when anything else can receive', () => {
+    expect(defaultImportWalletId([{ id: 'upi_lite' }, { id: 'hdfc' }], isLite)).toBe('hdfc');
+    expect(defaultImportWalletId([{ id: 'lite2', upiLite: true }, { id: 'cash' }], isLite)).toBe('cash');
+  });
+  it('falls back to the only wallet there is, then to "bank"', () => {
+    expect(defaultImportWalletId([{ id: 'upi_lite' }], isLite)).toBe('upi_lite');
+    expect(defaultImportWalletId([], isLite)).toBe('bank');
   });
 });

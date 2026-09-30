@@ -4,10 +4,16 @@ import { localDateKey } from "./financeUtils";
 
 // Locale-aware amount parser. Accepts "3.24", "3,24" (EU decimal), "1,234.56" (US thousands), "1,23,456.78" (Indian).
 // Returns NaN for empty / unparseable input — callers should guard with Number.isFinite.
+// A currency marker on either side ("₹1,500", "Rs. 500", "INR 500", the Indian
+// "500/-") and digit-grouping spaces ("1 500") are stripped first — pasting an
+// amount copied from an SMS or a bill used to be refused as "not a number".
 export const parseAmount = (s) => {
   if (typeof s === "number") return s;
   if (s == null) return NaN;
-  const str = String(s).trim();
+  const str = String(s).trim()
+    .replace(/^(?:₹|rs\.?|inr)\s*/i, "")
+    .replace(/\s*(?:₹|rs\.?|inr|\/-)$/i, "")
+    .replace(/(\d)\s+(?=\d)/g, "$1");
   if (!str) return NaN;
   const hasComma = str.includes(",");
   const hasPeriod = str.includes(".");
@@ -24,9 +30,22 @@ export function parseVoiceTx(transcript, { wallets = [], categories = [] } = {})
   // ("1,500") and decimals ("3.50") survive. The old code replaced "," and "."
   // with spaces first, which truncated "1,500" → 1 and "3.50" → 3. The capture
   // group keeps grouping/decimal chars; parseAmount normalises EU/US/Indian forms.
-  const amtMatch = lower.match(/(?:rs\.?|rupees?|₹)?\s*(\d[\d,]*(?:\.\d+)?)\s*(?:rs\.?|rupees?|₹|bucks?)?/);
-  const parsedAmt = amtMatch ? parseAmount(amtMatch[1]) : NaN;
-  const amount = Number.isFinite(parsedAmt) ? parsedAmt : null;
+  //
+  // Spoken Indian amounts carry a scale word: "5k", "2 thousand", "1.5 lakh".
+  // Without it "spent 2k on coffee from cash" saved ₹2 — and since that line
+  // names an amount, a category and a wallet, the local parse was trusted and
+  // the AI fallback never ran. `k` must stand alone ("2 kg rice" is not ₹2000).
+  //
+  // A number marked as money ("₹120", "rs 120", "120 rupees") wins over the
+  // first number in the sentence — "2 kg rice 120 rupees" is ₹120, not ₹2.
+  const NUM = "(\\d[\\d,]*(?:\\.\\d+)?)\\s*(k\\b|thousand\\b|grand\\b|lakhs?\\b|lacs?\\b|crores?\\b)?";
+  const CUR = "(?:\\b(?:rs\\.?|rupees?|inr)|₹)";
+  const amtMatch = lower.match(new RegExp(`${CUR}\\s*${NUM}(?:\\s*(?:\\brs\\b\\.?|\\brupees?\\b|₹|\\bbucks?\\b))?`))
+    || lower.match(new RegExp(`${NUM}\\s*(?:\\brs\\b\\.?|\\brupees?\\b|₹|\\bbucks?\\b|\\binr\\b)`))
+    || lower.match(new RegExp(NUM));
+  const SCALE = { k: 1e3, thousand: 1e3, grand: 1e3, lakh: 1e5, lakhs: 1e5, lac: 1e5, lacs: 1e5, crore: 1e7, crores: 1e7 };
+  const parsedAmt = amtMatch ? parseAmount(amtMatch[1]) * (SCALE[amtMatch[2]] || 1) : NaN;
+  const amount = Number.isFinite(parsedAmt) ? Math.round(parsedAmt * 100) / 100 : null;
   // Drop the matched amount span first, THEN normalise punctuation/whitespace for
   // wallet/category/note matching.
   const txt = (amtMatch ? lower.replace(amtMatch[0], " ") : lower).replace(/[,.!?]/g, " ").replace(/\s+/g, " ").trim();
@@ -42,7 +61,11 @@ export function parseVoiceTx(transcript, { wallets = [], categories = [] } = {})
   }
   let note = txt.replace(/\b(rs|rupees?|bucks?|paid|spent|got|received|added)\b/g, " ");
   if (wid) (walletAliases[wid] || []).forEach(a => { note = note.replace(new RegExp("\\b" + a + "\\b", "g"), " "); });
+  // Connectives left dangling at either end once the amount and the wallet are
+  // lifted out ("spent 250 on coffee from cash" → "on coffee from").
+  const EDGE = /^(?:on|for|from|to|at|in|via|using|with|of|by|and)\s+|\s+(?:on|for|from|to|at|in|via|using|with|of|by|and)$/;
   note = note.replace(/\s+/g, " ").trim();
+  for (let prev = null; prev !== note;) { prev = note; note = note.replace(EDGE, "").trim(); }
   return { amount, walletId: wid, categoryId: cid, note: note || null };
 }
 
@@ -71,18 +94,37 @@ export const parseBankCsv = (text) => {
   // columns in Indian statements) work. Substring matching skips ≤2-char keywords —
   // otherwise "cr" matches "des(cr)iption" and mis-detects the credit column on
   // SBI/generic CSVs that put Description before the Credit column.
+  //
+  // Exact matches are tried in KEYWORD order, not header order, so the list
+  // reads as a priority: a statement with "Value Date" before "Transaction
+  // Date" used to book every cheque on the day it cleared rather than the day
+  // it was written.
   const colIdx = (keywords) => {
-    const exact = headers.findIndex(h => keywords.includes(h));
-    if (exact >= 0) return exact;
+    for (const k of keywords) { const i = headers.indexOf(k); if (i >= 0) return i; }
     return headers.findIndex(h => keywords.some(k => k.length > 2 && h.includes(k)));
   };
-  const dateCol = colIdx(["date", "txn date", "trans date", "transaction date", "value date"]);
-  const debitCol = colIdx(["debit", "withdrawal", "dr", "debit amount", "withdrawal amt"]);
-  const creditCol = colIdx(["credit", "deposit", "cr", "credit amount", "deposit amt"]);
-  const amtCol = colIdx(["amount", "amt"]);
+  const dateCol = colIdx(["date", "txn date", "tran date", "trans date", "transaction date", "posting date", "value date"]);
+  const debitCol = colIdx(["debit", "withdrawal", "dr", "debit amount", "withdrawal amt", "paid out", "money out", "withdrawals"]);
+  const creditCol = colIdx(["credit", "deposit", "cr", "credit amount", "deposit amt", "paid in", "money in", "deposits"]);
+  const amtCol = colIdx(["amount", "amt", "transaction amount", "txn amount"]);
+  // A separate debit/credit INDICATOR column ("Dr/Cr", "Type": DR / CR). Only
+  // its recognisable values are trusted — a "Type" column saying "UPI" or
+  // "NEFT" is a channel, not a direction.
+  const sideCol = colIdx(["dr/cr", "cr/dr", "dr / cr", "debit/credit", "credit/debit", "type", "txn type", "transaction type"]);
   const descCol = colIdx(["narration", "description", "particulars", "details", "remarks", "payee", "note", "transaction description"]);
   const refCol = colIdx(["ref no", "ref no.", "ref no./cheque no", "chq./ref.no.", "chq/ref no", "cheque no", "chq no", "reference no", "reference", "utr", "utr no", "utr number", "transaction id", "txn id"]);
   const balCol = colIdx(["balance", "closing balance", "running balance", "available balance", "balance amt"]);
+  // Does the single Amount column carry signs at all? Only then does a
+  // positive figure mean money IN.
+  const mixedSigns = amtCol >= 0 && debitCol < 0 && creditCol < 0 && (() => {
+    let neg = false, pos = false;
+    for (let i = headerIdx + 1; i < lines.length && !(neg && pos); i++) {
+      const c = parseRow(lines[i])[amtCol];
+      if (!cleanAmt(c)) continue;
+      if (isNegative(c)) neg = true; else pos = true;
+    }
+    return neg && pos;
+  })();
   const rows = [];
   for (let i = headerIdx + 1; i < lines.length; i++) {
     const cells = parseRow(lines[i]);
@@ -94,7 +136,11 @@ export const parseBankCsv = (text) => {
       // mis-reads slash dates as US MM/DD and silently swaps day↔month for any day ≤ 12
       // (so 5 Nov becomes 11 May). Tests only used day=15 (>12), which forced Date to
       // fail and hid the swap.
-      const m = rawDate.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+      //
+      // Dotted dates (05.11.2024) and a trailing time (05/11/2024 10:22, which
+      // app exports append) used to miss this branch and fall through to Date,
+      // which swapped day and month all over again.
+      const m = rawDate.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})(?:[\sT,]+\d{1,2}[:.]\d{2}(?:[:.]\d{2})?(?:\s*[ap]\.?m\.?)?)?$/i);
       if (m) {
         const day = Number(m[1]), mon = Number(m[2]);
         if (mon >= 1 && mon <= 12 && day >= 1 && day <= 31) {
@@ -108,7 +154,6 @@ export const parseBankCsv = (text) => {
       return null;
     })();
     if (!parsedDate) continue;
-    const cleanAmt = v => parseFloat((v || "").replace(/[^0-9.]/g, "")) || 0;
     const debit = debitCol >= 0 ? cleanAmt(cells[debitCol]) : 0;
     const credit = creditCol >= 0 ? cleanAmt(cells[creditCol]) : 0;
     const generic = amtCol >= 0 ? cleanAmt(cells[amtCol]) : 0;
@@ -119,9 +164,40 @@ export const parseBankCsv = (text) => {
     const extra = { ...(rawRef ? { ref: rawRef } : {}), ...(rawBal ? { balance: cleanAmt(rawBal) } : {}) };
     if (debit > 0) rows.push({ date: parsedDate, amount: debit, note, type: "expense", ...extra });
     else if (credit > 0) rows.push({ date: parsedDate, amount: credit, note, type: "income", ...extra });
-    else if (generic > 0) rows.push({ date: parsedDate, amount: generic, note, type: "expense", ...extra });
+    else if (generic > 0) {
+      // A single Amount column says which way the money went in one of three
+      // ways, and every one of them used to be read as an expense — so a
+      // salary credit was imported as spending and debited the wallet:
+      //   an indicator column ("Dr/Cr": DR / CR), a suffix ("50,000.00 Cr"),
+      //   or a sign (−120 out, 50000 in). A sign only counts when the file has
+      //   BOTH signs in it; an all-positive column keeps the old reading.
+      const side = sideOf(sideCol >= 0 ? cells[sideCol] : "") || sideOf(cells[amtCol]);
+      const signedOut = isNegative(cells[amtCol]);
+      const type = side || (signedOut ? "expense" : (mixedSigns ? "income" : "expense"));
+      rows.push({ date: parsedDate, amount: generic, note, type, ...extra });
+    }
   }
   return rows;
+};
+
+// Money in a cell, whatever the decoration: "₹1,23,456.78", "(500.00)",
+// "-120", "50,000.00 Cr". Direction is read separately (sideOf / isNegative).
+const cleanAmt = v => parseFloat(String(v || "").replace(/[^0-9.]/g, "")) || 0;
+
+// "Cr"/"Credit"/"Deposit" vs "Dr"/"Debit"/"Withdrawal", either as a whole cell
+// (indicator column) or as a suffix on the amount. null when it says neither.
+const sideOf = (v) => {
+  const t = String(v || "").trim().toLowerCase().replace(/\.$/, "");
+  if (!t) return null;
+  if (/^(cr|credit|deposit|c)$/.test(t) || /\d\s*(cr|credit)$/.test(t)) return "income";
+  if (/^(dr|debit|withdrawal|d)$/.test(t) || /\d\s*(dr|debit)$/.test(t)) return "expense";
+  return null;
+};
+
+// "-120", "₹ -120", "(120.00)" — money out in a signed single-amount column.
+const isNegative = (v) => {
+  const t = String(v || "").trim();
+  return /^\(.*\)$/.test(t) || /^[^\d]*-\s*[\d.,]/.test(t);
 };
 
 // ——— UPI-app statement text → transaction rows (deterministic, no AI) ———

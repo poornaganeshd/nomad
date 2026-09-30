@@ -5,6 +5,15 @@ import { parseAmount, parseVoiceTx, parseBankCsv, parseUpiStatement, htmlStateme
 // parseAmount
 // ---------------------------------------------------------------------------
 describe("parseAmount", () => {
+  it("accepts currency markers and digit-grouping spaces", () => {
+    expect(parseAmount("₹1,500")).toBe(1500);
+    expect(parseAmount("Rs. 500")).toBe(500);
+    expect(parseAmount("INR 250.50")).toBe(250.5);
+    expect(parseAmount("500/-")).toBe(500);
+    expect(parseAmount("1 500")).toBe(1500);
+    expect(parseAmount("₹")).toBeNaN();
+  });
+
   it("passes numbers through unchanged", () => {
     expect(parseAmount(42)).toBe(42);
     expect(parseAmount(0)).toBe(0);
@@ -59,8 +68,9 @@ describe("parseVoiceTx", () => {
     expect(r.amount).toBe(300);
     expect(r.walletId).toBe("bank");
     expect(r.categoryId).toBe("coffee");
-    // "from" is not in the filler list, so it survives; "bank" (a wallet alias) is stripped.
-    expect(r.note).toBe("for coffee from");
+    // The wallet alias is stripped, and so are the connectives it leaves
+    // dangling at either end — the note used to read "for coffee from".
+    expect(r.note).toBe("coffee");
   });
 
   it("matches wallet aliases (upi → upi_lite)", () => {
@@ -85,7 +95,33 @@ describe("parseVoiceTx", () => {
     const r = parseVoiceTx("paid 1,500 for dinner from bank", { wallets: WALLETS, categories: CATS });
     expect(r.amount).toBe(1500);
     expect(r.walletId).toBe("bank");
-    expect(r.note).toBe("for dinner from");
+    expect(r.note).toBe("dinner");
+  });
+
+  it("applies spoken scale words: 5k, 2 thousand, 1.5 lakh", () => {
+    // "spent 2k on coffee from cash" used to save ₹2 — and with an amount, a
+    // wallet and a category all found, the AI fallback never ran to fix it.
+    expect(parseVoiceTx("spent 2k on coffee from cash", { wallets: WALLETS, categories: CATS })).toMatchObject({ amount: 2000, walletId: "cash", categoryId: "coffee", note: "coffee" });
+    expect(parseVoiceTx("paid 2 thousand for rent").amount).toBe(2000);
+    expect(parseVoiceTx("1.5 lakh for a bike").amount).toBe(150000);
+    expect(parseVoiceTx("2.5 lakhs").amount).toBe(250000);
+    expect(parseVoiceTx("12.5k fees").amount).toBe(12500);
+  });
+
+  it("does not read a unit as a scale word", () => {
+    expect(parseVoiceTx("bought 2 kilo onions").amount).toBe(2);
+    expect(parseVoiceTx("2 kg rice").amount).toBe(2);
+  });
+
+  it("prefers the number marked as money over the first number", () => {
+    expect(parseVoiceTx("2 kg rice 120 rupees").amount).toBe(120);
+    expect(parseVoiceTx("3 coffees for rs 450").amount).toBe(450);
+    expect(parseVoiceTx("2 hours parking ₹60").amount).toBe(60);
+    expect(parseVoiceTx("2 hours parking ₹60").note).toBe("2 hours parking");
+  });
+
+  it("keeps connectives that sit INSIDE the note", () => {
+    expect(parseVoiceTx("300 for dinner with friends", { wallets: WALLETS }).note).toBe("dinner with friends");
   });
 
   it("keeps decimals in the amount (regression: '3.50' was parsed as 3)", () => {
@@ -101,6 +137,47 @@ describe("parseVoiceTx", () => {
 // parseBankCsv
 // ---------------------------------------------------------------------------
 describe("parseBankCsv", () => {
+  it("reads dotted dates and dates with a time as DD/MM, never US MM/DD", () => {
+    // Both used to miss the DD/MM branch and fall through to Date, which
+    // swapped day and month: 5 Nov became 11 May.
+    for (const d of ["05.11.2024", "05/11/2024 10:22", "05-11-2024 14:03:22", "05/11/2024 10:22 PM", "05/11/24"]) {
+      expect(parseBankCsv(`Date,Description,Debit\n${d},Coffee,120`)[0]?.date).toBe("2024-11-05");
+    }
+  });
+
+  it("prefers the transaction date over the value date wherever the columns sit", () => {
+    const rows = parseBankCsv("Value Date,Transaction Date,Description,Debit,Credit\n06/11/2024,05/11/2024,Cheque 123,500,");
+    expect(rows[0].date).toBe("2024-11-05");
+  });
+
+  it("a signed single Amount column: negative is money out, positive money in", () => {
+    const rows = parseBankCsv("Date,Description,Amount\n2024-11-05,Coffee,-120.00\n2024-11-06,Salary,50000\n2024-11-07,Refund,(40.00)");
+    expect(rows.map(r => [r.note, r.type, r.amount])).toEqual([["Coffee", "expense", 120], ["Salary", "income", 50000], ["Refund", "expense", 40]]);
+  });
+
+  it("an all-positive Amount column keeps the old reading (expenses)", () => {
+    const rows = parseBankCsv("Date,Description,Amount\n2024-11-05,Coffee,120\n2024-11-06,Lunch,300");
+    expect(rows.every(r => r.type === "expense")).toBe(true);
+  });
+
+  it("reads a Dr/Cr suffix on the amount", () => {
+    const rows = parseBankCsv('Date,Description,Amount\n2024-11-05,Coffee,120.00 Dr\n2024-11-06,Salary,"50,000.00 Cr"');
+    expect(rows.map(r => r.type)).toEqual(["expense", "income"]);
+    expect(rows[1].amount).toBe(50000);
+  });
+
+  it("reads a separate Dr/Cr indicator column, and ignores a Type column that names a channel", () => {
+    const drcr = parseBankCsv("Date,Description,Amount,Dr/Cr\n2024-11-05,Coffee,120.00,DR\n2024-11-06,Salary,50000,CR");
+    expect(drcr.map(r => r.type)).toEqual(["expense", "income"]);
+    const channel = parseBankCsv("Date,Description,Amount,Type\n2024-11-05,Coffee,120.00,UPI\n2024-11-06,Rent,9000,NEFT");
+    expect(channel.map(r => r.type)).toEqual(["expense", "expense"]);
+  });
+
+  it("understands Paid out / Paid in columns", () => {
+    const rows = parseBankCsv("Date,Description,Paid out,Paid in\n2024-11-05,Coffee,120,\n2024-11-06,Salary,,50000");
+    expect(rows.map(r => r.type)).toEqual(["expense", "income"]);
+  });
+
   it("returns [] for empty or header-only input", () => {
     expect(parseBankCsv("")).toEqual([]);
     expect(parseBankCsv("Date,Amount")).toEqual([]);
