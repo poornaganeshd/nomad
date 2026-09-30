@@ -131,3 +131,34 @@ describe('POST /api/ai-chat', () => {
     expect(res.statusCode).toBe(400);
   });
 });
+
+// A recurring salary was listed under "ACTIVE RECURRING BILLS", and every
+// bill's CURRENT cycle date was labelled "next due" — so a rent paid on the 1st
+// was described back as coming up.
+describe('recurring context', () => {
+  beforeEach(() => { clearKeys(); vi.resetModules(); });
+  afterEach(() => { vi.restoreAllMocks(); clearKeys(); });
+
+  it('states each bill\'s status and lists income apart from bills', async () => {
+    process.env.GROQ_API_KEY = 'k';
+    let prompt = '';
+    global.fetch = vi.fn(async (_url: any, init: any) => {
+      prompt = JSON.parse(init.body).messages[1].content;
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+    }) as any;
+    const handler = (await import('../ai-chat.js')).default;
+    await handler({ method: 'POST', body: { question: 'which bills are pending?', context: {
+      today: '2026-09-15',
+      recurringBills: [
+        { name: 'Rent', amount: 9000, due: '2026-09-01', outstanding: false },
+        { name: 'Electricity', amount: 1800, due: '2026-09-10', outstanding: true },
+      ],
+      recurringIncome: [{ name: 'Salary', amount: 50000, expected: '2026-09-01' }],
+    } } } as any, mkRes());
+    expect(prompt).toMatch(/Rent: ₹9,?000 \(current cycle 2026-09-01, paid\)/);
+    expect(prompt).toMatch(/Electricity: ₹1,?800 \(current cycle 2026-09-10, UNPAID\)/);
+    expect(prompt).not.toContain('next due');
+    expect(prompt).toMatch(/RECURRING INCOME \(1\)[^\n]*\n\s+Salary: ₹50,?000/);
+    expect(prompt.split('ACTIVE RECURRING BILLS')[1].split('RECURRING INCOME')[0]).not.toContain('Salary');
+  });
+});

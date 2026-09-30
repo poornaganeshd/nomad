@@ -5023,7 +5023,10 @@ const activeCount = [hMinAmt, hMaxAmt, hDateFrom, hDateTo, hType !== "all" ? "x"
       const topCats = Object.entries(catTotals).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([id, amt]) => ({ name: cNameOf(id), amount: amt, pct: allTimeExpense > 0 ? Math.round(amt / allTimeExpense * 100) : 0 }));
       const wBals = wallets.map(w => ({ name: w.name, balance: roundMoney(wBal[w.id] || 0) }));
       const activeRec = rec.filter(r => r.active !== false);
-      const recurringBills = activeRec.slice(0, 20).map(r => ({ name: r.name || "bill", amount: r.amount, due: getRecurringDueDate(r, today) }));
+      // Bills only — a recurring salary handed to the chat as a "bill" was
+      // described back as money you owe. Income is sent separately.
+      const recurringBills = activeRec.filter(r => !isRecIncome(r)).slice(0, 20).map(r => ({ name: r.name || "bill", amount: r.amount, due: getRecurringDueDate(r, today), outstanding: isRecurringDueToday(r, today) }));
+      const recurringIncome = activeRec.filter(isRecIncome).slice(0, 10).map(r => ({ name: r.name || "income", amount: r.amount, expected: getRecurringDueDate(r, today) }));
       const iou = { owedToMe: roundMoney(sp.filter(s => s.direction === "owed" && !s.settled).reduce((t, s) => t + s.amount, 0)), iOwe: roundMoney(sp.filter(s => s.direction === "owe" && !s.settled).reduce((t, s) => t + s.amount, 0)) };
       const totalTx = myEx.length + inc.length;
       // Single source for the coverage extremes — the header badge and the
@@ -5105,7 +5108,7 @@ const activeCount = [hMinAmt, hMaxAmt, hDateFrom, hDateTo, hType !== "all" ? "x"
           // summaries, so the model still knows whose finances it is talking
           // about without a single row. Otherwise: the row dump, which is the
           // fallback, not the default.
-          const summaryCtx = { today, month: cm, monthIncome, monthExpense, allTimeIncome, allTimeExpense, topCategories: topCats, walletBalances: wBals, recurringBills, recurringCount: activeRec.length, iou, streak: finStreak };
+          const summaryCtx = { today, month: cm, monthIncome, monthExpense, allTimeIncome, allTimeExpense, topCategories: topCats, walletBalances: wBals, recurringBills, recurringIncome, recurringCount: activeRec.length, iou, streak: finStreak };
           const ctx = grounded
             ? { today, month: cm, monthIncome, monthExpense, walletBalances: wBals, ...grounded }
             : skipRows

@@ -62,7 +62,10 @@ function savingsScore(totalIncome, totalExpense) {
 function billScore(recurring, month, asOf) {
   // Only monthly bills are scored — yearly/quarterly/custom bills paid in
   // their due month would otherwise drag the score for every other month.
-  const active = recurring.filter(r => r.active !== false && (r.frequency === "monthly" || r.frequency == null));
+  // Recurring INCOME (salary, rent received) is not a bill: a salary that has
+  // not landed yet is not a bill you failed to pay, and scoring it as one
+  // docked points every month until payday.
+  const active = recurring.filter(r => r.active !== false && r.type !== "income" && (r.frequency === "monthly" || r.frequency == null));
   if (active.length === 0) return 20; // no monthly bills → mild bonus
 
   // What counts is whether the bill has anything OUTSTANDING as of `asOf` —
@@ -119,19 +122,26 @@ function spreadScore(expenses) {
 
 /**
  * Compute logging-habit sub-score (0–20).
- * Full 20 pts at ≥20 distinct days logged in the month.
+ * Full 20 pts at ≥20 distinct days logged in a past month; pro-rated to the
+ * days elapsed while the month is still running.
  *
  * @param {Array}  expenses
  * @param {Array}  incomes
  * @param {string} month    — YYYY-MM
  * @returns {number}
  */
-function loggingScore(expenses, incomes, month) {
+function loggingScore(expenses, incomes, month, today) {
   const days = new Set([
     ...expenses.map(e => String(e.date || "").slice(0, 10)),
     ...incomes.map(i => String(i.date  || "").slice(0, 10)),
   ].filter(d => d.slice(0, 7) === month));
-  const TARGET = 20;
+  // Pro-rated while the month is running: 20 days is the bar for a whole
+  // month (two days in three), so on the 5th the most anyone could score was
+  // 5 of 20 — the score opened every month looking like a lapse. Now the bar
+  // is two in three of the days that have actually happened.
+  const live = month === String(today || "").slice(0, 7);
+  const dom = Number(String(today || "").slice(8, 10)) || 30;
+  const TARGET = live ? Math.max(1, Math.min(20, Math.ceil((dom * 2) / 3))) : 20;
   return Math.min(20, Math.round((days.size / TARGET) * 20));
 }
 
@@ -164,7 +174,7 @@ export function computeFinanceScore({ expenses = [], incomes = [], recurring = [
   const savings = savingsScore(totalIncome, totalExpense);
   const bills   = billScore(recurring, m, asOf);
   const spread  = spreadScore(mE);
-  const logging = loggingScore(expenses, incomes, m);
+  const logging = loggingScore(expenses, incomes, m, today);
 
   const score = Math.max(0, Math.min(100, savings + bills + spread + logging));
 
