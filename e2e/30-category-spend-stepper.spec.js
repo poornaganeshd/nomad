@@ -90,3 +90,21 @@ test("rows never overflow the card on a narrow phone", async ({ page }) => {
     expect(lb.height).toBeLessThan(24);
   }
 });
+
+test("tapping the month label jumps back to this month", async ({ page }) => {
+  await gotoLocal(page, {
+    ...funded(),
+    expenses: [
+      makeExpense({ amount: 900, categoryId: "food", note: "Now", date: todayIso }),
+      makeExpense({ amount: 400, categoryId: "travel", note: "Old", date: monthsAgo(3) }),
+    ],
+  });
+  await dismissBanner(page);
+  const card = page.getByTestId("category-spend");
+  await card.scrollIntoViewIfNeeded();
+  for (let i = 0; i < 3; i++) await card.getByRole("button", { name: "Earlier month" }).click();
+  await expect(card.getByText("Travel", { exact: true })).toBeVisible();
+  await card.getByRole("button", { name: /back to this month/ }).click();
+  await expect(card.getByText("This month", { exact: true })).toBeVisible();
+  await expect(card.getByText("Food & Drinks", { exact: true })).toBeVisible();
+});

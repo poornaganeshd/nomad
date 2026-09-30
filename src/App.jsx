@@ -179,7 +179,10 @@ const sbDeleteWhere = async (table, filter) => sbWrite(`${SB_URL}/rest/v1/${tabl
 //      the queue holds the id-shaped key `<table>:delete:<id>`; a filter-shaped
 //      key never matched, so an offline bulk delete un-deleted itself.
 const sbDeleteRow = async (table, id) => { clearVersion(table, id); return sbWrite(`${SB_URL}/rest/v1/${table}?id=eq.${id}`, { method: "DELETE", dedupeKey: `${table}:delete:${id}` }); };
-const fmt = n => formatMoney(n, CUR), mk = d => d.slice(0, 7);
+// `mk` tolerates a row with no date: one malformed row (a restored backup from
+// an older build, a hand-edited import) threw here and took the whole
+// dashboard down to a blank screen.
+const fmt = n => formatMoney(n, CUR), mk = d => String(d || "").slice(0, 7);
 // Group expenses someone ELSE paid (logged for the event ledger only). They
 // carry walletId "__tracked__", never touch a wallet, and must be EXCLUDED
 // from personal-spend aggregations — YOUR share enters spending via the "owe"
@@ -585,7 +588,7 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
           into blank history. */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, marginBottom: 12 }}>
         <button onClick={() => { if (!canBack) return; sOffset(o => o + 1); sSelCid(null); }} disabled={!canBack} aria-label="Earlier period" style={{ width: 28, height: 28, borderRadius: 9, border: "none", background: "var(--bg)", color: canBack ? accent : "var(--border)", cursor: canBack ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><CaretLeft size={13} weight="bold" /></button>
-        <span style={{ minWidth: 118, textAlign: "center", fontFamily: "var(--font-h)", fontSize: 11.5, fontWeight: 700, color: offset === 0 ? "var(--muted)" : "var(--text)", letterSpacing: "0.02em" }}>{label}</span>
+        <button onClick={() => { if (offset) { sOffset(0); sSelCid(null); } }} disabled={!offset} aria-label={offset ? `${label} — back to this period` : label} title={offset ? "Back to now" : undefined} style={{ minWidth: 118, textAlign: "center", fontFamily: "var(--font-h)", fontSize: 11.5, fontWeight: 700, color: offset === 0 ? "var(--muted)" : "var(--text)", letterSpacing: "0.02em", background: "none", border: "none", padding: "4px 2px", cursor: offset ? "pointer" : "default" }}>{label}</button>
         <button onClick={() => { if (!offset) return; sOffset(o => Math.max(0, o - 1)); sSelCid(null); }} disabled={!offset} aria-label="Later period" style={{ width: 28, height: 28, borderRadius: 9, border: "none", background: "var(--bg)", color: offset ? accent : "var(--border)", cursor: offset ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><CaretRight size={13} weight="bold" /></button>
       </div>
       {!rows.length ? (
@@ -688,7 +691,8 @@ function CategorySpendCard({ expenses, categories, formatCurrency, isFixed, onTx
       <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: accent, marginBottom: 12, letterSpacing: "0.5px", fontWeight: 700 }}>Spending by Category</div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, marginBottom: 6 }}>
         <button onClick={() => data.canBack && step(1)} disabled={!data.canBack} aria-label="Earlier month" style={stepBtn(data.canBack)}><CaretLeft size={13} weight="bold" /></button>
-        <span style={{ minWidth: 118, textAlign: "center", fontFamily: "var(--font-h)", fontSize: 11.5, fontWeight: 700, color: offset === 0 ? "var(--muted)" : "var(--text)", letterSpacing: "0.02em" }}>{data.label}</span>
+        {/* Twelve taps back is twelve taps forward again — the label itself returns to this month. */}
+        <button onClick={() => { if (offset) { sOffset(0); sDrill(null); } }} disabled={!offset} aria-label={offset ? `${data.label} — back to this month` : data.label} title={offset ? "Back to this month" : undefined} style={{ minWidth: 118, textAlign: "center", fontFamily: "var(--font-h)", fontSize: 11.5, fontWeight: 700, color: offset === 0 ? "var(--muted)" : "var(--text)", letterSpacing: "0.02em", background: "none", border: "none", padding: "4px 2px", cursor: offset ? "pointer" : "default" }}>{data.label}</button>
         <button onClick={() => offset > 0 && step(-1)} disabled={offset === 0} aria-label="Later month" style={stepBtn(offset > 0)}><CaretRight size={13} weight="bold" /></button>
       </div>
       {data.rows.length > 0 && (
