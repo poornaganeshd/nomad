@@ -121,8 +121,14 @@ export async function getExchangeRate(fromCurrency, date) {
   const promise = (async () => {
     const result = await fetchRate(lower, c, date);
     inFlight.delete(key);
-    if (result !== null) saveRateCache(key, result.rate, result.date);
-    return result === null ? null : result.rate;
+    if (result !== null) { saveRateCache(key, result.rate, result.date); return result.rate; }
+    // Every source failed — offline abroad, a captive-portal Wi-Fi, a rate
+    // limit. A rate we fetched earlier (its "as of" date is still shown next
+    // to it) beats refusing to log the expense at all, which is what happened
+    // one hour after the last successful fetch. A past date with no reading of
+    // its own falls back to the latest live rate, as it would have online.
+    const stale = getCachedRate(key, true) ?? (historical ? getCachedRate(c, true) : null);
+    return stale;
   })();
   inFlight.set(key, promise);
   return promise;
@@ -138,9 +144,11 @@ export function getRateMeta(currency, date) {
     const historical = isHistorical(date);
     const key = historical ? `${c}@${date}` : c;
     const cache = JSON.parse(localStorage.getItem(RATE_CACHE_KEY) || "{}");
-    const entry = cache[key];
+    // Same fallback as getExchangeRate: a past date with no reading of its own
+    // was converted at the live rate, so that is the rate to describe.
+    const entry = (cache[key] && typeof cache[key].rate === "number") ? cache[key] : (historical ? cache[c] : null);
     if (!entry || typeof entry !== "object" || typeof entry.rate !== "number") return null;
-    return { rate: entry.rate, date: entry.date || null, fetchedAt: entry.fetchedAt || null, historical };
+    return { rate: entry.rate, date: entry.date || null, fetchedAt: entry.fetchedAt || null, historical: entry === cache[key] && historical };
   } catch { return null; }
 }
 

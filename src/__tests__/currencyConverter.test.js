@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { getExchangeRate, saveCurrencyMeta, getCurrencyMeta } from '../currencyConverter.js';
+import { getExchangeRate, saveCurrencyMeta, getCurrencyMeta, getRateMeta } from '../currencyConverter.js';
 
 const RATE_CACHE_KEY = 'nomad-fx-rates';
 const META_KEY = 'nomad-currency-meta';
@@ -202,6 +202,30 @@ describe('getExchangeRate (historical date)', () => {
 // ---------------------------------------------------------------------------
 // saveCurrencyMeta / getCurrencyMeta
 // ---------------------------------------------------------------------------
+// Offline abroad: the live rate expired an hour after the last fetch, and with
+// every source unreachable the expense could not be logged in that currency at
+// all. The last rate we had is used instead (its "as of" date is shown).
+describe('getExchangeRate (every source down)', () => {
+  it('falls back to a STALE cached rate rather than returning null', async () => {
+    localStorage.setItem(RATE_CACHE_KEY, JSON.stringify({ USD: { rate: 83.5, fetchedAt: Date.now() - 30 * 60 * 60 * 1000, date: '2026-09-28' } }));
+    global.fetch = vi.fn().mockRejectedValue(new Error('offline'));
+    expect(await getExchangeRate('USD')).toBe(83.5);
+    expect(getRateMeta('USD')).toMatchObject({ rate: 83.5, date: '2026-09-28' });
+  });
+
+  it('a past date with no reading of its own uses the last live rate, and says so', async () => {
+    localStorage.setItem(RATE_CACHE_KEY, JSON.stringify({ EUR: { rate: 91, fetchedAt: Date.now() - 5 * 60 * 60 * 1000, date: '2026-09-29' } }));
+    global.fetch = vi.fn().mockRejectedValue(new Error('offline'));
+    expect(await getExchangeRate('EUR', '2020-01-15')).toBe(91);
+    expect(getRateMeta('EUR', '2020-01-15')).toMatchObject({ rate: 91, date: '2026-09-29', historical: false });
+  });
+
+  it('still returns null when nothing was ever fetched', async () => {
+    global.fetch = vi.fn().mockRejectedValue(new Error('offline'));
+    expect(await getExchangeRate('GBP')).toBeNull();
+  });
+});
+
 describe('saveCurrencyMeta & getCurrencyMeta', () => {
   it('stores and retrieves meta for a transaction', () => {
     saveCurrencyMeta('tx-001', 'USD', 100, 83.5);

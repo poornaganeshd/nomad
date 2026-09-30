@@ -1289,7 +1289,10 @@ function AddPage({ categories: cats, incomeSources: isrc, recurringCats: rCats, 
   // Clear AI-bulk previews when switching transaction type — they're built
   // for the current type's wallet/category context and become stale otherwise.
   useEffect(() => { sItemsPreview(null); sFixed(false); sSplitOn(false); sSplitSel([]); sSplitNew(""); sSplitAll(false); }, [type]);
-  useEffect(() => { const c = fxCur.trim().toUpperCase(); if (c.length !== 3 || c === "INR") { setFxRate(null); setFxDate(null); return; } setFxFetching(true); getExchangeRate(c, date).then(r => { setFxRate(r); setFxDate(getRateMeta(c, date)?.date || null); setFxFetching(false); }).catch(() => { setFxRate(null); setFxDate(null); setFxFetching(false); }); }, [fxCur, date]);
+  // `live` drops a response that lands after the currency or date changed.
+  // Switching USD → EUR quickly let the slower USD reply arrive last, and the
+  // EUR amount was then converted at the USD rate.
+  useEffect(() => { const c = fxCur.trim().toUpperCase(); if (c.length !== 3 || c === "INR") { setFxRate(null); setFxDate(null); return; } let live = true; setFxFetching(true); getExchangeRate(c, date).then(r => { if (!live) return; setFxRate(r); setFxDate(getRateMeta(c, date)?.date || null); setFxFetching(false); }).catch(() => { if (!live) return; setFxRate(null); setFxDate(null); setFxFetching(false); }); return () => { live = false; }; }, [fxCur, date]);
   useEffect(() => { try { sessionStorage.setItem("nomad-add-draft", JSON.stringify({ type, amt, catId, wid, date, note, aCat: autoSel.current.cat, aWid: autoSel.current.wid })); } catch { /* ignore storage errors */ } }, [type, amt, catId, wid, date, note]);
   const tc = type === "expense" ? "#E07A5F" : type === "income" ? "#6BAA75" : type === "transfer" ? "#7B8CDE" : "#A78BFA";
   const submit = async () => {
