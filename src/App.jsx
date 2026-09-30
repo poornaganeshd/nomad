@@ -3225,9 +3225,10 @@ export default function Nomad() {
       .map(r => notifFromReminder(r, todayStr));
     const cm = todayStr.slice(0, 7);
     budgetStatus.forEach(b => { if (b.spent >= b.lim) live.push({ id: `budget-${b.cid}-${cm}` }); });
+    if (budgetTotal?.over) live.push({ id: `budget-total-${cm}` });
     if (deadLetterCount > 0) live.push({ id: `sync-dead-${todayStr}` });
     sNotifs(reconcileNotifications(live));
-  }, [loaded, rec, sp, stl, budgetStatus, deadLetterCount, recSnooze]);
+  }, [loaded, rec, sp, stl, budgetStatus, budgetTotal, deadLetterCount, recSnooze]);
 
 
   // Settlements that the user PAID OUT count as real spending, categorized by
@@ -3515,6 +3516,10 @@ export default function Nomad() {
     // ₹1000 spread over a month), its rollover, and ignores a backdated
     // expense that falls outside the current period.
     if (budgets[data.categoryId] > 0) { const one = { [data.categoryId]: budgets[data.categoryId] }; const bNow = computeBudgets({ budgets: one, cfg: budgetCfg, expenses: [rec, ...ex], settlements: stl, splits: sp, categories: cats }).lines[0]; const bWas = computeBudgets({ budgets: one, cfg: budgetCfg, expenses: ex, settlements: stl, splits: sp, categories: cats }).lines[0]; if (bNow && bWas && bNow.spent > bWas.spent) { const cm = localDateKey().slice(0, 7); const tot = bNow.spent, lim = bNow.lim; const cn = bNow.cat?.name || data.categoryId; const per = budgetPeriodLabel(normalizeBudgetCfg(budgetCfg).period).toLowerCase(); if (tot >= lim) { showT(`${cn} budget exceeded! ${fmt(tot)} / ${fmt(lim)}`, "error"); sNotifs(pushNotifications([{ id: `budget-${data.categoryId}-${cm}`, kind: "budget", title: `${cn} budget exceeded`, body: `${fmt(tot)} spent of a ${fmt(lim)} limit ${per}. Tap to adjust.`, meta: { go: "budget" } }])); } else if (tot >= lim * 0.8) showT(`${cn} at ${Math.round(tot / lim * 100)}% of budget (${fmt(lim)})`, "info"); } }
+    // The OVERALL cap ("I'm allowed ₹30,000 this month, all in") had no alert
+    // at all — only a bar on the budget card — so crossing it was silent. It
+    // speaks on the crossing (80% and 100%), judged by the same computeBudgets.
+    if (normalizeBudgetCfg(budgetCfg).total > 0) { const tArgs = { budgets: {}, cfg: budgetCfg, settlements: stl, splits: sp, categories: cats }; const tNow = computeBudgets({ ...tArgs, expenses: [rec, ...ex] }).total, tWas = computeBudgets({ ...tArgs, expenses: ex }).total; if (tNow && tWas && tNow.spent > tWas.spent) { const per = budgetPeriodLabel(normalizeBudgetCfg(budgetCfg).period).toLowerCase(); if (tNow.spent >= tNow.lim && tWas.spent < tWas.lim) { showT(`Overall budget exceeded — ${fmt(tNow.spent)} of ${fmt(tNow.lim)} ${per}`, "error"); sNotifs(pushNotifications([{ id: `budget-total-${localDateKey().slice(0, 7)}`, kind: "budget", title: "Overall budget exceeded", body: `${fmt(tNow.spent)} spent of your ${fmt(tNow.lim)} limit ${per}. Tap to adjust.`, meta: { go: "budget" } }])); } else if (tNow.spent >= tNow.lim * 0.8 && tWas.spent < tWas.lim * 0.8) showT(`${Math.round(tNow.spent / tNow.lim * 100)}% of your overall budget used ${per} (${fmt(tNow.left)} left)`, "info"); } }
     if (!silent) showT(online ? "Expense added" : "Expense saved offline", "success");
     return silent ? rec : true;
   };
