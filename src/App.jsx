@@ -22,7 +22,7 @@ import { redactTransactions, redact } from "./redactor";
 import {
   roundMoney, localDateKey, getRecurringDueDate, isRecurringDueToday,
   recurringDaysOverdue, distributeAmount, expenseShareMap, historySortCompare,
-  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, settlementsCash, cashMatchesExpectation, isSuspiciousExcess, settleWritesIncoming, formatMoney, pendingIouNet, eventExpenseKeys, eventExpenseIous, catWindow, catWindowLabel, draftAutoPick, isRecIncome, walletDeltas, overdrawnBy, distributeByWeights, splitWeights, splitIssue, computeBudgets, normalizeBudgetCfg, budgetPeriodLabel, BUDGET_PERIODS, untrackedGroupDebts, goalProgress, balanceTrail, runwayInfo, expenseIouPlan, sameIouPlan,
+  UPI_LITE_MAX_BALANCE, exceedsUpiLiteBalance, defaultSettleWalletId, resolveRecCategory, suggestAddDefaults, settlementNetAmount, settlementsCash, cashMatchesExpectation, isSuspiciousExcess, settleWritesIncoming, formatMoney, pendingIouNet, eventExpenseKeys, eventExpenseIous, catWindowLabel, catCompareLabel, categorySpend, draftAutoPick, isRecIncome, walletDeltas, overdrawnBy, distributeByWeights, splitWeights, splitIssue, computeBudgets, normalizeBudgetCfg, budgetPeriodLabel, BUDGET_PERIODS, untrackedGroupDebts, goalProgress, balanceTrail, runwayInfo, expenseIouPlan, sameIouPlan,
 } from "./financeUtils";
 import { monotonePathD, smoothSeries } from "./financeUtils";
 import { CAT_MODEL_VERSION, CONFIDENT_ENOUGH, emptyModel, learn as learnCat, predict as predictCat, buildFromHistory, seedFromRules, modelSize } from "./categoryModel";
@@ -531,26 +531,13 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
   const oldestKey = useMemo(() => (expenses || []).reduce((a, e) => (e?.date && (!a || e.date < a) ? e.date : a), null), [expenses]);
   const { rows, total, prevLabel, label, canBack } = useMemo(() => {
     const today = new Date();
-    const key = dt => localDateKey(dt);
-    const win = catWindow(range, offset, today);
-    const prevLabel = offset === 0
-      ? { week: "vs last week", month: "vs last month", "3m": "vs prior 3 mo", year: "vs last year" }[range]
-      : { week: "vs prev week", month: "vs prev month", "3m": "vs prior 3 mo", year: "vs prev year" }[range];
-    const curStartKey = key(win.start), curEndKey = key(win.end), prevStartKey = key(win.prevStart), prevEndKey = key(win.prevEnd);
-    const cur = {}, prev = {};
-    let total = 0;
-    (expenses || []).forEach(e => {
-      if (!e?.date) return;
-      const cid = e.categoryId || "uncat";
-      if (e.date >= curStartKey && e.date < curEndKey) { const amt = Number(e.amount || 0); cur[cid] = roundMoney((cur[cid] || 0) + amt); total = roundMoney(total + amt); }
-      else if (e.date >= prevStartKey && e.date < prevEndKey) prev[cid] = roundMoney((prev[cid] || 0) + Number(e.amount || 0));
-    });
-    const rows = Object.entries(cur).sort((a, b) => b[1] - a[1]).map(([cid, amt]) => {
-      const cat = trendCatOf(cid, categories);
-      const prevAmt = prev[cid] || 0;
-      return { cid, cat, amt, pct: total > 0 ? Math.round(amt / total * 100) : 0, delta: prevAmt > 0 ? Math.round((amt - prevAmt) / prevAmt * 100) : null, isNew: prevAmt === 0 && amt > 0 };
-    });
-    return { rows, total, prevLabel, label: catWindowLabel(range, offset, win, today), canBack: !!oldestKey && oldestKey < curStartKey };
+    // One derivation for this donut AND the Spending by Category list
+    // (categorySpend), so the two cards can never quote a different change
+    // for the same category. Its comparison is like-for-like: month-to-date
+    // against the same days of last month, not against all of it.
+    const res = categorySpend(expenses, range, offset, today);
+    const rows = res.rows.map(r => ({ cid: r.cid, cat: trendCatOf(r.cid, categories), amt: r.total, pct: res.total > 0 ? Math.round(r.total / res.total * 100) : 0, delta: r.change && r.change.kind !== "new" ? r.change.pct : null, change: r.change, isNew: r.change?.kind === "new" }));
+    return { rows, total: res.total, prevLabel: catCompareLabel(range, offset, res.cmp), label: catWindowLabel(range, offset, res.cmp, today), canBack: !!oldestKey && oldestKey < localDateKey(res.cmp.start) };
   }, [expenses, categories, range, offset, oldestKey]);
   const sel = selCid ? rows.find(r => r.cid === selCid) : null;
   const accent = "#F4A261";
@@ -591,7 +578,7 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
                   <span style={{ fontFamily: "var(--font-h)", fontSize: 16, fontWeight: 800, color: "var(--text)", marginTop: 2 }}>{formatCurrency(sel.amt)}</span>
                   <span style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", marginTop: 1 }}>{sel.pct}% of spend</span>
                   {sel.delta !== null ? (
-                    <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: sel.delta > 0 ? "var(--neg)" : sel.delta < 0 ? "var(--pos)" : "var(--muted)", background: sel.delta > 0 ? "#E07A5F15" : sel.delta < 0 ? "#6BAA7515" : "var(--bg)", padding: "1px 6px", borderRadius: 3, marginTop: 3, whiteSpace: "nowrap" }}>{sel.delta > 0 ? "▲ +" : sel.delta < 0 ? "▼ " : ""}{sel.delta}% {prevLabel}</span>
+                    <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: sel.delta > 0 ? "var(--neg)" : sel.delta < 0 ? "var(--pos)" : "var(--muted)", background: sel.delta > 0 ? "#E07A5F15" : sel.delta < 0 ? "#6BAA7515" : "var(--bg)", padding: "1px 6px", borderRadius: 3, marginTop: 3, whiteSpace: "nowrap" }}>{sel.delta > 0 ? "▲ " : sel.delta < 0 ? "▼ " : ""}{sel.change.text} {prevLabel}</span>
                   ) : sel.isNew ? (
                     <span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 700, color: "var(--acc)", background: "#7B8CDE15", padding: "1px 6px", borderRadius: 3, marginTop: 3, letterSpacing: "0.3px" }}>NEW</span>
                   ) : null}
@@ -623,6 +610,114 @@ function CategoryBreakdown({ expenses, categories, formatCurrency }) {
   );
 }
 
+
+// Change badge shared by the category cards. Up is spending MORE (bad), down
+// is spending less (good), flat is neither and must not be painted as a saving.
+const CHANGE_TONE = {
+  up: { color: "var(--neg)", bg: "#E07A5F15", arrow: "▲ " },
+  down: { color: "var(--pos)", bg: "#6BAA7515", arrow: "▼ " },
+  flat: { color: "var(--muted)", bg: "var(--bg)", arrow: "" },
+  new: { color: "var(--acc)", bg: "#7B8CDE15", arrow: "" },
+};
+function ChangeBadge({ change, suffix, size = 9 }) {
+  if (!change) return null;
+  const t = CHANGE_TONE[change.kind] || CHANGE_TONE.flat;
+  return <span style={{ fontSize: size, lineHeight: "14px", fontFamily: "var(--font-h)", fontWeight: 700, color: t.color, background: t.bg, padding: "1px 6px", borderRadius: 4, whiteSpace: "nowrap", letterSpacing: change.kind === "new" ? "0.3px" : 0, fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>{t.arrow}{change.text}{suffix ? ` ${suffix}` : ""}</span>;
+}
+
+// Spending by Category — the ranked list, one calendar MONTH at a time.
+//
+// It was hard-pinned to the current month (heroM), so "where did August's money
+// go?" had no answer on the dashboard: the only way back was to rebuild it by
+// hand from History. It now carries the same ‹ month › stepper as Category
+// Share, floored at the oldest expense on record and capped at this month.
+//
+// The rest of what the old inline block got wrong, all visible on a phone:
+//   • The header row packed name, FIXED/FLEX, "N tx", "-73% MoM" and the amount
+//     onto ONE line. Anything longer than "Other" wrapped into a two-line
+//     stack, and a long name ("Entertainment") pushed the amount and the caret
+//     off the card. Name + amount now own line one (the name truncates, the
+//     amount never wraps); the tags and the change ride a second line.
+//   • Month-to-date was compared with ALL of last month, so early in a month
+//     every row read as a steep drop. It is like-for-like now (catCompareWindow)
+//     and the comparison is named once ("vs 1–15 Aug") instead of "MoM" on every row.
+//   • A tiny base produced "+48422% MoM"; past 10× it reads as a multiple.
+//   • 0% was painted green, as if unchanged spending were a saving.
+//   • Categories were looked up in the expense list only, so a recurring bill
+//     category (RC) fell back to its id — "Sip" here, "SIP / MF" in the donut
+//     directly above it. Both now resolve through trendCatOf.
+function CategorySpendCard({ expenses, categories, formatCurrency, isFixed, onTxClick }) {
+  const [offset, sOffset] = useState(0);
+  const [drill, sDrill] = useState(null);
+  const oldestKey = useMemo(() => (expenses || []).reduce((a, e) => (e?.date && (!a || e.date < a) ? e.date : a), null), [expenses]);
+  const data = useMemo(() => {
+    const today = new Date();
+    const res = categorySpend(expenses, "month", offset, today, { isFixed });
+    return { ...res, label: catWindowLabel("month", offset, res.cmp, today), cmpLabel: catCompareLabel("month", offset, res.cmp), canBack: !!oldestKey && oldestKey < localDateKey(res.cmp.start) };
+  }, [expenses, offset, oldestKey, isFixed]);
+  const accent = "var(--neg)";
+  const step = d => { sOffset(o => Math.max(0, o + d)); sDrill(null); };
+  const mx = data.rows[0]?.total || 1;
+  const stepBtn = (enabled) => ({ width: 28, height: 28, borderRadius: 9, border: "none", background: "var(--bg)", color: enabled ? accent : "var(--border)", cursor: enabled ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 });
+  return (
+    <div data-testid="category-spend" style={{ ...cc, padding: 18, marginBottom: 16, position: "relative", overflow: "hidden" }}>
+      <div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: accent }} />
+      <div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: accent, marginBottom: 12, letterSpacing: "0.5px", fontWeight: 700 }}>Spending by Category</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, marginBottom: 6 }}>
+        <button onClick={() => data.canBack && step(1)} disabled={!data.canBack} aria-label="Earlier month" style={stepBtn(data.canBack)}><CaretLeft size={13} weight="bold" /></button>
+        <span style={{ minWidth: 118, textAlign: "center", fontFamily: "var(--font-h)", fontSize: 11.5, fontWeight: 700, color: offset === 0 ? "var(--muted)" : "var(--text)", letterSpacing: "0.02em" }}>{data.label}</span>
+        <button onClick={() => offset > 0 && step(-1)} disabled={offset === 0} aria-label="Later month" style={stepBtn(offset > 0)}><CaretRight size={13} weight="bold" /></button>
+      </div>
+      {data.rows.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", flexWrap: "wrap", gap: 6, marginBottom: 16, fontFamily: "var(--font-h)" }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text)", fontVariantNumeric: "tabular-nums" }}>{formatCurrency(data.total)}</span>
+          <span style={{ fontSize: 10, color: "var(--muted)" }}>· {data.count} {data.count === 1 ? "entry" : "entries"}</span>
+          <ChangeBadge change={data.change} suffix={data.cmpLabel} />
+        </div>
+      )}
+      {!data.rows.length ? (
+        <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: "18px 0 6px", fontFamily: "var(--font-b)" }}>{offset === 0 ? "Nothing spent this month yet" : `Nothing spent in ${data.label}`}</p>
+      ) : data.rows.map(r => {
+        const c = trendCatOf(r.cid, categories);
+        const open = drill === r.cid;
+        return (
+          <div key={r.cid} style={{ marginBottom: 12, textAlign: "left" }}>
+            <div role="button" tabIndex={0} aria-expanded={open} onClick={() => sDrill(open ? null : r.cid)} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sDrill(open ? null : r.cid); } }} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+              <span style={{ width: 30, display: "flex", justifyContent: "center", flexShrink: 0 }}><DI2 id={c.id} accent={c.neon || c.color} size={20} /></span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</span>
+                  <span style={{ fontSize: 13, fontFamily: "var(--font-h)", color: "var(--ts)", fontWeight: 600, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{formatCurrency(r.total)}</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, margin: "3px 0 6px", lineHeight: "14px" }}>
+                  <span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: r.fixed ? "var(--acc2)" : "var(--warn)", background: r.fixed ? "#A78BFA15" : "#FBBF2415", padding: "2px 6px", borderRadius: 4, whiteSpace: "nowrap" }}>{r.fixed ? "FIXED" : "FLEX"}</span>
+                  <span style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", whiteSpace: "nowrap" }}>{r.count} tx</span>
+                  <span style={{ flex: 1 }} />
+                  <ChangeBadge change={r.change} />
+                </div>
+                <div style={{ height: 5, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${Math.max(2, (r.total / mx) * 100)}%`, background: c.color, borderRadius: 3 }} /></div>
+              </div>
+              <span aria-hidden="true" style={{ fontSize: 10, color: "var(--muted)", flexShrink: 0, width: 10, textAlign: "center" }}>{open ? "▲" : "▼"}</span>
+            </div>
+            {open && (
+              <div style={{ marginLeft: 40, marginTop: 6, padding: "8px 10px", background: "var(--bg)", borderRadius: 8, border: "1px solid var(--border)", maxHeight: 260, overflowY: "auto" }}>
+                {r.items.map(tx => (
+                  <div key={tx.id} onClick={onTxClick ? () => onTxClick(tx) : undefined} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, paddingBottom: 6, borderBottom: "1px dashed var(--border)", cursor: onTxClick ? "pointer" : "default" }}>
+                    <div style={{ flex: 1, minWidth: 0, marginRight: 8 }}>
+                      <div style={{ fontSize: 11, color: "var(--ts)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-h)", fontWeight: 600 }}>{tx.note || "(no note)"}{tx.__settlement && <span style={{ marginLeft: 5, fontSize: 8, color: "var(--danger)", background: "#D4726A15", padding: "1px 4px", borderRadius: 3, fontWeight: 700 }}>SPLIT</span>}</div>
+                      <div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 1 }}>{dl(tx.date)}</div>
+                    </div>
+                    <span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--text)", fontWeight: 600, flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{formatCurrency(tx.amount)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 // Terrain hero: 30-day total-balance trail drawn as layered contour bands
 // hanging from the top edge (inverted ridgeline — higher balance reaches
@@ -2350,7 +2445,6 @@ export default function Nomad() {
   const [goalAddAmt, sGoalAddAmt] = useState({});
   const [scoreOpen, sScoreOpen] = useState(false);
   const [hSearch, sHSearch] = useState(""), [hMinAmt, sHMinAmt] = useState(""), [hMaxAmt, sHMaxAmt] = useState(""), [hDateFrom, sHDateFrom] = useState(""), [hDateTo, sHDateTo] = useState(""), [hType, sHType] = useState("all"), [hWallet, sHWallet] = useState(""), [hShowFilters, sHShowFilters] = useState(false), [hTimeline, sHTimeline] = useState(false), [hCalDay, sHCalDay] = useState(null);
-  const [drillCat, sDrillCat] = useState(null);
   const [bulkMode, sBulkMode] = useState(false);
   const [bulkSel, sBulkSel] = useState(new Set());
   const [autoRules, sAutoRules] = useState(() => { try { return JSON.parse(localStorage.getItem("nomad-auto-rules") || "[]"); } catch { return []; } });
@@ -3118,7 +3212,10 @@ export default function Nomad() {
     }));
   }, [stl, sp]);
   const exAll = useMemo(() => [...ex.filter(e => !isTrackedExp(e)), ...settlementsAsExpenses], [ex, settlementsAsExpenses]);
-  const fltExAll = useMemo(() => exAll.filter(e => mk(e.date) === heroM), [exAll, heroM]);
+  // A row tapped in Spending by Category's drill-down opens the same edit sheet
+  // as History. Settlement rows are mapped into expense shape there; they keep
+  // their own type so openEditTx routes them to the IOU wallet instead.
+  const openSpendTx = useCallback((tx) => openEditTx({ ...tx, type: tx.__settlement ? "settlement" : "expense" }), [openEditTx]);
   // Received IOU repayments, passed to the history calendar so its SPENT header
   // can be net (mirrors the hero's Out — gross spend minus money friends repaid).
   const settlementsInAsRefunds = useMemo(() => (stl || []).filter(s => s.direction === "owed").map(s => ({ date: s.date, amount: settlementNetAmount(s) })), [stl]);
@@ -4655,7 +4752,7 @@ button{transition:transform 0.1s ease,opacity 0.15s ease}button:active{transform
         {goals.length > 0 && <div style={{ ...cc, padding: "16px 18px", marginBottom: 14, position: "relative", overflow: "hidden" }}><div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "var(--gold)" }} /><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "var(--gold)", fontWeight: 700, letterSpacing: "0.5px" }}>Savings Goals</div><button onClick={() => { sTab("settings"); sGoalSettingsOpen(true); }} style={{ fontSize: 10, color: "var(--gold)", fontFamily: "var(--font-h)", fontWeight: 600, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Edit ›</button></div>{goals.map(g => { const p = goalProgress(g); const bc = p.done ? "var(--pos)" : "var(--gold)"; return <div key={g.id} style={{ marginBottom: 10 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, alignItems: "center", gap: 8 }}><div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}><span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--text)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</span>{p.done && <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: "var(--pos)", background: "#6BAA7515", padding: "1px 5px", borderRadius: 3, flexShrink: 0 }}>DONE</span>}{p.overdue && <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: "var(--danger)", background: "#D4726A15", padding: "1px 5px", borderRadius: 3, flexShrink: 0 }}>PAST DUE</span>}</div><span style={{ fontSize: 11, fontFamily: "var(--font-h)", color: bc, fontWeight: 700, flexShrink: 0 }}>{fmt(p.saved)} / {fmt(p.target)}</span></div><div style={{ height: 5, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${p.pct}%`, background: bc, borderRadius: 3 }} /></div>{!p.done && p.perMonth !== null && <div style={{ fontSize: 9.5, color: "var(--muted)", fontFamily: "var(--font-h)", fontWeight: 600, marginTop: 3 }}>{fmt(p.perMonth)}/mo to reach it by {new Date(p.targetDate + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}</div>}</div>; })}</div>}
         <SpendingBreakdown expenses={exAll} categories={cats} period={trendPeriod} onPeriodChange={sTrendPeriod} formatCurrency={fmt} darkMode={dm} />
         <CategoryBreakdown expenses={exAll} categories={cats} formatCurrency={fmt} />
-        <div style={{ ...cc, padding: 18, marginBottom: 16, position: "relative", overflow: "hidden" }}><div style={{ position: "absolute", bottom: 0, right: 0, width: 60, height: 3, borderRadius: "3px 0 0 0", background: "var(--neg)" }} /><div style={{ fontFamily: "var(--font-h)", fontSize: 12, color: "var(--neg)", marginBottom: 16, letterSpacing: "0.5px", fontWeight: 700 }}>Spending by Category</div>{fltExAll.length === 0 ? <p style={{ color: "var(--muted)", fontSize: 13, textAlign: "center", padding: 20 }}>No expenses yet</p> : (() => { const t = {}; fltExAll.forEach(e => { t[e.categoryId] = (t[e.categoryId] || 0) + e.amount }); const s = Object.entries(t).sort((a, b) => b[1] - a[1]), mx = s[0]?.[1] || 1; const curM = heroM; const [pY, pM] = curM.split("-").map(Number); const prevM = pM === 1 ? `${pY - 1}-12` : `${pY}-${String(pM - 1).padStart(2, "0")}`; const prevT = {}; exAll.filter(e => mk(e.date) === prevM).forEach(e => { prevT[e.categoryId] = (prevT[e.categoryId] || 0) + e.amount }); return s.map(([cid, total]) => { const c = cats.find(x => x.id === cid) || { id: cid, name: cid.split("_")[0].replace(/^\w/, l => l.toUpperCase()), color: "#6366F1", neon: "#818CF8" }; const cExps = fltExAll.filter(e => e.categoryId === cid); const realEx = cExps.filter(e => !e.__settlement); const ctag = realEx.length > 0 && realEx.every(isFix) ? "fixed" : "flexible"; const prevTotal = prevT[cid] || 0; const momPct = prevTotal > 0 ? Math.round((total - prevTotal) / prevTotal * 100) : null; const isDrilled = drillCat === cid; const allTx = isDrilled ? [...cExps].sort((a, b) => (b.date || "").localeCompare(a.date || "")) : []; return <div key={cid} style={{ marginBottom: 12 }}><div onClick={() => sDrillCat(isDrilled ? null : cid)} style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}><span style={{ width: 30, display: "flex", justifyContent: "center" }}><DI2 id={c.id} accent={c.neon || c.color} size={20} /></span><div style={{ flex: 1 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><div style={{ display: "flex", alignItems: "center" }}><span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-h)" }}>{c.name}</span><span style={{ fontSize: 8, fontFamily: "var(--font-h)", fontWeight: 600, color: ctag === "fixed" ? "var(--acc2)" : "var(--warn)", background: ctag === "fixed" ? "#A78BFA15" : "#FBBF2415", padding: "2px 6px", borderRadius: 4, marginLeft: 6 }}>{ctag === "fixed" ? "FIXED" : "FLEX"}</span><span style={{ fontSize: 9, color: "var(--muted)", marginLeft: 6, fontFamily: "var(--font-h)" }}>{cExps.length} tx</span></div><div style={{ display: "flex", alignItems: "center", gap: 6 }}>{momPct !== null && <span style={{ fontSize: 9, fontFamily: "var(--font-h)", fontWeight: 700, color: momPct > 0 ? "var(--neg)" : "var(--pos)", background: momPct > 0 ? "#E07A5F15" : "#6BAA7515", padding: "1px 5px", borderRadius: 3 }}>{momPct > 0 ? "+" : ""}{momPct}% MoM</span>}<span style={{ fontSize: 13, fontFamily: "var(--font-h)", color: "var(--ts)", fontWeight: 500 }}>{fmt(total)}</span></div></div><div style={{ height: 5, borderRadius: 3, background: "var(--border)", overflow: "hidden" }}><div style={{ height: "100%", width: `${(total / mx) * 100}%`, background: c.color, borderRadius: 3 }} /></div></div><span style={{ fontSize: 10, color: "var(--muted)" }}>{isDrilled ? "▲" : "▼"}</span></div>{isDrilled && <div style={{ marginLeft: 42, marginTop: 6, padding: "8px 10px", background: "var(--bg)", borderRadius: 8, border: "1px solid var(--border)", maxHeight: 260, overflowY: "auto" }}>{allTx.length === 0 && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: 8 }}>No entries</div>}{allTx.map(tx => <div key={tx.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, paddingBottom: 6, borderBottom: "1px dashed var(--border)" }}><div style={{ flex: 1, minWidth: 0, marginRight: 8 }}><div style={{ fontSize: 11, color: "var(--ts)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-h)", fontWeight: 600 }}>{tx.note || "(no note)"}{tx.__settlement && <span style={{ marginLeft: 5, fontSize: 8, color: "var(--danger)", background: "#D4726A15", padding: "1px 4px", borderRadius: 3, fontWeight: 700 }}>SPLIT</span>}</div><div style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--font-b)", marginTop: 1 }}>{dl(tx.date)}</div></div><span style={{ fontSize: 12, fontFamily: "var(--font-h)", color: "var(--text)", fontWeight: 600, flexShrink: 0 }}>{fmt(tx.amount)}</span></div>)}</div>}</div> }) })()}</div>
+        <CategorySpendCard expenses={exAll} categories={cats} formatCurrency={fmt} isFixed={isFix} onTxClick={openSpendTx} />
         </div>}
 
       {tab === "add" && <div className="pse" style={{ paddingTop: 20 }}><div style={{ display: "flex", gap: 6, marginBottom: 16 }}>{[["log", "Log"], ["iou", "IOU · Splits"]].map(([s, lbl]) => <button key={s} onClick={() => sAddSeg(s)} style={{ flex: 1, padding: "9px", borderRadius: 10, fontSize: 12, fontFamily: "var(--font-h)", fontWeight: 600, cursor: "pointer", border: `1.5px solid ${addSeg === s ? "var(--neg)" : "var(--border)"}`, background: addSeg === s ? "var(--neg)" : "var(--card)", color: addSeg === s ? "#fff" : "var(--muted)" }}>{lbl}</button>)}</div>{addSeg === "log" && <AddPage categories={cats} incomeSources={isrc} recurringCats={recCats} onAddExpense={addE} onAddIncome={addI} onAddTransfer={addT} onAddRec={addRec} onError={showT} patterns={quickPatterns} onQuickLog={quickLog} defaults={addDefaults} autoRules={autoRules} catModel={catModel} wallets={wallets} cloudinaryEnabled={!!_creds.cloudName} splitPeople={splitPeopleList} onAddSplits={rows => { if (!rows.length) return; sSp(p => [...p, ...rows]); sbUpsert("splits", rows.map(r => ({ ...toSB(r, COLS.splits), deleted_at: null }))); const tot = roundMoney(rows.reduce((s, r) => s + r.amount, 0)); showT(`${rows.length} IOU${rows.length === 1 ? "" : "s"} created · ${fmt(tot)} to collect`, "success"); }} />}{addSeg === "iou" && <IOUWallet splits={sp} settlements={stl} categories={cats} wallets={wallets} events={evs} expenses={ex} fmt={fmt} uid={uid} isUpiLite={isUpiLite} SettleModal={SettleM} onAdd={s => { const sr = { ...s, createdAt: new Date().toISOString() }; sSp(p => [...p, sr]); sbUpsert("splits", [toSB(sr, COLS.splits)]); }} onSettle={settle} onSettleNet={settleNet} onSettleEventNet={settleEventNet} focusPerson={iouFocus} onFocusHandled={() => sIouFocus(null)} onSkip={skipSplit} onUnskip={unskipSplit} onDelete={id => delItem(id, "split")} onRenamePerson={(from, to) => { const f = (from || "").trim().toLowerCase(); const t = (to || "").trim(); if (!f || !t) return; const affected = sp.filter(s => !s.deleted_at && (s.name || "").trim().toLowerCase() === f); if (!affected.length) return; sSp(p => p.map(s => (s.name || "").trim().toLowerCase() === f ? { ...s, name: t } : s)); sbUpsert("splits", affected.map(s => toSB({ ...s, name: t }, COLS.splits))); showT(`${affected.length} IOU${affected.length === 1 ? "" : "s"} now under "${t}"`, "success"); }} onError={msg => showT(msg, "error")} />}</div>}

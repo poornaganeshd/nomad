@@ -617,6 +617,124 @@ export const catWindowLabel = (range, offset, win, today) => {
   return String(s.getFullYear());
 };
 
+// The window a period is COMPARED against: the period before it, cut to the
+// same point when the viewed period is still running.
+//
+// catWindow's own prevStart/prevEnd is the WHOLE previous period, so "this
+// month" (month-to-date) was measured against all of last month. On the 5th
+// that is five days of spending against thirty-one, and every category read as
+// a 70–90% drop that was nothing but the calendar — a "-73% MoM" on Food meant
+// "it is early in the month", not "you ate out less". Like-for-like is the only
+// comparison that means anything mid-period: 1–15 Sep against 1–15 Aug.
+//
+// The cut is CALENDAR-shifted (same day-of-month one period back), not "same
+// number of days", so the last day of September compares a whole September
+// with a whole August rather than dropping 31 Aug. A day that doesn't exist in
+// the shorter month (30 Mar → 30 Feb) clamps to the whole of that month.
+// A past (complete) period cuts at its own start, i.e. the full previous one.
+export const catCompareWindow = (range, offset, today) => {
+  const win = catWindow(range, offset, today);
+  const e = win.end;
+  const back = { month: 1, "3m": 3, year: 12 }[range];
+  let cut = range === "week"
+    ? new Date(e.getFullYear(), e.getMonth(), e.getDate() - 7)
+    : new Date(e.getFullYear(), e.getMonth() - (back || 12), e.getDate());
+  if (cut > win.start) cut = win.start;
+  return { ...win, prevEnd: cut, partial: cut < win.start };
+};
+
+// How the comparison window reads next to a figure. Month windows are NAMED
+// ("vs 1–15 Aug", "vs Aug") because that is the stepper this is paired with;
+// the rest stay short enough for the donut centre.
+export const catCompareLabel = (range, offset, cmp) => {
+  if (range === "month") {
+    const mon = CAT_MONTHS[cmp.prevStart.getMonth()];
+    if (!cmp.partial) return `vs ${mon}`;
+    const last = new Date(cmp.prevEnd.getFullYear(), cmp.prevEnd.getMonth(), cmp.prevEnd.getDate() - 1).getDate();
+    return last === 1 ? `vs 1 ${mon}` : `vs 1–${last} ${mon}`;
+  }
+  if (range === "year") return `vs ${cmp.prevStart.getFullYear()}${cmp.partial ? " to date" : ""}`;
+  return offset === 0
+    ? { week: "vs last week", "3m": "vs prior 3 mo" }[range]
+    : { week: "vs prev week", "3m": "vs prior 3 mo" }[range];
+};
+
+// Change between two spend totals, shaped for a badge.
+//
+// A percentage off a tiny base is arithmetic, not information: ₹1 last month
+// and ₹485 this month is "+48422%", a number nobody can read at a glance and
+// that dwarfs every meaningful change on the same list. Past 10× it becomes a
+// multiple ("485×"). Nothing last time is NEW rather than an infinite rise, and
+// an unchanged total is FLAT — neither good news nor bad, so it must not be
+// coloured as a saving.
+export const spendChange = (cur, prev) => {
+  const c = roundMoney(Number(cur) || 0), p = roundMoney(Number(prev) || 0);
+  if (p <= 0) return c > 0 ? { kind: "new", text: "NEW" } : null;
+  const pct = Math.round(((c - p) / p) * 100);
+  if (pct >= 1000) { const times = Math.round(c / p); return { kind: "up", pct, text: `${times.toLocaleString("en-IN")}×` }; }
+  if (pct === 0) return { kind: "flat", pct, text: "0%" };
+  return { kind: pct > 0 ? "up" : "down", pct, text: `${pct > 0 ? "+" : "−"}${Math.abs(pct)}%` };
+};
+
+/**
+ * Spend per category for one catWindow period, with its like-for-like
+ * comparison (catCompareWindow). The single derivation behind both the
+ * Category Share donut and the Spending by Category list, so the two cards can
+ * never quote a different change for the same category in the same period.
+ *
+ * `expenses` is expense-shaped (settlements you paid out already mapped in by
+ * the caller). A missing categoryId files under "uncat" rather than a key
+ * called "undefined". Categories whose total rounds to zero are dropped — a
+ * fully-excess settlement is a ₹0 row that says nothing.
+ *
+ * Returns { rows, total, prevTotal, count, change, cmp } with rows sorted by
+ * total (desc), each { cid, total, count, items, fixed, prevTotal, change }.
+ * `fixed` is true when every non-settlement row passes `isFixed` — a category
+ * made only of IOU settlements has no fixed/flexible nature of its own.
+ */
+export const categorySpend = (expenses, range, offset, today, { isFixed } = {}) => {
+  const cmp = catCompareWindow(range, offset, today);
+  const k = (d) => localDateKey(d);
+  const curFrom = k(cmp.start), curTo = k(cmp.end), prevFrom = k(cmp.prevStart), prevTo = k(cmp.prevEnd);
+  const cur = new Map();
+  const prev = {};
+  let prevTotal = 0;
+  (expenses || []).forEach((e) => {
+    if (!e || typeof e.date !== "string" || !e.date) return;
+    const d = e.date.slice(0, 10);
+    const cid = e.categoryId || "uncat";
+    const amt = Number(e.amount) || 0;
+    if (d >= curFrom && d < curTo) {
+      let b = cur.get(cid);
+      if (!b) { b = { cid, total: 0, items: [] }; cur.set(cid, b); }
+      b.total = roundMoney(b.total + amt);
+      b.items.push(e);
+    } else if (d >= prevFrom && d < prevTo) {
+      prev[cid] = roundMoney((prev[cid] || 0) + amt);
+      prevTotal = roundMoney(prevTotal + amt);
+    }
+  });
+  const rows = [...cur.values()]
+    .filter((b) => Math.abs(b.total) >= 0.005)
+    .map((b) => {
+      const real = b.items.filter((e) => !e.__settlement);
+      const p = prev[b.cid] || 0;
+      return {
+        cid: b.cid,
+        total: b.total,
+        count: b.items.length,
+        items: [...b.items].sort((a, c) => String(c.date).localeCompare(String(a.date))),
+        fixed: typeof isFixed === "function" && real.length > 0 && real.every(isFixed),
+        prevTotal: p,
+        change: spendChange(b.total, p),
+      };
+    })
+    .sort((a, b) => b.total - a.total || String(a.cid).localeCompare(String(b.cid)));
+  const total = roundMoney(rows.reduce((s, r) => s + r.total, 0));
+  const count = rows.reduce((s, r) => s + r.count, 0);
+  return { rows, total, prevTotal, count, change: spendChange(total, prevTotal), cmp };
+};
+
 // Which expense keys count as "this event's group expenses"?
 //
 // An expense-derived IOU is linked to its expense by `groupId`, but the three
