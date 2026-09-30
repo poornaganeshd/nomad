@@ -200,3 +200,13 @@ describe('defaultImportWalletId', () => {
     expect(defaultImportWalletId([], isLite)).toBe('bank');
   });
 });
+
+// The app refused every UPI Lite payment past ₹5,000 in a day — the BALANCE
+// cap, not the spend limit. NPCI allows ₹10,000 of UPI Lite spend a day.
+describe('UPI Lite limits', () => {
+  it('daily spend is ₹10,000, distinct from the ₹5,000 balance cap', async () => {
+    const { UPI_LITE_DAILY_SPEND, UPI_LITE_MAX_BALANCE } = await import('../financeUtils.js');
+    expect(UPI_LITE_DAILY_SPEND).toBe(10000);
+    expect(UPI_LITE_MAX_BALANCE).toBe(5000);
+  });
+});

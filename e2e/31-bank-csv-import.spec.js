@@ -3,7 +3,7 @@ import { gotoLocal, dismissBanner, funded, readBackup, makeExpense } from "./hel
 
 // Bank CSV import booked every row into wallets[0] — UPI Lite in the default
 // seed order — so the salary credit was refused ("UPI Lite is for spending
-// only") and expenses ran into the ₹5000 cap, under a preview that said "Bank
+// only") and larger expenses were more than UPI Lite can hold, under a preview that said "Bank
 // wallet". And a signed Amount column imported that salary as an EXPENSE.
 
 const today = new Date();
@@ -39,7 +39,7 @@ test("a signed bank CSV lands in Bank, with the credit as income", async ({ page
   }, { timeout: 5000 }).toEqual([1, 2]);
   const b = await readBackup(page);
   expect(b.incomes[0]).toMatchObject({ amount: 50000, walletId: "bank", date: iso(d(3)) });
-  // ₹7,200 in one day would breach UPI Lite's ₹5000 cap — it only got in
-  // because it went to Bank.
+  // UPI Lite can never hold ₹7,200 (its balance caps at ₹5,000) — it only got
+  // in because it went to Bank.
   expect(b.expenses.filter(e => e.walletId === "bank").map(e => e.amount).sort((x, y) => x - y)).toEqual([450, 7200]);
 });

@@ -275,6 +275,14 @@ export const historySortCompare = (a, b) => {
 
 // RBI cap: a UPI Lite wallet may never hold more than ₹5000.
 export const UPI_LITE_MAX_BALANCE = 5000;
+// What UPI Lite may SPEND in a day. NPCI (UPI-OC-No-169-A, with the Dec 2024
+// RBI enhancement) allows ₹10,000 of cumulative UPI Lite spend a day, topping
+// the ₹5,000 wallet up as it goes. The app enforced ₹5,000 — the BALANCE cap —
+// as the daily one, refusing real payments made after a top-up.
+export const UPI_LITE_DAILY_SPEND = 10000;
+// A monthly sanity ceiling kept from the original guard (no NPCI rule found);
+// at the daily limit it only binds after ten full days of UPI Lite spending.
+export const UPI_LITE_MONTHLY_SPEND = 100000;
 
 // True when topping a UPI Lite wallet (current balance) up by `incoming` would
 // breach the ₹5000 ceiling. Used by every path that can credit UPI Lite
