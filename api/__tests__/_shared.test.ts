@@ -252,3 +252,77 @@ describe('withRetry', () => {
     expect(fn).toHaveBeenCalledTimes(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// userGetAll — paged reads past Supabase's 1000-row cap
+// ---------------------------------------------------------------------------
+import { userGetAll, reportTotals, isTrackedExpense } from '../_shared.js';
+
+describe('userGetAll', () => {
+  const page = (rows: unknown[], total: number | null, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => rows,
+    headers: { get: (h: string) => (h.toLowerCase() === 'content-range' && total != null ? `0-${rows.length - 1}/${total}` : null) },
+  });
+  const rows = (from: number, n: number) => Array.from({ length: n }, (_, i) => ({ id: from + i }));
+
+  it('walks offset until it holds the reported total', async () => {
+    const calls: string[] = [];
+    const f = vi.fn(async (url: string) => {
+      calls.push(url);
+      const off = Number(/offset=(\d+)/.exec(url)![1]);
+      return page(rows(off, Math.min(1000, 2345 - off)), 2345);
+    });
+    const out = await userGetAll('https://x.supabase.co', 'k', '/expenses?select=*', 'date.desc,id.desc', f as unknown as typeof fetch);
+    expect(out).toHaveLength(2345);
+    expect(calls).toHaveLength(3);
+    expect(calls[0]).toContain('order=date.desc,id.desc');
+    expect(calls[1]).toContain('offset=1000');
+    expect(calls[2]).toContain('offset=2000');
+  });
+
+  it('honours a server page size smaller than 1000', async () => {
+    const f = vi.fn(async (url: string) => {
+      const off = Number(/offset=(\d+)/.exec(url)![1]);
+      return page(rows(off, Math.min(500, 1200 - off)), 1200);
+    });
+    expect(await userGetAll('https://x.supabase.co', 'k', '/splits', 'id.asc', f as unknown as typeof fetch)).toHaveLength(1200);
+  });
+
+  it('stops on a short page when the count header is missing', async () => {
+    const f = vi.fn(async (url: string) => {
+      const off = Number(/offset=(\d+)/.exec(url)![1]);
+      return page(rows(off, off === 0 ? 1000 : 10), null);
+    });
+    expect(await userGetAll('https://x.supabase.co', 'k', '/splits', 'id.asc', f as unknown as typeof fetch)).toHaveLength(1010);
+  });
+
+  it('fails the whole read when any page fails — a partial table is worse than none', async () => {
+    const f = vi.fn(async (url: string) => (url.includes('offset=0') ? page(rows(0, 1000), 1500) : page([], null, 500)));
+    await expect(userGetAll('https://x.supabase.co', 'k', '/splits', 'id.asc', f as unknown as typeof fetch)).rejects.toThrow(/500/);
+  });
+
+  it('returns an empty table without a second request', async () => {
+    const f = vi.fn(async () => page([], 0));
+    expect(await userGetAll('https://x.supabase.co', 'k', '/splits', 'id.asc', f as unknown as typeof fetch)).toEqual([]);
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('reportTotals', () => {
+  const e = (amount: number, categoryId: string, walletId = 'bank') => ({ amount, categoryId, walletId, date: '2026-09-01' });
+
+  it('leaves out group expenses someone else paid', () => {
+    const t = reportTotals([e(100, 'food'), e(900, 'food', '__tracked__'), e(50, 'travel')], [], []);
+    expect(t.totalSpent).toBe(150);
+    expect(t.byCategory).toEqual([{ name: 'Food', amount: 100 }, { name: 'Travel', amount: 50 }]);
+    expect(isTrackedExpense({ walletId: '__tracked__' })).toBe(true);
+  });
+
+  it('sums in paisa, not float dust', () => {
+    const t = reportTotals(Array.from({ length: 10 }, () => e(0.1, 'food')), [{ amount: 0.1, sourceId: 's', walletId: 'bank', date: '2026-09-01' }, { amount: 0.2, sourceId: 's', walletId: 'bank', date: '2026-09-01' }], []);
+    expect(t.totalSpent).toBe(1);
+    expect(t.totalIncome).toBe(0.3);
+  });
+});

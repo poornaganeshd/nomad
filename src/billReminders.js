@@ -1,3 +1,5 @@
+import { formatMoney } from "./financeUtils";
+
 const SHOWN_KEY_PREFIX = "nomad-bill-reminders-";
 
 function getTodayShown(todayStr) {
@@ -125,7 +127,7 @@ export function buildReminders(recurring, splits, todayStr, getRecurringDueDateF
     byPerson.set(k, cur);
   });
   [...byPerson.values()].sort((a, b) => b.total - a.total).forEach(p => {
-    reminders.push({ id: "owe-" + p.name.toLowerCase(), msg: `You owe ₹${p.total} — ${p.name}${p.count > 1 ? ` (${p.count} IOUs)` : ""}`, type: "warn" });
+    reminders.push({ id: "owe-" + p.name.toLowerCase(), msg: `You owe ${formatMoney(p.total)} — ${p.name}${p.count > 1 ? ` (${p.count} IOUs)` : ""}`, type: "warn" });
   });
 
   return reminders;

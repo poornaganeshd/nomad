@@ -329,3 +329,37 @@ describe('computeFinanceScore — robustness against missing amounts', () => {
     expect(score).toBeLessThanOrEqual(100);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Early-month fairness and recurring income
+// ---------------------------------------------------------------------------
+describe('computeFinanceScore — the running month', () => {
+  it('pro-rates the logging bar to the days that have happened', () => {
+    // On the 6th, five logged days is a perfect habit, not 5 of 20.
+    const expenses = [1, 2, 3, 4, 5].map(d => ({ date: `2026-09-0${d}`, amount: 100, categoryId: 'food' }));
+    const { breakdown } = computeFinanceScore({ month: '2026-09', today: '2026-09-06', expenses });
+    expect(breakdown.logging).toBe(20);
+  });
+
+  it('still wants two days in three', () => {
+    const expenses = [1, 2].map(d => ({ date: `2026-09-0${d}`, amount: 100, categoryId: 'food' }));
+    // Day 15 → bar of 10 days; 2 logged → 4 of 20.
+    const { breakdown } = computeFinanceScore({ month: '2026-09', today: '2026-09-15', expenses });
+    expect(breakdown.logging).toBe(4);
+  });
+
+  it('a past month keeps the full 20-day bar', () => {
+    const expenses = [1, 2, 3, 4, 5].map(d => ({ date: `2026-08-0${d}`, amount: 100, categoryId: 'food' }));
+    const { breakdown } = computeFinanceScore({ month: '2026-08', today: '2026-09-06', expenses });
+    expect(breakdown.logging).toBe(5);
+  });
+});
+
+describe('computeFinanceScore — recurring income is not a bill', () => {
+  it('a salary that has not landed yet does not dock bill points', () => {
+    const salary = { id: 's', type: 'income', name: 'Salary', amount: 50000, frequency: 'monthly', dayOfMonth: 1, startDate: '2026-01-01', active: true };
+    const rent = { id: 'r', name: 'Rent', amount: 9000, frequency: 'monthly', dayOfMonth: 1, startDate: '2026-01-01', active: true, lastPaidDate: '2026-09-01' };
+    const { breakdown } = computeFinanceScore({ month: '2026-09', today: '2026-09-10', recurring: [salary, rent] });
+    expect(breakdown.bills).toBe(25);
+  });
+});

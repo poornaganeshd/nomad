@@ -42,21 +42,30 @@ export const getRecurringDueDate = (record, todayString) => {
     return null;
   }
   if (start > today) return null;
-  if (record.frequency === 'monthly') {
-    const dom = record.dayOfMonth || start.getDate();
-    let months = Math.max(0, fullMonthsBetween(start, today));
-    let due = withClampedDay(start.getFullYear(), start.getMonth() + months, dom);
-    const daysInDueMonth = new Date(due.getFullYear(), due.getMonth() + 1, 0).getDate();
-    if (dom > daysInDueMonth && due < today) { months += 1; due = withClampedDay(start.getFullYear(), start.getMonth() + months, dom); }
-    if (due < start) { months += 1; due = withClampedDay(start.getFullYear(), start.getMonth() + months, dom); }
-    return isoDate(due);
-  }
-  if (record.frequency === 'yearly') {
-    const monthIndex = Math.max(0, (record.yearMonth || (start.getMonth() + 1)) - 1);
-    const desiredDay = record.yearDay || start.getDate();
-    const startAnchor = withClampedDay(start.getFullYear(), monthIndex, desiredDay);
-    const years = Math.max(0, fullYearsBetween(startAnchor, today));
-    return isoDate(withClampedDay(start.getFullYear() + years, monthIndex, desiredDay));
+  // Monthly and yearly answer the same question: the LATEST occurrence on or
+  // before today, but never one before the bill's first occurrence (the first
+  // scheduled day on or after startDate). Before the first one it is returned
+  // as the upcoming date.
+  //
+  // This used to count whole months from the START date's day-of-month, which
+  // is not the day the bill falls on. A bill started on the 20th and due on the
+  // 25th rolled over on the 20th — so an unpaid 25 Aug cycle vanished from 20 to
+  // 24 Sep, the bill read "not due" and its overdue counter reset. The month-end
+  // clamp had the same hole from the other side: a bill due on the 31st jumped
+  // to 31 Mar on 1 Mar, silently dropping an unpaid 28 Feb. And a yearly bill
+  // whose renewal day falls earlier in the year than its start date (insurance
+  // that renews in March, added in September) was reported OVERDUE on the day
+  // it was created, for a March the bill did not exist in.
+  if (record.frequency === 'monthly' || record.frequency === 'yearly') {
+    const monthly = record.frequency === 'monthly';
+    const at = monthly
+      ? ((y, m) => withClampedDay(y, m, Number(record.dayOfMonth) || start.getDate()))
+      : ((y) => withClampedDay(y, Math.max(0, (Number(record.yearMonth) || (start.getMonth() + 1)) - 1), Number(record.yearDay) || start.getDate()));
+    let due = at(today.getFullYear(), today.getMonth());
+    if (due > today) due = monthly ? at(today.getFullYear(), today.getMonth() - 1) : at(today.getFullYear() - 1);
+    let first = at(start.getFullYear(), start.getMonth());
+    if (first < start) first = monthly ? at(start.getFullYear(), start.getMonth() + 1) : at(start.getFullYear() + 1);
+    return isoDate(due < first ? first : due);
   }
   if (record.frequency === 'custom') {
     const intervalDays = Number(record.intervalDays) || 0;
@@ -194,6 +203,25 @@ export const formatMoney = (value, currency = "\u20B9") => {
   return currency + v.toLocaleString("en-IN", { minimumFractionDigits: whole ? 0 : 2, maximumFractionDigits: 2 });
 };
 
+// Short money for tight spaces (calendar cells, chart chips, axis labels), in
+// the Indian scale: ₹950 · ₹1.5k · ₹25k · ₹1.2L · ₹12L · ₹1.5Cr.
+//
+// The calendar only knew "k", so a ₹1,23,456 day printed "₹123.5k" — seven
+// characters in a cell with room for five, cut to "₹1…" — and the chart's
+// copy rounded 99,999 up to "₹100.0k". Rounding is done BEFORE picking the
+// unit so a value never spills into a four-digit "k"; a trailing ".0" is
+// dropped ("₹2k", not "₹2.0k"). Negative values keep their sign in front.
+export const compactMoney = (value, currency = "\u20B9") => {
+  const v = Number(value) || 0;
+  const sign = v < 0 ? "−" : "";
+  const n = Math.abs(v);
+  const one = (x) => { const r = Math.round(x * 10) / 10; return r >= 10 ? String(Math.round(x)) : String(r); };
+  if (Math.round(n) < 1000) return `${sign}${currency}${Math.round(n)}`;
+  if (Math.round(n / 100) / 10 < 100) return `${sign}${currency}${one(n / 1000)}k`;
+  if (Math.round(n / 10000) / 10 < 100) return `${sign}${currency}${one(n / 100000)}L`;
+  return `${sign}${currency}${one(n / 10000000)}Cr`;
+};
+
 // Stable, descending comparator for history rows.
 // Order: date desc → creation timestamp desc → id desc.
 //
@@ -247,6 +275,14 @@ export const historySortCompare = (a, b) => {
 
 // RBI cap: a UPI Lite wallet may never hold more than ₹5000.
 export const UPI_LITE_MAX_BALANCE = 5000;
+// What UPI Lite may SPEND in a day. NPCI (UPI-OC-No-169-A, with the Dec 2024
+// RBI enhancement) allows ₹10,000 of cumulative UPI Lite spend a day, topping
+// the ₹5,000 wallet up as it goes. The app enforced ₹5,000 — the BALANCE cap —
+// as the daily one, refusing real payments made after a top-up.
+export const UPI_LITE_DAILY_SPEND = 10000;
+// A monthly sanity ceiling kept from the original guard (no NPCI rule found);
+// at the daily limit it only binds after ten full days of UPI Lite spending.
+export const UPI_LITE_MONTHLY_SPEND = 100000;
 
 // True when topping a UPI Lite wallet (current balance) up by `incoming` would
 // breach the ₹5000 ceiling. Used by every path that can credit UPI Lite
@@ -263,6 +299,18 @@ export const defaultSettleWalletId = (direction, wallets, isUpiLiteFn) => {
   const list = wallets || [];
   const usable = direction === "owed" ? list.filter(w => !isUpiLiteFn(w)) : list;
   return (usable[0] || list[0])?.id;
+};
+
+// Which wallet an IMPORT books into by default (bank CSV, ledger photo, the
+// statement reconcile). A statement is a bank's record, so "bank" when it
+// exists — and never UPI Lite, which cannot receive money and caps spending at
+// ₹5000 a day. The imports used to take wallets[0], which in the default seed
+// order IS UPI Lite: every income row was refused, most expense rows hit the
+// cap, and the preview underneath said "Bank wallet" the whole time.
+export const defaultImportWalletId = (wallets, isUpiLiteFn) => {
+  const list = (wallets || []).filter(Boolean);
+  const canReceive = list.filter(w => !isUpiLiteFn(w));
+  return (canReceive.find(w => w.id === "bank") || canReceive[0] || list[0])?.id || "bank";
 };
 
 // A settlement's contribution to the SPLIT ledger. `amount` is the cash that
@@ -615,6 +663,124 @@ export const catWindowLabel = (range, offset, win, today) => {
   if (range === "month") return `${CAT_MONTHS[s.getMonth()]} ${s.getFullYear()}`;
   if (range === "3m") return `${CAT_MONTHS[s.getMonth()]}–${CAT_MONTHS[e.getMonth()]} ${e.getFullYear()}`;
   return String(s.getFullYear());
+};
+
+// The window a period is COMPARED against: the period before it, cut to the
+// same point when the viewed period is still running.
+//
+// catWindow's own prevStart/prevEnd is the WHOLE previous period, so "this
+// month" (month-to-date) was measured against all of last month. On the 5th
+// that is five days of spending against thirty-one, and every category read as
+// a 70–90% drop that was nothing but the calendar — a "-73% MoM" on Food meant
+// "it is early in the month", not "you ate out less". Like-for-like is the only
+// comparison that means anything mid-period: 1–15 Sep against 1–15 Aug.
+//
+// The cut is CALENDAR-shifted (same day-of-month one period back), not "same
+// number of days", so the last day of September compares a whole September
+// with a whole August rather than dropping 31 Aug. A day that doesn't exist in
+// the shorter month (30 Mar → 30 Feb) clamps to the whole of that month.
+// A past (complete) period cuts at its own start, i.e. the full previous one.
+export const catCompareWindow = (range, offset, today) => {
+  const win = catWindow(range, offset, today);
+  const e = win.end;
+  const back = { month: 1, "3m": 3, year: 12 }[range];
+  let cut = range === "week"
+    ? new Date(e.getFullYear(), e.getMonth(), e.getDate() - 7)
+    : new Date(e.getFullYear(), e.getMonth() - (back || 12), e.getDate());
+  if (cut > win.start) cut = win.start;
+  return { ...win, prevEnd: cut, partial: cut < win.start };
+};
+
+// How the comparison window reads next to a figure. Month windows are NAMED
+// ("vs 1–15 Aug", "vs Aug") because that is the stepper this is paired with;
+// the rest stay short enough for the donut centre.
+export const catCompareLabel = (range, offset, cmp) => {
+  if (range === "month") {
+    const mon = CAT_MONTHS[cmp.prevStart.getMonth()];
+    if (!cmp.partial) return `vs ${mon}`;
+    const last = new Date(cmp.prevEnd.getFullYear(), cmp.prevEnd.getMonth(), cmp.prevEnd.getDate() - 1).getDate();
+    return last === 1 ? `vs 1 ${mon}` : `vs 1–${last} ${mon}`;
+  }
+  if (range === "year") return `vs ${cmp.prevStart.getFullYear()}${cmp.partial ? " to date" : ""}`;
+  return offset === 0
+    ? { week: "vs last week", "3m": "vs prior 3 mo" }[range]
+    : { week: "vs prev week", "3m": "vs prior 3 mo" }[range];
+};
+
+// Change between two spend totals, shaped for a badge.
+//
+// A percentage off a tiny base is arithmetic, not information: ₹1 last month
+// and ₹485 this month is "+48422%", a number nobody can read at a glance and
+// that dwarfs every meaningful change on the same list. Past 10× it becomes a
+// multiple ("485×"). Nothing last time is NEW rather than an infinite rise, and
+// an unchanged total is FLAT — neither good news nor bad, so it must not be
+// coloured as a saving.
+export const spendChange = (cur, prev) => {
+  const c = roundMoney(Number(cur) || 0), p = roundMoney(Number(prev) || 0);
+  if (p <= 0) return c > 0 ? { kind: "new", text: "NEW" } : null;
+  const pct = Math.round(((c - p) / p) * 100);
+  if (pct >= 1000) { const times = Math.round(c / p); return { kind: "up", pct, text: `${times.toLocaleString("en-IN")}×` }; }
+  if (pct === 0) return { kind: "flat", pct, text: "0%" };
+  return { kind: pct > 0 ? "up" : "down", pct, text: `${pct > 0 ? "+" : "−"}${Math.abs(pct)}%` };
+};
+
+/**
+ * Spend per category for one catWindow period, with its like-for-like
+ * comparison (catCompareWindow). The single derivation behind both the
+ * Category Share donut and the Spending by Category list, so the two cards can
+ * never quote a different change for the same category in the same period.
+ *
+ * `expenses` is expense-shaped (settlements you paid out already mapped in by
+ * the caller). A missing categoryId files under "uncat" rather than a key
+ * called "undefined". Categories whose total rounds to zero are dropped — a
+ * fully-excess settlement is a ₹0 row that says nothing.
+ *
+ * Returns { rows, total, prevTotal, count, change, cmp } with rows sorted by
+ * total (desc), each { cid, total, count, items, fixed, prevTotal, change }.
+ * `fixed` is true when every non-settlement row passes `isFixed` — a category
+ * made only of IOU settlements has no fixed/flexible nature of its own.
+ */
+export const categorySpend = (expenses, range, offset, today, { isFixed } = {}) => {
+  const cmp = catCompareWindow(range, offset, today);
+  const k = (d) => localDateKey(d);
+  const curFrom = k(cmp.start), curTo = k(cmp.end), prevFrom = k(cmp.prevStart), prevTo = k(cmp.prevEnd);
+  const cur = new Map();
+  const prev = {};
+  let prevTotal = 0;
+  (expenses || []).forEach((e) => {
+    if (!e || typeof e.date !== "string" || !e.date) return;
+    const d = e.date.slice(0, 10);
+    const cid = e.categoryId || "uncat";
+    const amt = Number(e.amount) || 0;
+    if (d >= curFrom && d < curTo) {
+      let b = cur.get(cid);
+      if (!b) { b = { cid, total: 0, items: [] }; cur.set(cid, b); }
+      b.total = roundMoney(b.total + amt);
+      b.items.push(e);
+    } else if (d >= prevFrom && d < prevTo) {
+      prev[cid] = roundMoney((prev[cid] || 0) + amt);
+      prevTotal = roundMoney(prevTotal + amt);
+    }
+  });
+  const rows = [...cur.values()]
+    .filter((b) => Math.abs(b.total) >= 0.005)
+    .map((b) => {
+      const real = b.items.filter((e) => !e.__settlement);
+      const p = prev[b.cid] || 0;
+      return {
+        cid: b.cid,
+        total: b.total,
+        count: b.items.length,
+        items: [...b.items].sort((a, c) => String(c.date).localeCompare(String(a.date))),
+        fixed: typeof isFixed === "function" && real.length > 0 && real.every(isFixed),
+        prevTotal: p,
+        change: spendChange(b.total, p),
+      };
+    })
+    .sort((a, b) => b.total - a.total || String(a.cid).localeCompare(String(b.cid)));
+  const total = roundMoney(rows.reduce((s, r) => s + r.total, 0));
+  const count = rows.reduce((s, r) => s + r.count, 0);
+  return { rows, total, prevTotal, count, change: spendChange(total, prevTotal), cmp };
 };
 
 // Which expense keys count as "this event's group expenses"?

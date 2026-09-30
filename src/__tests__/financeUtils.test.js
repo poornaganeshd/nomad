@@ -159,10 +159,43 @@ describe('getRecurringDueDate — monthly', () => {
     const r = { frequency: 'monthly', startDate: '2024-01-31', active: true, dayOfMonth: 31 };
     // Feb 29 is the clamped anniversary for a 31-day bill — due today
     expect(getRecurringDueDate(r, '2024-02-29')).toBe('2024-02-29');
-    // Mar 30: Feb anniversary passed, Mar 31 not yet reached — show Mar 31 (upcoming)
-    expect(getRecurringDueDate(r, '2024-03-30')).toBe('2024-03-31');
+    // Mar 30: Mar 31 not reached yet, so the live cycle is still Feb 29. It
+    // used to jump ahead to Mar 31 on 1 Mar, which silently dropped an UNPAID
+    // Feb cycle for the whole of March (every other day-of-month returns its
+    // most recent due date and lets isRecurringDueToday decide if it's handled).
+    expect(getRecurringDueDate(r, '2024-03-01')).toBe('2024-02-29');
+    expect(getRecurringDueDate(r, '2024-03-30')).toBe('2024-02-29');
+    expect(isRecurringDueToday(r, '2024-03-30')).toBe(true);
+    expect(isRecurringDueToday({ ...r, lastPaidDate: '2024-02-29' }, '2024-03-30')).toBe(false);
     // On Mar 31: due today
     expect(getRecurringDueDate(r, '2024-03-31')).toBe('2024-03-31');
+  });
+
+  it('an unpaid cycle stays due when the bill day is later than the start day', () => {
+    // Started on the 20th, due on the 25th. Counting months from the START day
+    // rolled over on the 20th, so from 20–24 Sep the unpaid 25 Aug cycle
+    // vanished and the overdue counter reset.
+    const r = { frequency: 'monthly', startDate: '2026-08-20', dayOfMonth: 25, active: true };
+    expect(getRecurringDueDate(r, '2026-08-24')).toBe('2026-08-25'); // first one, upcoming
+    expect(isRecurringDueToday(r, '2026-08-24')).toBe(false);
+    for (const t of ['2026-09-19', '2026-09-20', '2026-09-24']) {
+      expect(getRecurringDueDate(r, t)).toBe('2026-08-25');
+      expect(isRecurringDueToday(r, t)).toBe(true);
+    }
+    expect(recurringDaysOverdue(r, '2026-09-22')).toBe(28);
+    expect(isRecurringDueToday({ ...r, lastPaidDate: '2026-08-26' }, '2026-09-22')).toBe(false);
+    expect(getRecurringDueDate(r, '2026-09-25')).toBe('2026-09-25');
+  });
+
+  it('a bill added after this month\'s day starts next month', () => {
+    const r = { frequency: 'monthly', startDate: '2026-09-30', dayOfMonth: 1, active: true };
+    expect(getRecurringDueDate(r, '2026-09-30')).toBe('2026-10-01');
+    expect(isRecurringDueToday(r, '2026-09-30')).toBe(false);
+  });
+
+  it('crosses a year boundary', () => {
+    const r = { frequency: 'monthly', startDate: '2026-11-10', dayOfMonth: 28, active: true };
+    expect(getRecurringDueDate(r, '2027-01-05')).toBe('2026-12-28');
   });
 
   it('uses dayOfMonth override when provided', () => {
@@ -188,6 +221,24 @@ describe('getRecurringDueDate — yearly', () => {
   it('returns null when startDate is in the future', () => {
     const r = { frequency: 'yearly', startDate: '2025-06-15', active: true };
     expect(getRecurringDueDate(r, '2024-08-01')).toBeNull();
+  });
+
+  it('a renewal day earlier in the year than the start date is NOT overdue on day one', () => {
+    // Insurance that renews every 15 Mar, added on 10 Sep. The old math
+    // returned 15 Mar of the START year — a March the bill did not exist in —
+    // so it was "due now, 179 days overdue" the moment it was saved.
+    const r = { frequency: 'yearly', startDate: '2026-09-10', yearMonth: 3, yearDay: 15, active: true };
+    expect(getRecurringDueDate(r, '2026-09-10')).toBe('2027-03-15');
+    expect(isRecurringDueToday(r, '2026-09-10')).toBe(false);
+    expect(recurringDaysOverdue(r, '2026-09-30')).toBe(0);
+    expect(isRecurringDueToday(r, '2027-03-15')).toBe(true);
+    expect(getRecurringDueDate(r, '2028-01-01')).toBe('2027-03-15');
+  });
+
+  it('29 Feb clamps to 28 Feb in a non-leap year', () => {
+    const r = { frequency: 'yearly', startDate: '2024-02-29', active: true };
+    expect(getRecurringDueDate(r, '2025-03-01')).toBe('2025-02-28');
+    expect(getRecurringDueDate(r, '2028-02-29')).toBe('2028-02-29');
   });
 });
 
@@ -637,5 +688,41 @@ describe('formatMoney — one shape for money everywhere', () => {
 
   it('accepts a different symbol', () => {
     expect(formatMoney(12.5, '$')).toBe('$12.50');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// compactMoney — calendar cells, chart chips
+// ---------------------------------------------------------------------------
+import { compactMoney } from '../financeUtils.js';
+describe('compactMoney', () => {
+  it('uses the Indian scale', () => {
+    expect(compactMoney(950)).toBe('₹950');
+    expect(compactMoney(1500)).toBe('₹1.5k');
+    expect(compactMoney(2000)).toBe('₹2k');
+    expect(compactMoney(25000)).toBe('₹25k');
+    expect(compactMoney(123456.78)).toBe('₹1.2L');
+    expect(compactMoney(1234567)).toBe('₹12L');
+    expect(compactMoney(15000000)).toBe('₹1.5Cr');
+  });
+
+  it('never spills into a four-digit k or a "100k"', () => {
+    // The chart's old copy printed ₹100.0k for 99,999, and the calendar's
+    // printed ₹123.5k in a cell with room for five characters.
+    expect(compactMoney(99999)).toBe('₹1L');
+    expect(compactMoney(999.6)).toBe('₹1k');
+    expect(compactMoney(9999)).toBe('₹10k');
+    expect(compactMoney(9949)).toBe('₹9.9k');
+  });
+
+  it('keeps a sign and treats junk as zero', () => {
+    expect(compactMoney(-2500)).toBe('−₹2.5k');
+    expect(compactMoney(undefined)).toBe('₹0');
+  });
+
+  it('fits a calendar cell (≤ 6 characters) for any day under ₹1 crore', () => {
+    for (const v of [0, 7, 999, 1000, 9999, 12345, 99999, 123456, 999999, 9999999]) {
+      expect(compactMoney(v).length).toBeLessThanOrEqual(6);
+    }
   });
 });

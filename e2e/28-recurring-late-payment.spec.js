@@ -9,11 +9,14 @@ import { gotoLocal, dismissBanner, makeExpense, funded, readBackup } from "./hel
 // A bill whose day-of-month falls later than today has exactly that shape: on
 // the 20th, a bill due on the 25th last fell due on the 25th of LAST month.
 
-const iso = (d) => d.toISOString().slice(0, 10);
-const today = new Date();
-// Day-of-month strictly after today, capped at 28 so every month has it.
-const DOM = Math.min(28, today.getDate() + 5);
-const monthsBack = (n) => iso(new Date(today.getFullYear(), today.getMonth() - n, Math.min(DOM, 28)));
+// The clock is pinned to the 20th of the current month, so the premise holds
+// on every calendar day. It used to read the real date and skip itself from
+// the 24th on — the last week of every month ran none of these tests.
+const now = new Date();
+const today = new Date(now.getFullYear(), now.getMonth(), 20, 10, 0, 0);
+const DOM = 25;
+const localIso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const monthsBack = (n) => localIso(new Date(today.getFullYear(), today.getMonth() - n, DOM));
 
 const overdueRent = {
   id: "r1", name: "Rent", amount: 1750, categoryId: "rent", walletId: "bank",
@@ -21,12 +24,12 @@ const overdueRent = {
   lastPaidDate: null, lastSkippedDate: null,
 };
 
-// Guard: if today is late enough in the month that DOM can't be after it, the
-// premise doesn't hold and the test would silently assert nothing.
-test.skip(DOM <= today.getDate(), "needs a day-of-month later than today");
+test.beforeEach(async ({ page }) => {
+  await page.clock.setFixedTime(today);
+});
 
 test("an overdue bill paid after the month rolled over clears and stays cleared", async ({ page }) => {
-  await gotoLocal(page, { ...funded(), expenses: [makeExpense()], recurring: [overdueRent] });
+  await gotoLocal(page, { ...funded(), expenses: [makeExpense({ date: localIso(today) })], recurring: [overdueRent] });
   await dismissBanner(page);
 
   // It shows as overdue, not "due today" — the due date is in a previous month.
@@ -55,7 +58,7 @@ test("an overdue bill paid after the month rolled over clears and stays cleared"
 });
 
 test("skipping an overdue bill clears it without booking an expense", async ({ page }) => {
-  await gotoLocal(page, { ...funded(), expenses: [makeExpense()], recurring: [overdueRent] });
+  await gotoLocal(page, { ...funded(), expenses: [makeExpense({ date: localIso(today) })], recurring: [overdueRent] });
   await dismissBanner(page);
 
   await expect(page.getByText(/Rent overdue/i).first()).toBeVisible();
@@ -68,7 +71,7 @@ test("skipping an overdue bill clears it without booking an expense", async ({ p
 });
 
 test("the notification centre agrees with the card once the bill is paid", async ({ page }) => {
-  await gotoLocal(page, { ...funded(), expenses: [makeExpense()], recurring: [overdueRent] });
+  await gotoLocal(page, { ...funded(), expenses: [makeExpense({ date: localIso(today) })], recurring: [overdueRent] });
   await dismissBanner(page);
 
   const bell = page.getByRole("button", { name: /Notifications/i });

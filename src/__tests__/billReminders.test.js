@@ -155,7 +155,7 @@ describe('checkBillReminders — settlements', () => {
     ];
     const result = checkBillReminders([], splits, '2024-04-15', noDue, notDueToday);
     expect(result).toHaveLength(1);
-    expect(result[0].msg).toBe('You owe ₹117.5 — Rakesh (3 IOUs)');
+    expect(result[0].msg).toBe('You owe ₹117.50 — Rakesh (3 IOUs)');
   });
 
   it('reminds on the REMAINING balance after partial settlements', () => {

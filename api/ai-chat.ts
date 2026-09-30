@@ -87,7 +87,9 @@ interface ChatContext {
   coverage?:       { from?: string; to?: string; total?: number; sent?: number };
   topCategories?:  TopCategory[];
   walletBalances?: WalletBalance[];
-  recurringBills?: { name?: string; amount?: number; due?: string | null }[];
+  recurringBills?: { name?: string; amount?: number; due?: string | null; outstanding?: boolean }[];
+  /** Recurring INCOME (salary, rent received) — never listed as a bill. */
+  recurringIncome?: { name?: string; amount?: number; expected?: string | null }[];
   iou?:            { owedToMe?: number; iOwe?: number };
   recurringCount?: number;
   streak?:         number;
@@ -173,8 +175,12 @@ function buildPrompt(question: string, ctx: ChatContext): string {
   if (topCats.length) sections.push(`TOP CATEGORIES (all-time):\n${topCats.map(c => `  ${c.name}: ${rupee(c.amount)} (${c.pct}%)`).join("\n")}`);
 
   const bills = ctx.recurringBills || [];
-  if (bills.length) sections.push(`ACTIVE RECURRING BILLS (${bills.length}):\n${bills.map(b => `  ${b.name || "bill"}: ${rupee(b.amount || 0)}${b.due ? ` (next due ${b.due})` : ""}`).join("\n")}`);
+  // `due` is the CURRENT cycle's date, which is often already paid — calling
+  // it "next due" had the model tell people a paid bill was coming up.
+  if (bills.length) sections.push(`ACTIVE RECURRING BILLS (${bills.length}):\n${bills.map(b => `  ${b.name || "bill"}: ${rupee(b.amount || 0)}${b.due ? ` (current cycle ${b.due}${b.outstanding === true ? ", UNPAID" : b.outstanding === false ? (b.due > (ctx.today || "") ? ", upcoming" : ", paid") : ""})` : ""}`).join("\n")}`);
   else if (ctx.recurringCount) sections.push(`Active recurring bills: ${ctx.recurringCount}`);
+  const recInc = ctx.recurringIncome || [];
+  if (recInc.length) sections.push(`RECURRING INCOME (${recInc.length}) — money the user receives, not bills:\n${recInc.map(r => `  ${r.name || "income"}: ${rupee(r.amount || 0)}${r.expected ? ` (expected ${r.expected})` : ""}`).join("\n")}`);
 
   if (ctx.iou && ((ctx.iou.owedToMe || 0) > 0 || (ctx.iou.iOwe || 0) > 0)) {
     sections.push(`PENDING IOUs: others owe user ${rupee(ctx.iou.owedToMe || 0)}, user owes ${rupee(ctx.iou.iOwe || 0)}`);

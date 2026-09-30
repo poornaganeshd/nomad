@@ -2,7 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import nodemailer from "nodemailer";
 import { format } from "date-fns";
 import {
-  makeHeaders, userGet, userPatch, userPost,
+  makeHeaders, userGet, userGetAll, userPatch, userPost,
   withRetry, getPeriod, getNextSendAt, processSchedule,
 } from "./_shared.js";
 import type { UserEntry, Schedule } from "./_shared.js";
@@ -146,15 +146,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     try {
       // Settlements come along so a partially-paid IOU reminds on what's LEFT,
       // not on its original amount.
+      // Paged: past Supabase's 1000-row cap an unpaged settlements read came
+      // back short and "You owe" stopped subtracting what had been paid.
       const [recurring, splits, settlements] = await Promise.all([
-        userGet(user.supabase_url, user.anon_key, `/recurring?deleted_at=is.null&select=*`),
-        userGet(user.supabase_url, user.anon_key, `/splits?direction=eq.owe&deleted_at=is.null&select=*`),
+        userGetAll(user.supabase_url, user.anon_key, `/recurring?deleted_at=is.null&select=*`),
+        userGetAll(user.supabase_url, user.anon_key, `/splits?direction=eq.owe&deleted_at=is.null&select=*`),
         // Columns are camelCase in this schema (quoted identifiers) — see
         // nomad_setup.sql; a snake_case select would 400.
-        userGet(user.supabase_url, user.anon_key, `/settlements?select=splitId,amount,excess`).catch(() => []),
-      ]) as [RecurringRow[], SplitRow[], SettlementRow[]];
+        userGetAll(user.supabase_url, user.anon_key, `/settlements?select=splitId,amount,excess`).catch(() => null),
+      ]) as [RecurringRow[], SplitRow[], SettlementRow[] | null];
 
-      const digest = buildBillDigest(recurring, splits, todayStr, settlements || []);
+      // Without the settlements the IOU leg can only quote ORIGINAL amounts —
+      // "You owe ₹300" for a debt that is down to ₹60. Say nothing about IOUs
+      // today rather than say that; the bills leg does not need them.
+      const digest = buildBillDigest(recurring, settlements ? splits : [], todayStr, settlements || []);
       // Stamp the run date FIRST (upsert — the prefs row may not exist when the
       // user only enabled web push), so a same-day re-trigger can't re-push.
       await fetch(`${user.supabase_url}/rest/v1/notification_prefs`, {

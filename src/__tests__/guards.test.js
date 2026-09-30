@@ -7,6 +7,7 @@ import {
   settlementNetAmount,
   isSuspiciousExcess,
   settleWritesIncoming,
+  defaultImportWalletId,
 } from '../financeUtils.js';
 
 // Regression "wall" for the class of bugs that kept recurring in App.jsx:
@@ -178,5 +179,34 @@ describe('settleWritesIncoming — the one rule for offering/accepting UPI Lite'
 
   it('defaults to "no incoming" with nothing passed', () => {
     expect(settleWritesIncoming()).toBe(false);
+  });
+});
+
+// Every import (bank CSV, ledger photo, statement reconcile) books into this
+// wallet by default. It used to be wallets[0] — UPI Lite in the default seed
+// order — so every income row was refused and most expenses hit the ₹5000 cap,
+// under a preview that said "Bank wallet".
+describe('defaultImportWalletId', () => {
+  const isLite = w => w?.id === 'upi_lite' || !!w?.upiLite;
+  it('prefers bank over the first wallet', () => {
+    expect(defaultImportWalletId([{ id: 'upi_lite' }, { id: 'cash' }, { id: 'bank' }], isLite)).toBe('bank');
+  });
+  it('never picks a UPI Lite wallet when anything else can receive', () => {
+    expect(defaultImportWalletId([{ id: 'upi_lite' }, { id: 'hdfc' }], isLite)).toBe('hdfc');
+    expect(defaultImportWalletId([{ id: 'lite2', upiLite: true }, { id: 'cash' }], isLite)).toBe('cash');
+  });
+  it('falls back to the only wallet there is, then to "bank"', () => {
+    expect(defaultImportWalletId([{ id: 'upi_lite' }], isLite)).toBe('upi_lite');
+    expect(defaultImportWalletId([], isLite)).toBe('bank');
+  });
+});
+
+// The app refused every UPI Lite payment past ₹5,000 in a day — the BALANCE
+// cap, not the spend limit. NPCI allows ₹10,000 of UPI Lite spend a day.
+describe('UPI Lite limits', () => {
+  it('daily spend is ₹10,000, distinct from the ₹5,000 balance cap', async () => {
+    const { UPI_LITE_DAILY_SPEND, UPI_LITE_MAX_BALANCE } = await import('../financeUtils.js');
+    expect(UPI_LITE_DAILY_SPEND).toBe(10000);
+    expect(UPI_LITE_MAX_BALANCE).toBe(5000);
   });
 });

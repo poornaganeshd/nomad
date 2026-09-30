@@ -63,18 +63,6 @@ const lastDayOfMonth = (year: number, monthIndex: number) => new Date(year, mont
 const withClampedDay = (year: number, monthIndex: number, desiredDay: number) =>
   new Date(year, monthIndex, Math.min(Math.max(1, desiredDay || 1), lastDayOfMonth(year, monthIndex)));
 
-const fullMonthsBetween = (start: Date, end: Date) => {
-  let months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
-  const daysInEndMonth = new Date(end.getFullYear(), end.getMonth() + 1, 0).getDate();
-  if (end.getDate() < Math.min(start.getDate(), daysInEndMonth)) months -= 1;
-  return months;
-};
-const fullYearsBetween = (start: Date, end: Date) => {
-  let years = end.getFullYear() - start.getFullYear();
-  if (end.getMonth() < start.getMonth() || (end.getMonth() === start.getMonth() && end.getDate() < start.getDate())) years -= 1;
-  return years;
-};
-
 const getRecurringAnchorDate = (r: RecurringRow) => r.lastPaidDate || r.lastSkippedDate || r.startDate;
 
 // Port of src/financeUtils.js getRecurringDueDate.
@@ -89,21 +77,21 @@ export function getRecurringDueDate(record: RecurringRow, todayString: string): 
     return null;
   }
   if (start > today) return null;
-  if (record.frequency === "monthly") {
-    const dom = record.dayOfMonth || start.getDate();
-    let months = Math.max(0, fullMonthsBetween(start, today));
-    let due = withClampedDay(start.getFullYear(), start.getMonth() + months, dom);
-    const daysInDueMonth = new Date(due.getFullYear(), due.getMonth() + 1, 0).getDate();
-    if (dom > daysInDueMonth && due < today) { months += 1; due = withClampedDay(start.getFullYear(), start.getMonth() + months, dom); }
-    if (due < start) { months += 1; due = withClampedDay(start.getFullYear(), start.getMonth() + months, dom); }
-    return isoDate(due);
-  }
-  if (record.frequency === "yearly") {
-    const monthIndex = Math.max(0, (record.yearMonth || (start.getMonth() + 1)) - 1);
-    const desiredDay = record.yearDay || start.getDate();
-    const startAnchor = withClampedDay(start.getFullYear(), monthIndex, desiredDay);
-    const years = Math.max(0, fullYearsBetween(startAnchor, today));
-    return isoDate(withClampedDay(start.getFullYear() + years, monthIndex, desiredDay));
+  // Latest occurrence on or before today, never before the first one on or
+  // after startDate (see financeUtils for the three bugs the old
+  // start-day-anchored month count caused).
+  if (record.frequency === "monthly" || record.frequency === "yearly") {
+    const monthly = record.frequency === "monthly";
+    const dom = Number(record.dayOfMonth) || start.getDate();
+    const ym = Math.max(0, (Number(record.yearMonth) || (start.getMonth() + 1)) - 1);
+    const yd = Number(record.yearDay) || start.getDate();
+    // The occurrence in month m of year y (monthly) / in year y (yearly).
+    const at = (y: number, m: number) => (monthly ? withClampedDay(y, m, dom) : withClampedDay(y, ym, yd));
+    let due = at(today.getFullYear(), today.getMonth());
+    if (due > today) due = monthly ? at(today.getFullYear(), today.getMonth() - 1) : at(today.getFullYear() - 1, 0);
+    let first = at(start.getFullYear(), start.getMonth());
+    if (first < start) first = monthly ? at(start.getFullYear(), start.getMonth() + 1) : at(start.getFullYear() + 1, 0);
+    return isoDate(due < first ? first : due);
   }
   if (record.frequency === "custom") {
     const intervalDays = Number(record.intervalDays) || 0;
@@ -123,10 +111,18 @@ export function isRecurringDueToday(record: RecurringRow, todayString: string): 
   if (!record.active || record.startDate > todayString) return false;
   const dueDate = getRecurringDueDate(record, todayString);
   if (!dueDate || dueDate > todayString) return false;
-  if (record.frequency === "monthly") return !(record.lastPaidDate?.slice(0, 7) === dueDate.slice(0, 7) || record.lastSkippedDate?.slice(0, 7) === dueDate.slice(0, 7));
-  if (record.frequency === "yearly") return !(record.lastPaidDate?.slice(0, 4) === dueDate.slice(0, 4) || record.lastSkippedDate?.slice(0, 4) === dueDate.slice(0, 4));
+  if (record.frequency === "monthly" || record.frequency === "yearly") return !isCycleHandled(record, dueDate);
   if (!record.lastPaidDate && !record.lastSkippedDate) return true;
   return getRecurringAnchorDate(record) !== dueDate;
+}
+
+// Port of src/financeUtils.js isRecurringCycleHandled: a cycle is settled by a
+// paid/skipped action ON or AFTER its due date. This port still compared the
+// calendar PERIOD (YYYY-MM) long after the client stopped, so paying
+// September's rent on 2 Oct left the daily push saying "Rent overdue" until
+// the next due date — and then silently swallowed October's unpaid cycle.
+function isCycleHandled(r: RecurringRow, dueDate: string): boolean {
+  return (!!r.lastPaidDate && r.lastPaidDate >= dueDate) || (!!r.lastSkippedDate && r.lastSkippedDate >= dueDate);
 }
 
 const addDaysStr = (dateStr: string, n: number) => {
@@ -138,13 +134,19 @@ const addDaysStr = (dateStr: string, n: number) => {
 
 // Mirrors src/billReminders.js "not yet handled" test for upcoming bills.
 function isNotHandled(r: RecurringRow, dueStr: string): boolean {
-  if (r.frequency === "monthly") return !(r.lastPaidDate?.slice(0, 7) === dueStr.slice(0, 7) || r.lastSkippedDate?.slice(0, 7) === dueStr.slice(0, 7));
-  if (r.frequency === "yearly") return !(r.lastPaidDate?.slice(0, 4) === dueStr.slice(0, 4) || r.lastSkippedDate?.slice(0, 4) === dueStr.slice(0, 4));
+  if (r.frequency === "monthly" || r.frequency === "yearly") return !isCycleHandled(r, dueStr);
   if (!r.lastPaidDate && !r.lastSkippedDate) return true;
   return getRecurringAnchorDate(r) !== dueStr;
 }
 
-const inr = (n: number) => "₹" + Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 });
+// Same rule as the app's formatMoney: whole rupees plain, anything else to
+// the paisa. Rounding to 0 digits told someone who owes ₹117.50 that they
+// owe ₹118 — a figure that appears nowhere in the app.
+const inr = (n: number) => {
+  const v = Number(n) || 0;
+  const whole = Math.abs(v - Math.round(v)) < 0.005;
+  return "₹" + v.toLocaleString("en-IN", { minimumFractionDigits: whole ? 0 : 2, maximumFractionDigits: whole ? 0 : 2 });
+};
 
 export interface BillDigest {
   title: string;
